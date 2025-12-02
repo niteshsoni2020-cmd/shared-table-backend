@@ -1,4 +1,4 @@
-// server.js (COMPLETE PRODUCTION VERSION)
+// server.js
 
 require('dotenv').config();
 const express = require("express");
@@ -8,19 +8,21 @@ const multer = require("multer");
 const { CloudinaryStorage } = require("multer-storage-cloudinary");
 const cloudinary = require("cloudinary").v2;
 const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
+const nodemailer = require("nodemailer");
 
+// 1. Initialize App (MUST BE FIRST)
 const app = express();
 const PORT = process.env.PORT || 4000;
 
 app.use(cors());
 app.use(express.json());
 
-// --- 1. CONNECT TO MONGODB ---
+// --- 2. CONNECT TO MONGODB ---
 mongoose.connect(process.env.MONGO_URI)
   .then(() => console.log("✅ Connected to MongoDB Atlas"))
   .catch(err => console.error("❌ MongoDB Error:", err));
 
-// --- 2. CLOUDINARY CONFIG ---
+// --- 3. SETUP CLOUDINARY (Image Cloud) ---
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
   api_key: process.env.CLOUDINARY_API_KEY,
@@ -36,8 +38,31 @@ const storage = new CloudinaryStorage({
 });
 const upload = multer({ storage: storage });
 
-// --- 3. MONGOOSE SCHEMAS ---
-// We use a helper to ensure frontend gets 'id' (string) instead of '_id' (object)
+// --- 4. SETUP EMAIL TRANSPORTER ---
+const transporter = nodemailer.createTransport({
+  service: 'gmail',
+  auth: {
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASS
+  }
+});
+
+async function sendEmail({ to, subject, html }) {
+  if (!process.env.EMAIL_USER) return; // Skip if no email set
+  try {
+    await transporter.sendMail({
+      from: `"The Shared Table Story" <${process.env.EMAIL_USER}>`,
+      to,
+      subject,
+      html
+    });
+    console.log(`📧 Email sent to ${to}`);
+  } catch (err) {
+    console.error("❌ Email failed:", err.message);
+  }
+}
+
+// --- 5. MONGOOSE SCHEMAS ---
 const schemaOpts = { toJSON: { virtuals: true }, toObject: { virtuals: true } };
 
 const userSchema = new mongoose.Schema({
@@ -63,6 +88,7 @@ const experienceSchema = new mongoose.Schema({
   lat: { type: Number, default: -37.8136 },
   lng: { type: Number, default: 144.9631 },
   privateCapacity: Number, privatePrice: Number,
+  dynamicDiscounts: Object,
   averageRating: { type: Number, default: 0 },
   reviewCount: { type: Number, default: 0 },
   createdAt: { type: Date, default: Date.now }
@@ -71,7 +97,7 @@ const experienceSchema = new mongoose.Schema({
 const bookingSchema = new mongoose.Schema({
   experienceId: String, guestId: String,
   numGuests: Number, bookingDate: String, timeSlot: String,
-  status: { type: String, default: "pending_payment" }, // Starts as pending
+  status: { type: String, default: "pending_payment" },
   stripeSessionId: String,
   paymentStatus: { type: String, default: "unpaid" },
   pricing: Object,
@@ -95,12 +121,11 @@ const Booking = mongoose.model("Booking", bookingSchema);
 const Review = mongoose.model("Review", reviewSchema);
 const Bookmark = mongoose.model("Bookmark", bookmarkSchema);
 
-// --- 4. MIDDLEWARE ---
+// --- 6. MIDDLEWARE ---
 async function authMiddleware(req, res, next) {
   const authHeader = req.headers["authorization"];
   if (!authHeader) return res.status(401).json({ message: "Missing header" });
   const token = authHeader.split(" ")[1]; 
-  // Legacy ID check vs Mongo ID check
   const dbId = token.replace("user-", ""); 
   
   try {
@@ -124,7 +149,7 @@ function sanitizeUser(u) {
     return { ...safe, isHost: obj.isPremiumHost }; 
 }
 
-// --- 5. HELPERS ---
+// --- 7. HELPERS ---
 function calculateRefund(booking, experience) {
     const now = new Date();
     const startStr = experience.startDate + "T" + (booking.timeSlot ? booking.timeSlot.split('-')[0] : '00:00');
@@ -134,9 +159,7 @@ function calculateRefund(booking, experience) {
     const hoursUntilStart = (startTime - now) / (1000 * 60 * 60);
     const hoursSinceBooked = (now - bookingTime) / (1000 * 60 * 60);
 
-    // 48h Rule
     if (hoursUntilStart < 48) return { percent: 0, amount: 0, reason: "Cancellation within 48h of start" };
-    // 24h Cooling Off Rule
     if (hoursSinceBooked > 24) {
         const refund = booking.pricing.totalPrice * 0.70;
         return { percent: 70, amount: parseFloat(refund.toFixed(2)), reason: "Standard cancellation (30% fee)" };
@@ -145,11 +168,27 @@ function calculateRefund(booking, experience) {
 }
 
 function getDiscountPercent(experience, guests) {
-    // Simple discount logic for now
-    if (guests <= 2) return 0;
-    if (guests <= 4) return 15;
-    return 30;
+    const dd = experience.dynamicDiscounts || {};
+    let best = 0;
+    for (let g = 1; g <= guests; g++) {
+      const val = dd[g] ?? dd[String(g)];
+      if (typeof val === "number" && val >= best) best = val;
+    }
+    if (Object.keys(dd).length === 0) {
+        if (guests <= 2) return 0;
+        if (guests <= 4) return 15;
+        return 30;
+    }
+    return best;
 }
+
+function getMaxDiscountForExperience(exp) {
+    const dd = exp.dynamicDiscounts || {};
+    let max = 0;
+    Object.values(dd).forEach(v => { if(v > max) max = v; });
+    return max || 30;
+}
+
 
 // ====================== ROUTES ======================
 
@@ -163,8 +202,16 @@ app.post("/api/upload", upload.array("photos", 3), (req, res) => {
 app.post("/api/auth/register", async (req, res) => {
   try {
       if (await User.findOne({ email: req.body.email })) return res.status(400).json({ message: "Email taken" });
+      
       const user = new User({ ...req.body, role: "Guest" });
       await user.save();
+      
+      sendEmail({
+          to: user.email,
+          subject: "Welcome to The Shared Table Story! 🌏",
+          html: `<h1>Hi ${user.name},</h1><p>Welcome to our community! You can now book authentic local experiences or become a host.</p>`
+      });
+
       res.status(201).json({ token: `user-${user._id}`, user: sanitizeUser(user) });
   } catch (e) { res.status(500).json({ message: "Error" }); }
 });
@@ -215,7 +262,6 @@ app.put("/api/experiences/:id", authMiddleware, async (req, res) => {
 
     const { images, maxGuests, ...updates } = req.body;
     
-    // 20% Capacity Logic
     if (maxGuests) {
         const allowed = Math.ceil(exp.originalMaxGuests * 1.20);
         if (maxGuests > allowed) return res.status(400).json({ message: `Max capacity increase limit: ${allowed}` });
@@ -234,7 +280,6 @@ app.delete("/api/experiences/:id", authMiddleware, async (req, res) => {
     if (!exp) return res.status(404).json({ message: "Not found" });
     if (exp.hostId !== String(req.user._id) && !req.user.isAdmin) return res.status(403).json({ message: "Unauthorized" });
 
-    // Cancel active bookings and refund
     await Booking.updateMany(
         { experienceId: exp._id, status: 'confirmed' },
         { status: 'cancelled_by_host', refundAmount: 100, cancellationReason: "Host deleted listing" }
@@ -278,19 +323,19 @@ app.post("/api/experiences/:id/book", authMiddleware, async (req, res) => {
 
   const { numGuests, isPrivate, bookingDate, timeSlot } = req.body;
   let total = exp.price * numGuests;
+  let discount = getDiscountPercent(exp, numGuests);
   if (isPrivate && exp.privatePrice) total = exp.privatePrice;
+  else total = total * (1 - discount / 100);
   
-  // 1. Create Pending Booking
   const booking = new Booking({
       experienceId: exp._id, guestId: req.user._id,
       numGuests, bookingDate, timeSlot, 
-      status: "pending_payment", // Wait for payment
+      status: "pending_payment",
       paymentStatus: "unpaid",
-      pricing: { totalPrice: total }
+      pricing: { totalPrice: parseFloat(total.toFixed(2)), discountPercent: discount }
   });
   await booking.save();
 
-  // 2. Create Stripe Session
   try {
       const session = await stripe.checkout.sessions.create({
         payment_method_types: ['card'],
@@ -303,7 +348,6 @@ app.post("/api/experiences/:id/book", authMiddleware, async (req, res) => {
             quantity: 1,
         }],
         mode: 'payment',
-        // Use headers.origin to allow localhost OR production URL dynamically
         success_url: `${req.headers.origin}/success.html?session_id={CHECKOUT_SESSION_ID}&booking_id=${booking._id}`,
         cancel_url: `${req.headers.origin}/experience.html?id=${exp._id}`,
       });
@@ -311,15 +355,13 @@ app.post("/api/experiences/:id/book", authMiddleware, async (req, res) => {
       booking.stripeSessionId = session.id;
       await booking.save();
       
-      res.json({ url: session.url }); // Send Stripe URL to frontend
-
+      res.json({ url: session.url });
   } catch (e) {
       console.error("Stripe Error:", e);
       res.status(500).json({ message: "Payment creation failed" });
   }
 });
 
-// VERIFY PAYMENT (Called by Success Page)
 app.post("/api/bookings/verify", authMiddleware, async (req, res) => {
     const { bookingId, sessionId } = req.body;
     const booking = await Booking.findById(bookingId);
@@ -333,6 +375,13 @@ app.post("/api/bookings/verify", authMiddleware, async (req, res) => {
             booking.status = "confirmed";
             booking.paymentStatus = "paid";
             await booking.save();
+
+            sendEmail({
+                to: req.user.email,
+                subject: "Booking Confirmed! 🎉",
+                html: `<h1>You're going to ${booking.experienceId}!</h1><p>Your booking for ${booking.bookingDate} is confirmed.</p>`
+            });
+
             return res.json({ status: "confirmed" });
         } else {
             return res.status(400).json({ status: "unpaid" });
@@ -356,7 +405,6 @@ app.post("/api/bookings/:id/cancel", authMiddleware, async (req, res) => {
 });
 
 app.get("/api/my/bookings", authMiddleware, async (req, res) => {
-    // Return active bookings or cancelled ones
     const bookings = await Booking.find({ guestId: req.user._id });
     res.json(bookings);
 });
@@ -394,13 +442,12 @@ app.post("/api/reviews", authMiddleware, async (req, res) => {
     await Experience.findByIdAndUpdate(experienceId, { averageRating: avg, reviewCount: reviews.length });
     res.json(review);
 });
-
 app.get("/api/experiences/:id/reviews", async (req, res) => {
     const reviews = await Review.find({ experienceId: req.params.id }).sort({ date: -1 });
     res.json(reviews);
 });
 
-// --- ADMIN STATS ---
+// --- ADMIN ---
 app.get("/api/admin/stats", adminMiddleware, async (req, res) => {
     const userCount = await User.countDocuments();
     const expCount = await Experience.countDocuments();
@@ -418,15 +465,32 @@ app.delete("/api/admin/users/:id", adminMiddleware, async (req, res) => {
     res.json({ message: "User deleted" });
 });
 
-// --- RECOMMENDATIONS ---
+// --- MISC ---
 app.get("/api/recommendations", authMiddleware, async (req, res) => {
-    const exps = await Experience.find().sort({ averageRating: -1 }).limit(4);
-    res.json(exps);
+    const user = req.user;
+    const exps = await Experience.find().sort({ averageRating: -1 }).limit(8); // Get pool
+    // Simple scoring logic
+    const scored = exps.map(exp => {
+        let score = 0;
+        if(user.location && exp.city.toLowerCase().includes(user.location.toLowerCase())) score += 5;
+        if(exp.tags) { const matches = exp.tags.filter(tag => (user.preferences||[]).includes(tag)); score += (matches.length * 3); }
+        score += (exp.averageRating || 0);
+        return { exp, score };
+    });
+    scored.sort((a, b) => b.score - a.score);
+    res.json(scored.slice(0, 4).map(s => s.exp));
 });
 
-app.get("/api/discounts/max", async (req, res) => res.json({ maxDiscount: 30 }));
+app.get("/api/discounts/max", async (req, res) => {
+    const exps = await Experience.find();
+    let max = 0;
+    exps.forEach(exp => {
+        const d = getMaxDiscountForExperience(exp);
+        if(d > max) max = d;
+    });
+    res.json({ maxDiscount: max });
+});
 
-// --- SEED ADMIN ---
 app.get("/api/seed", async (req, res) => {
     const email = "admin@sharedtable.com";
     if (!await User.findOne({ email })) {
