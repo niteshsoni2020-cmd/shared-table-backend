@@ -38,17 +38,20 @@ const storage = new CloudinaryStorage({
 });
 const upload = multer({ storage: storage });
 
-// --- 4. SETUP EMAIL (UPDATED FIX) ---
-// We now use explicit Host and Port 465 to prevent timeouts
+// --- 4. SETUP EMAIL (RELIABLE FIX) ---
 const transporter = nodemailer.createTransport({
-  host: "smtp.gmail.com",
-  port: 465,
-  secure: true, // Use SSL
+  service: 'gmail', // Use the built-in service shorthand (handles host/port automatically)
   auth: {
     user: process.env.EMAIL_USER,
     pass: process.env.EMAIL_PASS
   },
-  connectionTimeout: 10000 // 10 seconds
+  // These custom settings help prevent timeouts in cloud environments
+  pool: true, // Use pooled connections to save time
+  maxConnections: 1,
+  rateLimit: 5, // Limit sending rate to avoid Gmail blocks
+  tls: {
+    rejectUnauthorized: false // Helps if Render has SSL certificate quirks
+  }
 });
 
 async function sendEmail({ to, subject, html }) {
@@ -57,13 +60,13 @@ async function sendEmail({ to, subject, html }) {
       return;
   }
   try {
-    await transporter.sendMail({
+    const info = await transporter.sendMail({
       from: `"The Shared Table Story" <${process.env.EMAIL_USER}>`,
       to,
       subject,
       html
     });
-    console.log(`📧 Email successfully sent to ${to}`);
+    console.log(`📧 Email sent to ${to}: ${info.messageId}`);
   } catch (err) {
     console.error("❌ Email failed:", err.message);
   }
