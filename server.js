@@ -67,7 +67,7 @@ const userSchema = new mongoose.Schema({
   role: { type: String, default: "Guest" },
   profilePic: { type: String, default: "" },
   isPremiumHost: { type: Boolean, default: false },
-  vacationMode: { type: Boolean, default: false }, // NEW: Vacation Mode
+  vacationMode: { type: Boolean, default: false },
   isAdmin: { type: Boolean, default: false },
   bio: String, location: String, mobile: String,
   preferences: [String],
@@ -83,7 +83,8 @@ const experienceSchema = new mongoose.Schema({
   price: Number, maxGuests: Number, originalMaxGuests: Number,
   startDate: String, endDate: String,
   blockedDates: [String],
-  isPaused: { type: Boolean, default: false }, // NEW: Hides listing if host is on vacation
+  availableDays: { type: [String], default: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"] }, // NEW: Availability
+  isPaused: { type: Boolean, default: false },
   tags: [String], timeSlots: [String],
   imageUrl: String, images: [String],
   lat: { type: Number, default: -37.8136 },
@@ -105,7 +106,7 @@ const bookingSchema = new mongoose.Schema({
   paymentStatus: { type: String, default: "unpaid" },
   pricing: Object,
   refundAmount: Number, cancellationReason: String,
-  dispute: { // NEW: Dispute Tracking
+  dispute: {
       active: { type: Boolean, default: false },
       reason: String,
       status: String
@@ -159,23 +160,29 @@ function sanitizeUser(u) {
 
 // --- 7. HELPER: CAPACITY CHECK ---
 async function checkCapacity(experienceId, date, timeSlot, newGuests) {
-    // Count CONFIRMED or PAID bookings for this slot
     const existing = await Booking.find({ 
-        experienceId, 
-        bookingDate: date, 
-        timeSlot, 
-        status: { $in: ['confirmed', 'paid'] } 
+        experienceId, bookingDate: date, timeSlot, status: { $in: ['confirmed', 'paid'] } 
     });
     const currentCount = existing.reduce((sum, b) => sum + b.numGuests, 0);
     const exp = await Experience.findById(experienceId);
     
+    // Check if date is blocked or paused
+    if (exp.isPaused) return { available: false, message: "Host is currently not accepting bookings." };
+    if (exp.blockedDates && exp.blockedDates.includes(date)) return { available: false, message: "Date is blocked by host." };
+
+    // Check Day of Week availability
+    const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    const searchDay = days[new Date(date).getUTCDay()];
+    if (exp.availableDays && !exp.availableDays.includes(searchDay)) {
+        return { available: false, message: `Host is not available on ${searchDay}s.` };
+    }
+    
     if (currentCount + newGuests > exp.maxGuests) {
-        return { available: false, remaining: exp.maxGuests - currentCount };
+        return { available: false, remaining: exp.maxGuests - currentCount, message: `Only ${exp.maxGuests - currentCount} spots left.` };
     }
     return { available: true };
 }
 
-// --- 8. HELPERS ---
 function calculateRefund(booking, experience) {
     const now = new Date();
     const startStr = experience.startDate + "T" + (booking.timeSlot ? booking.timeSlot.split('-')[0] : '00:00');
@@ -224,14 +231,10 @@ app.get("/api/me", authMiddleware, (req, res) => res.json(sanitizeUser(req.user)
 
 app.put("/api/me", authMiddleware, async (req, res) => {
     const { role, isAdmin, payoutDetails, vacationMode, ...updates } = req.body;
-    
-    // Handle Vacation Mode Toggle
     if (typeof vacationMode !== 'undefined') {
         req.user.vacationMode = vacationMode;
-        // Update all user's listings to match vacation state
         await Experience.updateMany({ hostId: req.user._id }, { isPaused: vacationMode });
     }
-
     Object.assign(req.user, updates);
     await req.user.save();
     res.json(sanitizeUser(req.user));
@@ -256,7 +259,7 @@ app.post("/api/experiences", authMiddleware, async (req, res) => {
         hostId: req.user._id, hostName: req.user.name, hostPic: req.user.profilePic || "",
         maxGuests: Number(maxGuests), originalMaxGuests: Number(maxGuests),
         images: images || [], imageUrl: (images && images.length > 0) ? images[0] : null,
-        isPaused: req.user.vacationMode || false, // Inherit vacation status
+        isPaused: req.user.vacationMode || false,
         ...rest
     });
     await exp.save();
@@ -282,12 +285,23 @@ app.delete("/api/experiences/:id", authMiddleware, async (req, res) => {
     res.json({ message: "Deleted" });
 });
 
+// UPDATED: Search Logic with Day Filtering
 app.get("/api/experiences", async (req, res) => {
     const { city, q, sort, date } = req.query;
-    let query = { isPaused: false }; // FILTER: Only active listings
+    let query = { isPaused: false };
     if (city) query.city = { $regex: city, $options: "i" };
     if (q) query.title = { $regex: q, $options: "i" };
-    if (date) { query.startDate = { $lte: date }; query.endDate = { $gte: date }; }
+    
+    if (date) {
+        query.startDate = { $lte: date };
+        query.endDate = { $gte: date };
+        
+        // Filter by Day of Week
+        const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+        const d = new Date(date);
+        const dayName = days[d.getUTCDay()]; // Use UTC to match standardized date string
+        query.availableDays = { $in: [dayName] };
+    }
     
     let sortObj = {};
     if (sort === 'price_asc') sortObj.price = 1;
@@ -310,7 +324,7 @@ app.post("/api/experiences/:id/book", authMiddleware, async (req, res) => {
 
   // SAFETY: Capacity Check
   const cap = await checkCapacity(exp._id, bookingDate, timeSlot, Number(numGuests));
-  if (!cap.available) return res.status(400).json({ message: `Only ${cap.remaining} spots left for this slot.` });
+  if (!cap.available) return res.status(400).json({ message: cap.message || `Only ${cap.remaining} spots left.` });
 
   let total = exp.price * numGuests;
   if (isPrivate && exp.privatePrice) total = exp.privatePrice;
@@ -346,8 +360,6 @@ app.post("/api/bookings/verify", authMiddleware, async (req, res) => {
             booking.status = "confirmed"; booking.paymentStatus = "paid";
             await booking.save();
             sendEmail({ to: req.user.email, subject: "Confirmed! 🎉", html: `<p>See you on ${booking.bookingDate}</p>` });
-            
-            // Notify Host
             const exp = await Experience.findById(booking.experienceId);
             const host = await User.findById(exp.hostId);
             if (host) {
@@ -360,7 +372,6 @@ app.post("/api/bookings/verify", authMiddleware, async (req, res) => {
     } catch (e) { res.status(500).json({ message: "Verification failed" }); }
 });
 
-// NEW: RESCHEDULE ENDPOINT
 app.put("/api/bookings/:id/reschedule", authMiddleware, async (req, res) => {
     const { newDate, newSlot } = req.body;
     const b = await Booking.findById(req.params.id);
@@ -368,7 +379,7 @@ app.put("/api/bookings/:id/reschedule", authMiddleware, async (req, res) => {
 
     // Check Capacity on NEW date
     const cap = await checkCapacity(b.experienceId, newDate, newSlot, b.numGuests);
-    if (!cap.available) return res.status(400).json({ message: "New slot is full." });
+    if (!cap.available) return res.status(400).json({ message: cap.message });
 
     b.bookingDate = newDate;
     b.timeSlot = newSlot;
@@ -379,7 +390,6 @@ app.put("/api/bookings/:id/reschedule", authMiddleware, async (req, res) => {
 app.post("/api/bookings/:id/cancel", authMiddleware, async (req, res) => {
     const b = await Booking.findById(req.params.id);
     if (b.guestId.toString() !== String(req.user._id)) return res.status(403).json({ message: "Unauthorized" });
-    
     const exp = await Experience.findById(b.experienceId);
     const refundData = calculateRefund(b, exp);
     b.status = "cancelled"; b.refundAmount = refundData.amount; b.cancellationReason = refundData.reason;
@@ -387,12 +397,10 @@ app.post("/api/bookings/:id/cancel", authMiddleware, async (req, res) => {
     res.json({ message: "Cancelled", refund: refundData });
 });
 
-// NEW: REPORT ISSUE ENDPOINT
 app.post("/api/bookings/:id/report", authMiddleware, async (req, res) => {
     const { reason } = req.body;
     const b = await Booking.findById(req.params.id);
     if (!b) return res.status(404).json({ message: "Not found" });
-    
     b.dispute = { active: true, reason, status: "pending_admin" };
     await b.save();
     res.json({ message: "Issue reported. Admin will review." });
@@ -410,7 +418,7 @@ app.get("/api/host/bookings/:experienceId", authMiddleware, async (req, res) => 
     res.json(bookings);
 });
 
-// --- REVIEWS & BOOKMARKS (Standard) ---
+// --- REVIEWS & BOOKMARKS ---
 app.post("/api/bookmarks/:experienceId", authMiddleware, async (req, res) => {
     const { experienceId } = req.params; const userId = req.user._id;
     const existing = await Bookmark.findOne({ userId, experienceId });
