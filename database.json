@@ -1,0 +1,80 @@
+{
+  "users": [
+    {
+      "id": 1,
+      "name": "Super Admin",
+      "email": "admin@sharedtable.com",
+      "password": "admin",
+      "role": "Admin",
+      "isAdmin": true,
+      "isPremiumHost": true,
+      "bio": "Admin",
+      "agreements": {
+        "termsAndWaiver": {
+          "agreed": true,
+          "date": "2025-12-01T02:10:24.331Z"
+        }
+      },
+      "mobile": "",
+      "location": "",
+      "preferences": []
+    },
+    {
+      "id": 2,
+      "name": "Aarav Host",
+      "email": "host@example.com",
+      "password": "123",
+      "role": "Host",
+      "isPremiumHost": true,
+      "bio": "Hosting",
+      "agreements": {
+        "termsAndWaiver": {
+          "agreed": true
+        },
+        "hostDeclaration": {
+          "agreed": true
+        }
+      },
+      "payoutDetails": {
+        "bsb": "000",
+        "country": "Australia"
+      }
+    }
+  ],
+  "experiences": [
+    {
+      "id": 1,
+      "hostId": 2,
+      "title": "Diwali Dinner",
+      "city": "Melbourne",
+      "price": 80,
+      "maxGuests": 10,
+      "originalMaxGuests": 10,
+      "tags": [
+        "Food & Dining"
+      ],
+      "timeSlots": [
+        "18:00-20:00"
+      ],
+      "images": [
+        "https://images.unsplash.com/photo-1524492412937-b28074a5d7da"
+      ],
+      "imageUrl": "https://images.unsplash.com/photo-1524492412937-b28074a5d7da",
+      "averageRating": 0,
+      "reviewCount": 0,
+      "createdAt": "2025-12-01T02:10:24.331Z",
+      "startDate": "2025-12-01",
+      "endDate": "2025-12-31"
+    }
+  ],
+  "bookings": [],
+  "reviews": [],
+  "bookmarks": [],
+  "counters": {
+    "user": 3,
+    "experience": 2,
+    "booking": 1,
+    "review": 1,
+    "bookmark": 1
+  }
+}
