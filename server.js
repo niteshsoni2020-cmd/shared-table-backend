@@ -1,4 +1,4 @@
-// server.js (FIXED EMAIL CONNECTION)
+// server.js
 
 require('dotenv').config();
 const express = require("express");
@@ -10,7 +10,7 @@ const cloudinary = require("cloudinary").v2;
 const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 const nodemailer = require("nodemailer");
 
-// 1. Initialize App
+// 1. Initialize App (MUST BE FIRST)
 const app = express();
 const PORT = process.env.PORT || 4000;
 
@@ -38,41 +38,31 @@ const storage = new CloudinaryStorage({
 });
 const upload = multer({ storage: storage });
 
-// --- 4. SETUP EMAIL (RELIABLE FIX) ---
+// --- 4. SETUP EMAIL ---
 const transporter = nodemailer.createTransport({
-  service: 'gmail', // Use the built-in service shorthand (handles host/port automatically)
+  service: 'gmail',
   auth: {
     user: process.env.EMAIL_USER,
     pass: process.env.EMAIL_PASS
-  },
-  // These custom settings help prevent timeouts in cloud environments
-  pool: true, // Use pooled connections to save time
-  maxConnections: 1,
-  rateLimit: 5, // Limit sending rate to avoid Gmail blocks
-  tls: {
-    rejectUnauthorized: false // Helps if Render has SSL certificate quirks
   }
 });
 
 async function sendEmail({ to, subject, html }) {
-  if (!process.env.EMAIL_USER) {
-      console.log("⚠️ No Email User set, skipping email.");
-      return;
-  }
+  if (!process.env.EMAIL_USER) return;
   try {
-    const info = await transporter.sendMail({
+    await transporter.sendMail({
       from: `"The Shared Table Story" <${process.env.EMAIL_USER}>`,
       to,
       subject,
       html
     });
-    console.log(`📧 Email sent to ${to}: ${info.messageId}`);
+    console.log(`📧 Email sent to ${to}`);
   } catch (err) {
     console.error("❌ Email failed:", err.message);
   }
 }
 
-// --- 5. MONGOOSE SCHEMAS ---
+// --- 5. SCHEMAS ---
 const schemaOpts = { toJSON: { virtuals: true }, toObject: { virtuals: true } };
 
 const userSchema = new mongoose.Schema({
@@ -90,6 +80,7 @@ const userSchema = new mongoose.Schema({
 
 const experienceSchema = new mongoose.Schema({
   hostId: String,
+  hostName: String,
   title: String, description: String, city: String,
   price: Number, maxGuests: Number, originalMaxGuests: Number,
   startDate: String, endDate: String,
@@ -216,8 +207,7 @@ app.post("/api/auth/register", async (req, res) => {
       const user = new User({ ...req.body, role: "Guest" });
       await user.save();
       
-      // SEND EMAIL
-      await sendEmail({
+      sendEmail({
           to: user.email,
           subject: "Welcome to The Shared Table Story! 🌏",
           html: `<h1>Hi ${user.name},</h1><p>Welcome to our community! You can now book authentic local experiences or become a host.</p>`
@@ -256,6 +246,7 @@ app.post("/api/experiences", authMiddleware, async (req, res) => {
     const { maxGuests, images, ...rest } = req.body;
     const exp = new Experience({
         hostId: req.user._id,
+        hostName: req.user.name,
         maxGuests: Number(maxGuests),
         originalMaxGuests: Number(maxGuests),
         images: images || [],
@@ -275,7 +266,7 @@ app.put("/api/experiences/:id", authMiddleware, async (req, res) => {
     
     if (maxGuests) {
         const allowed = Math.ceil(exp.originalMaxGuests * 1.20);
-        if (maxGuests > allowed) return res.status(400).json({ message: `Max capacity increase limit: ${allowed}` });
+        if (maxGuests > allowed) return res.status(400).json({ message: `Max capacity limit: ${allowed}` });
         exp.maxGuests = maxGuests;
     }
     
@@ -327,21 +318,16 @@ app.get("/api/experiences/:id", async (req, res) => {
     } catch { res.status(404).json({ message: "Not found" }); }
 });
 
-// --- BOOKINGS & PAYMENTS ---
+// --- BOOKINGS ---
 app.post("/api/experiences/:id/book", authMiddleware, async (req, res) => {
   const exp = await Experience.findById(req.params.id);
-  if (!exp) return res.status(404).json({ message: "Not found" });
-
   const { numGuests, isPrivate, bookingDate, timeSlot } = req.body;
   let total = exp.price * numGuests;
   if (isPrivate && exp.privatePrice) total = exp.privatePrice;
   
   const booking = new Booking({
-      experienceId: exp._id, guestId: req.user._id,
-      numGuests, bookingDate, timeSlot, 
-      status: "pending_payment",
-      paymentStatus: "unpaid",
-      pricing: { totalPrice: parseFloat(total.toFixed(2)) }
+      experienceId: exp._id, guestId: req.user._id, numGuests, bookingDate, timeSlot, 
+      status: "pending_payment", paymentStatus: "unpaid", pricing: { totalPrice: parseFloat(total.toFixed(2)) }
   });
   await booking.save();
 
@@ -374,8 +360,7 @@ app.post("/api/experiences/:id/book", authMiddleware, async (req, res) => {
 app.post("/api/bookings/verify", authMiddleware, async (req, res) => {
     const { bookingId, sessionId } = req.body;
     const booking = await Booking.findById(bookingId);
-    
-    if (!booking) return res.status(404).json({ message: "Booking not found" });
+    if (!booking) return res.status(404).json({ message: "Not found" });
     if (booking.status === "confirmed") return res.json({ status: "confirmed" });
 
     try {
@@ -385,7 +370,8 @@ app.post("/api/bookings/verify", authMiddleware, async (req, res) => {
             booking.paymentStatus = "paid";
             await booking.save();
 
-            await sendEmail({
+            // Email Guest
+            sendEmail({
                 to: req.user.email,
                 subject: "Booking Confirmed! 🎉",
                 html: `<h1>You're going to ${booking.experienceId}!</h1><p>Your booking for ${booking.bookingDate} is confirmed.</p>`
@@ -400,9 +386,8 @@ app.post("/api/bookings/verify", authMiddleware, async (req, res) => {
 
 app.post("/api/bookings/:id/cancel", authMiddleware, async (req, res) => {
     const b = await Booking.findById(req.params.id);
-    if (!b) return res.status(404).json({ message: "Not found" });
-    if (b.guestId !== String(req.user._id)) return res.status(403).json({ message: "Unauthorized" });
-
+    if (b.guestId !== String(req.user._id)) return res.status(403).json({ message: "No" });
+    
     const exp = await Experience.findById(b.experienceId);
     const refundData = calculateRefund(b, exp);
 
@@ -449,6 +434,7 @@ app.post("/api/reviews", authMiddleware, async (req, res) => {
     const reviews = await Review.find({ experienceId });
     const avg = reviews.reduce((acc, r) => acc + r.rating, 0) / reviews.length;
     await Experience.findByIdAndUpdate(experienceId, { averageRating: avg, reviewCount: reviews.length });
+    
     res.json(review);
 });
 
@@ -473,6 +459,20 @@ app.get("/api/admin/users", adminMiddleware, async (req, res) => {
 app.delete("/api/admin/users/:id", adminMiddleware, async (req, res) => {
     await User.findByIdAndDelete(req.params.id);
     res.json({ message: "User deleted" });
+});
+
+// --- CONTACT FORM ---
+app.post("/api/contact", async (req, res) => {
+  const { name, email, subject, message } = req.body;
+  if (!name || !email || !message) return res.status(400).json({ message: "Missing fields" });
+
+  await sendEmail({
+    to: process.env.EMAIL_USER,
+    subject: `Contact: ${subject || "New Message"}`,
+    html: `<h3>Message from ${name} (${email})</h3><p>${message}</p>`
+  });
+
+  res.json({ message: "Sent" });
 });
 
 // --- RECOMMENDATIONS ---
