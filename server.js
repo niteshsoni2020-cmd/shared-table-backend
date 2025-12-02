@@ -72,7 +72,9 @@ const userSchema = new mongoose.Schema({
   bio: String, location: String, mobile: String,
   preferences: [String],
   payoutDetails: Object, 
-  notifications: [notificationSchema]
+  notifications: [notificationSchema],
+  guestRating: { type: Number, default: 0 }, // NEW: Reputation for Guests
+  guestReviewCount: { type: Number, default: 0 } // NEW
 }, schemaOpts);
 
 const experienceSchema = new mongoose.Schema({
@@ -83,7 +85,7 @@ const experienceSchema = new mongoose.Schema({
   price: Number, maxGuests: Number, originalMaxGuests: Number,
   startDate: String, endDate: String,
   blockedDates: [String],
-  availableDays: { type: [String], default: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"] }, // NEW: Availability
+  availableDays: { type: [String], default: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"] },
   isPaused: { type: Boolean, default: false },
   tags: [String], timeSlots: [String],
   imageUrl: String, images: [String],
@@ -114,19 +116,24 @@ const bookingSchema = new mongoose.Schema({
   createdAt: { type: Date, default: Date.now }
 }, schemaOpts);
 
+// UPDATED REVIEW SCHEMA
 const reviewSchema = new mongoose.Schema({
-  experienceId: String, guestId: String, guestName: String,
+  experienceId: String, 
+  bookingId: String, // Link to specific trip
+  authorId: String, authorName: String, // Could be Host OR Guest
+  targetId: String, // Who is being reviewed (Experience or User)
+  type: { type: String, default: "guest_to_host" }, // 'guest_to_host' or 'host_to_guest'
   rating: Number, comment: String,
+  hostReply: String, // NEW: Host can reply to criticism
   date: { type: Date, default: Date.now }
 }, schemaOpts);
 
-const bookmarkSchema = new mongoose.Schema({ userId: String, experienceId: String }, schemaOpts);
+const Bookmark = mongoose.model("Bookmark", new mongoose.Schema({ userId: String, experienceId: String }, schemaOpts));
 
 const User = mongoose.model("User", userSchema);
 const Experience = mongoose.model("Experience", experienceSchema);
 const Booking = mongoose.model("Booking", bookingSchema);
 const Review = mongoose.model("Review", reviewSchema);
-const Bookmark = mongoose.model("Bookmark", bookmarkSchema);
 
 // --- 6. MIDDLEWARE ---
 async function authMiddleware(req, res, next) {
@@ -166,11 +173,9 @@ async function checkCapacity(experienceId, date, timeSlot, newGuests) {
     const currentCount = existing.reduce((sum, b) => sum + b.numGuests, 0);
     const exp = await Experience.findById(experienceId);
     
-    // Check if date is blocked or paused
     if (exp.isPaused) return { available: false, message: "Host is currently not accepting bookings." };
     if (exp.blockedDates && exp.blockedDates.includes(date)) return { available: false, message: "Date is blocked by host." };
 
-    // Check Day of Week availability
     const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
     const searchDay = days[new Date(date).getUTCDay()];
     if (exp.availableDays && !exp.availableDays.includes(searchDay)) {
@@ -285,7 +290,6 @@ app.delete("/api/experiences/:id", authMiddleware, async (req, res) => {
     res.json({ message: "Deleted" });
 });
 
-// UPDATED: Search Logic with Day Filtering
 app.get("/api/experiences", async (req, res) => {
     const { city, q, sort, date } = req.query;
     let query = { isPaused: false };
@@ -295,11 +299,9 @@ app.get("/api/experiences", async (req, res) => {
     if (date) {
         query.startDate = { $lte: date };
         query.endDate = { $gte: date };
-        
-        // Filter by Day of Week
         const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
         const d = new Date(date);
-        const dayName = days[d.getUTCDay()]; // Use UTC to match standardized date string
+        const dayName = days[d.getUTCDay()];
         query.availableDays = { $in: [dayName] };
     }
     
@@ -321,8 +323,6 @@ app.post("/api/experiences/:id/book", authMiddleware, async (req, res) => {
   if (exp.hostId === String(req.user._id)) return res.status(400).json({ message: "Self-booking not allowed." });
 
   const { numGuests, isPrivate, bookingDate, timeSlot } = req.body;
-
-  // SAFETY: Capacity Check
   const cap = await checkCapacity(exp._id, bookingDate, timeSlot, Number(numGuests));
   if (!cap.available) return res.status(400).json({ message: cap.message || `Only ${cap.remaining} spots left.` });
 
@@ -376,13 +376,9 @@ app.put("/api/bookings/:id/reschedule", authMiddleware, async (req, res) => {
     const { newDate, newSlot } = req.body;
     const b = await Booking.findById(req.params.id);
     if (!b || b.guestId.toString() !== String(req.user._id)) return res.status(403).json({ message: "Unauthorized" });
-
-    // Check Capacity on NEW date
     const cap = await checkCapacity(b.experienceId, newDate, newSlot, b.numGuests);
     if (!cap.available) return res.status(400).json({ message: cap.message });
-
-    b.bookingDate = newDate;
-    b.timeSlot = newSlot;
+    b.bookingDate = newDate; b.timeSlot = newSlot;
     await b.save();
     res.json({ message: "Rescheduled successfully!" });
 });
@@ -418,7 +414,57 @@ app.get("/api/host/bookings/:experienceId", authMiddleware, async (req, res) => 
     res.json(bookings);
 });
 
-// --- REVIEWS & BOOKMARKS ---
+// --- REVIEWS 2.0 (TWO-WAY) ---
+app.post("/api/reviews", authMiddleware, async (req, res) => {
+    const { experienceId, bookingId, rating, comment, type, targetId } = req.body;
+    const reviewType = type || "guest_to_host";
+
+    // Prevent duplicate
+    if(await Review.findOne({ bookingId, authorId: req.user._id })) return res.status(400).json({ message: "Duplicate review" });
+
+    const review = new Review({
+        experienceId, bookingId,
+        authorId: req.user._id, authorName: req.user.name,
+        targetId, type: reviewType,
+        rating, comment
+    });
+    await review.save();
+
+    // Update Average Ratings
+    if (reviewType === "guest_to_host") {
+        const reviews = await Review.find({ experienceId, type: "guest_to_host" });
+        const avg = reviews.reduce((acc, r) => acc + r.rating, 0) / reviews.length;
+        await Experience.findByIdAndUpdate(experienceId, { averageRating: avg, reviewCount: reviews.length });
+    } else {
+        // Host reviewing Guest
+        const userReviews = await Review.find({ targetId, type: "host_to_guest" });
+        const avg = userReviews.reduce((acc, r) => acc + r.rating, 0) / userReviews.length;
+        await User.findByIdAndUpdate(targetId, { guestRating: avg, guestReviewCount: userReviews.length });
+    }
+    
+    res.json(review);
+});
+
+// NEW: REPLY TO REVIEW
+app.post("/api/reviews/:id/reply", authMiddleware, async (req, res) => {
+    const review = await Review.findById(req.params.id);
+    if(!review) return res.status(404).json({ message: "Not found" });
+    
+    // Auth Check: Only the listing owner can reply
+    const exp = await Experience.findById(review.experienceId);
+    if(exp.hostId !== String(req.user._id)) return res.status(403).json({ message: "Unauthorized" });
+
+    review.hostReply = req.body.reply;
+    await review.save();
+    res.json({ message: "Reply posted" });
+});
+
+app.get("/api/experiences/:id/reviews", async (req, res) => {
+    const reviews = await Review.find({ experienceId: req.params.id, type: "guest_to_host" }).sort({ date: -1 });
+    res.json(reviews);
+});
+
+// --- ADMIN & MISC ---
 app.post("/api/bookmarks/:experienceId", authMiddleware, async (req, res) => {
     const { experienceId } = req.params; const userId = req.user._id;
     const existing = await Bookmark.findOne({ userId, experienceId });
@@ -426,30 +472,10 @@ app.post("/api/bookmarks/:experienceId", authMiddleware, async (req, res) => {
     await Bookmark.create({ userId, experienceId }); res.json({ message: "Added" });
 });
 app.get("/api/my/bookmarks", authMiddleware, async (req, res) => { const bms = await Bookmark.find({ userId: req.user._id }); res.json(bms.map(b => b.experienceId)); });
-app.get("/api/my/bookmarks/details", authMiddleware, async (req, res) => { 
-    const bms = await Bookmark.find({ userId: req.user._id }); 
-    const exps = await Experience.find({ _id: { $in: bms.map(b => b.experienceId) } }); 
-    res.json(exps); 
-});
-app.post("/api/reviews", authMiddleware, async (req, res) => {
-    const { experienceId } = req.body;
-    if(await Review.findOne({ experienceId, guestId: req.user._id })) return res.status(400).json({ message: "Duplicate review" });
-    const review = new Review({ ...req.body, guestId: req.user._id, guestName: req.user.name });
-    await review.save();
-    const reviews = await Review.find({ experienceId });
-    const avg = reviews.reduce((acc, r) => acc + r.rating, 0) / reviews.length;
-    await Experience.findByIdAndUpdate(experienceId, { averageRating: avg, reviewCount: reviews.length });
-    res.json(review);
-});
-app.get("/api/experiences/:id/reviews", async (req, res) => { const reviews = await Review.find({ experienceId: req.params.id }).sort({ date: -1 }); res.json(reviews); });
-
-// --- ADMIN & MISC ---
+app.get("/api/my/bookmarks/details", authMiddleware, async (req, res) => { const bms = await Bookmark.find({ userId: req.user._id }); const exps = await Experience.find({ _id: { $in: bms.map(b => b.experienceId) } }); res.json(exps); });
 app.get("/api/admin/stats", adminMiddleware, async (req, res) => {
     const revenueDocs = await Booking.find({ status: 'confirmed' }, "pricing");
-    res.json({ 
-        userCount: await User.countDocuments(), expCount: await Experience.countDocuments(), bookingCount: await Booking.countDocuments(),
-        totalRevenue: revenueDocs.reduce((acc, b) => acc + (b.pricing.totalPrice || 0), 0)
-    });
+    res.json({ userCount: await User.countDocuments(), expCount: await Experience.countDocuments(), bookingCount: await Booking.countDocuments(), totalRevenue: revenueDocs.reduce((acc, b) => acc + (b.pricing.totalPrice || 0), 0) });
 });
 app.get("/api/admin/users", adminMiddleware, async (req, res) => { const users = await User.find({}, "name email role _id isPremiumHost"); res.json(users.map(u => ({ id: u._id, name: u.name, email: u.email, role: u.role }))); });
 app.delete("/api/admin/users/:id", adminMiddleware, async (req, res) => { await User.findByIdAndDelete(req.params.id); res.json({ message: "User deleted" }); });
