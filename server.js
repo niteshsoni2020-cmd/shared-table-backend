@@ -214,9 +214,26 @@ app.post("/api/upload", upload.array("photos", 3), (req, res) => {
 app.post("/api/auth/register", async (req, res) => {
   try {
       if (await User.findOne({ email: req.body.email })) return res.status(400).json({ message: "Email taken" });
-      const user = new User({ ...req.body, role: "Guest", notifications: [{message: "Welcome!", type: "success"}] });
+      const user = new User({ ...req.body, role: "Guest", notifications: [{message: "Welcome to The Shared Table!", type: "success"}] });
       await user.save();
-      sendEmail({ to: user.email, subject: "Welcome! 🌏", html: `<h1>Hi ${user.name},</h1><p>Welcome to The Shared Table Story.</p>` });
+      
+      // EMAIL: WELCOME
+      sendEmail({ 
+          to: user.email, 
+          subject: `Welcome to The Shared Table Story, ${user.name} 🌍🍽️`, 
+          html: `
+            <p>Hi ${user.name},</p>
+            <p>Welcome to <strong>The Shared Table Story</strong>. You haven’t just joined a platform – you’ve stepped into a world where strangers become dinner companions.</p>
+            <p>Here, every table is a little universe:</p>
+            <ul>
+                <li>A host opening their home and heart</li>
+                <li>A guest bringing their curiosity and culture</li>
+            </ul>
+            <p>Start by exploring experiences in your city and choose a table that <em>feels</em> right. Your seat at the table is waiting.</p>
+            <p>Warmly,<br><strong>The Shared Table Story Team</strong></p>
+          `
+      });
+
       res.status(201).json({ token: `user-${user._id}`, user: sanitizeUser(user) });
   } catch (e) { res.status(500).json({ message: "Error" }); }
 });
@@ -358,12 +375,37 @@ app.post("/api/bookings/verify", authMiddleware, async (req, res) => {
         if (session.payment_status === 'paid') {
             booking.status = "confirmed"; booking.paymentStatus = "paid";
             await booking.save();
-            sendEmail({ to: req.user.email, subject: "Confirmed! 🎉", html: `<p>See you on ${booking.bookingDate}</p>` });
             const exp = await Experience.findById(booking.experienceId);
             const host = await User.findById(exp.hostId);
+            
+            // EMAIL: GUEST CONFIRMATION
+            sendEmail({ 
+                to: req.user.email, 
+                subject: `Your seat is saved at ${exp.title} 🎉`, 
+                html: `
+                  <p>Hi ${req.user.name},</p>
+                  <p>It’s official – you’re going to <strong>${exp.title}</strong> with ${exp.hostName}.</p>
+                  <p>This isn’t just a booking. It’s an invitation into someone’s home, their kitchen, and their memories.</p>
+                  <p><strong>Date:</strong> ${booking.bookingDate} at ${booking.timeSlot}</p>
+                  <p>See you at the table,<br><strong>The Shared Table Story Team</strong></p>
+                ` 
+            });
+
+            // EMAIL: HOST ALERT
             if (host) {
                 host.notifications.push({ message: `New Booking: ${req.user.name}`, type: "success" });
                 await host.save();
+                sendEmail({
+                    to: host.email,
+                    subject: `New booking for your table, ${exp.hostName}! 🍛✨`,
+                    html: `
+                      <p>Hi ${exp.hostName},</p>
+                      <p>Good news – <strong>${req.user.name}</strong> has just booked your <strong>“${exp.title}”</strong> experience on <strong>${booking.bookingDate}</strong>.</p>
+                      <p>They’re not just coming for the food. They chose <em>your</em> table to understand your city and stories.</p>
+                      <p>Party Size: ${booking.numGuests} guest(s)</p>
+                      <p>Thank you for opening your home and heart.</p>
+                    `
+                });
             }
             return res.json({ status: "confirmed" });
         }
