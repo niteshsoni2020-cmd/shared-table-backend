@@ -64,17 +64,17 @@ const seed = async () => {
         const userPass = await bcrypt.hash("123", 10);
 
         let admin = await User.create({
-            name: "Super Admin", email: "admin@sharedtable.com", password: adminPass,
-            role: "Admin", isAdmin: true, isPremiumHost: true,
-            bio: "Platform Manager", location: "Sydney"
+            name: `Super Admin`, email: `admin@sharedtable.com`, password: adminPass,
+            role: `Admin`, isAdmin: true, isPremiumHost: true,
+            bio: `Platform Manager`, location: `Sydney`
         });
 
         let host = await User.create({
-            name: "Abhishek", email: "founder@sharedtable.com", password: userPass,
-            role: "Host", isPremiumHost: true,
-            bio: "Founder, Traveller, Story Collector.",
-            location: "Melbourne",
-            profilePic: "https://images.unsplash.com/photo-1599566150163-29194dcaad36?q=80&w=200&auto=format&fit=crop"
+            name: `Abhishek`, email: `founder@sharedtable.com`, password: userPass,
+            role: `Host`, isPremiumHost: true,
+            bio: `Founder, Traveller, Story Collector.`,
+            location: `Melbourne`,
+            profilePic: `https://images.unsplash.com/photo-1599566150163-29194dcaad36?q=80&w=200&auto=format&fit=crop`
         });
 
         const guests = [];
@@ -84,7 +84,7 @@ const seed = async () => {
         for (let i = 0; i < names.length; i++) {
             const user = await User.create({ 
                 name: names[i], email: emails[i], password: userPass, 
-                role: "Guest", bio: "Loves travel." 
+                role: `Guest`, bio: `Loves travel.` 
             });
             guests.push(user);
         }
@@ -93,32 +93,32 @@ const seed = async () => {
 
         const expData = [
             {
-                title: "Aussie Christmas Eve Feast",
-                city: "Melbourne",
+                title: `Aussie Christmas Eve Feast`,
+                city: `Melbourne`,
                 price: 85,
                 tags: ["Culture & Festivals", "Family Tables"],
-                description: "Experience a classic Australian Summer Christmas. Fresh prawns, roast pork, and pavlova.",
-                imageUrl: "https://images.unsplash.com/photo-1576402187878-974f70c890a5?q=80&w=800&auto=format&fit=crop",
+                description: `Experience a classic Australian Summer Christmas. Fresh prawns, roast pork, and pavlova.`,
+                imageUrl: `https://images.unsplash.com/photo-1576402187878-974f70c890a5?q=80&w=800&auto=format&fit=crop`,
                 availableDays: ["Fri", "Sat", "Sun"],
                 startDate: "2025-12-01", endDate: "2025-12-31"
             },
             {
-                title: "Secret Laneway Coffee Walk",
-                city: "Melbourne",
+                title: `Secret Laneway Coffee Walk`,
+                city: `Melbourne`,
                 price: 35,
                 tags: ["Nature & Tours", "Solo Friendly", "Budget Eats"],
-                description: "Discover hidden cafes. Perfect for solo travellers.",
-                imageUrl: "https://images.unsplash.com/photo-1497935586351-b67a49e012bf",
+                description: `Discover hidden cafes. Perfect for solo travellers.`,
+                imageUrl: `https://images.unsplash.com/photo-1497935586351-b67a49e012bf`,
                 availableDays: ["Sat", "Sun"],
                 startDate: "2025-01-01", endDate: "2025-12-31"
             },
             {
-                title: "Sunset Pasta & Wine",
-                city: "Sydney",
+                title: `Sunset Pasta & Wine`,
+                city: `Sydney`,
                 price: 90,
                 tags: ["Food & Dining", "Date Night"],
-                description: "Hand-rolled pasta on a balcony overlooking the harbour.",
-                imageUrl: "https://images.unsplash.com/photo-1556910103-1c02745a30bf",
+                description: `Hand-rolled pasta on a balcony overlooking the harbour.`,
+                imageUrl: `https://images.unsplash.com/photo-1556910103-1c02745a30bf`,
                 availableDays: ["Fri", "Sat"],
                 startDate: "2025-01-01", endDate: "2025-12-31"
             }
@@ -141,11 +141,11 @@ const seed = async () => {
         
         const xmasExp = createdExps[0]; 
         const reviews = [
-            "Being away from home for Christmas is hard, but this family made me feel so welcome.",
-            "Fresh seafood, cold wine, and warm people. The perfect Aussie Christmas Eve.",
-            "I came alone but left with 5 new friends. Highly recommend.",
-            "The roast pork crackling was perfect! A truly generous evening.",
-            "Better than any restaurant. It felt like visiting old friends."
+            `Being away from home for Christmas is hard, but this family made me feel so welcome.`,
+            `Fresh seafood, cold wine, and warm people. The perfect Aussie Christmas Eve.`,
+            `I came alone but left with 5 new friends. Highly recommend.`,
+            `The roast pork crackling was perfect! A truly generous evening.`,
+            `Better than any restaurant. It felt like visiting old friends.`
         ];
 
         for (let i = 0; i < reviews.length; i++) {
@@ -161,7 +161,7 @@ const seed = async () => {
         xmasExp.reviewCount = 5;
         await xmasExp.save();
 
-        console.log("✅ SEEDING COMPLETE! Passwords encrypted.");
+        console.log("✅ SEEDING COMPLETE! The database has soul.");
         process.exit(0);
 
     } catch (err) {
