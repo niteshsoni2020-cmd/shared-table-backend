@@ -132,99 +132,43 @@ app.post("/api/host/onboard", authMiddleware, async (req, res) => { req.user.rol
 app.post("/api/experiences", authMiddleware, async (req, res) => { const exp = new Experience({ hostId: req.user._id, hostName: req.user.name, hostPic: req.user.profilePic||"", isPaused: req.user.vacationMode||false, ...req.body, imageUrl: req.body.images[0]||"" }); await exp.save(); res.status(201).json(exp); });
 app.put("/api/experiences/:id", authMiddleware, async (req, res) => { const exp = await Experience.findById(req.params.id); if (!exp || exp.hostId !== String(req.user._id)) return res.status(403).json({ message: "No" }); Object.assign(exp, req.body); if(req.body.images) exp.imageUrl = req.body.images[0]; await exp.save(); res.json(exp); });
 app.delete("/api/experiences/:id", authMiddleware, async (req, res) => { const exp = await Experience.findById(req.params.id); if (!exp || (exp.hostId !== String(req.user._id) && !req.user.isAdmin)) return res.status(403).json({ message: "No" }); await Booking.updateMany({ experienceId: exp._id }, { status: 'cancelled_by_host' }); await Experience.findByIdAndDelete(req.params.id); res.json({ message: "Deleted" }); });
-
-// UPDATED SEARCH ROUTE: PRICE FILTERING
-app.get("/api/experiences", async (req, res) => { 
-    const { city, q, sort, date, minPrice, maxPrice } = req.query; 
-    let query = { isPaused: false }; 
-    
-    if (city) query.city = { $regex: city, $options: "i" }; 
-    if (q) query.title = { $regex: q, $options: "i" }; 
-    
-    // Price Logic
-    if (minPrice || maxPrice) {
-        query.price = {};
-        if (minPrice) query.price.$gte = Number(minPrice);
-        if (maxPrice) query.price.$lte = Number(maxPrice);
-    }
-
-    if (date) { 
-        query.startDate = { $lte: date }; 
-        query.endDate = { $gte: date }; 
-        const days = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"]; 
-        query.availableDays = { $in: [days[new Date(date).getUTCDay()]] }; 
-    } 
-    
-    let sortObj = {}; 
-    if (sort === 'price_asc') sortObj.price = 1; 
-    if (sort === 'rating_desc') sortObj.averageRating = -1; 
-    
-    const exps = await Experience.find(query).sort(sortObj); 
-    res.json(exps); 
-});
-
+app.get("/api/experiences", async (req, res) => { const { city, q, sort, date, minPrice, maxPrice } = req.query; let query = { isPaused: false }; if (city) query.city = { $regex: city, $options: "i" }; if (q) query.title = { $regex: q, $options: "i" }; if (minPrice || maxPrice) { query.price = {}; if (minPrice) query.price.$gte = Number(minPrice); if (maxPrice) query.price.$lte = Number(maxPrice); } if (date) { query.startDate = { $lte: date }; query.endDate = { $gte: date }; const days = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"]; query.availableDays = { $in: [days[new Date(date).getUTCDay()]] }; } let sortObj = {}; if (sort === 'price_asc') sortObj.price = 1; if (sort === 'rating_desc') sortObj.averageRating = -1; const exps = await Experience.find(query).sort(sortObj); res.json(exps); });
 app.get("/api/experiences/:id", async (req, res) => { try { const exp = await Experience.findById(req.params.id); res.json(exp); } catch { res.status(404).json({ message: "Not found" }); } });
-
-// --- BOOKING ---
-app.post("/api/experiences/:id/book", authMiddleware, async (req, res) => {
-  const exp = await Experience.findById(req.params.id);
-  if (exp.hostId === String(req.user._id)) return res.status(400).json({ message: "No self-booking." });
-  
-  const { numGuests, isPrivate, bookingDate, timeSlot, guestNotes } = req.body; 
-  
-  const cap = await checkCapacity(exp._id, bookingDate, timeSlot, Number(numGuests));
-  if (!cap.available) return res.status(400).json({ message: cap.message });
-
-  let total = exp.price * numGuests;
-  if (isPrivate && exp.privatePrice) total = exp.privatePrice;
-  
-  const booking = new Booking({
-      experienceId: exp._id, guestId: req.user._id, guestName: req.user.name, guestEmail: req.user.email,
-      numGuests, bookingDate, timeSlot, guestNotes: guestNotes || "",
-      pricing: { totalPrice: parseFloat(total.toFixed(2)) }
-  });
-  await booking.save();
-
-  try {
-      const session = await stripe.checkout.sessions.create({
-        payment_method_types: ['card'],
-        line_items: [{ price_data: { currency: 'aud', product_data: { name: exp.title }, unit_amount: Math.round(total * 100) }, quantity: 1 }],
-        mode: 'payment',
-        success_url: `${req.headers.origin}/success.html?session_id={CHECKOUT_SESSION_ID}&booking_id=${booking._id}`,
-        cancel_url: `${req.headers.origin}/experience.html?id=${exp._id}`,
-      });
-      booking.stripeSessionId = session.id;
-      await booking.save();
-      res.json({ url: session.url });
-  } catch (e) { res.status(500).json({ message: "Payment failed" }); }
-});
-
-app.post("/api/bookings/verify", authMiddleware, async (req, res) => { 
-    const { bookingId, sessionId } = req.body; const booking = await Booking.findById(bookingId); 
-    if (!booking || booking.status === "confirmed") return res.json({ status: booking ? booking.status : "not_found" }); 
-    try { const session = await stripe.checkout.sessions.retrieve(sessionId); 
-        if (session.payment_status === 'paid') { 
-            booking.status = "confirmed"; booking.paymentStatus = "paid"; await booking.save(); 
-            sendEmail({ to: req.user.email, subject: `Confirmed!`, html: `<p>Booking Confirmed</p>` }); 
-            const exp = await Experience.findById(booking.experienceId);
-            const host = await User.findById(exp.hostId);
-            if (host) {
-                const notesHtml = booking.guestNotes ? `<p><strong>Guest Note:</strong> ${booking.guestNotes}</p>` : "";
-                host.notifications.push({ message: `New Booking: ${req.user.name}`, type: "success" });
-                await host.save();
-                sendEmail({ to: host.email, subject: `New Booking!`, html: `<p>${req.user.name} booked.</p>${notesHtml}` });
-            }
-            return res.json({ status: "confirmed" }); 
-        } return res.status(400).json({ status: "unpaid" }); 
-    } catch (e) { res.status(500).json({ message: "Verification failed" }); } 
-});
-
-app.put("/api/bookings/:id/reschedule", authMiddleware, async (req, res) => { /* existing */ res.json({message: "Rescheduled"}); });
-app.post("/api/bookings/:id/cancel", authMiddleware, async (req, res) => { /* existing */ res.json({message: "Cancelled"}); });
-app.post("/api/bookings/:id/report", authMiddleware, async (req, res) => { /* existing */ res.json({message: "Reported"}); });
+app.post("/api/experiences/:id/book", authMiddleware, async (req, res) => { const exp = await Experience.findById(req.params.id); if (exp.hostId === String(req.user._id)) return res.status(400).json({ message: "No self-booking." }); const { numGuests, isPrivate, bookingDate, timeSlot, guestNotes } = req.body; const cap = await checkCapacity(exp._id, bookingDate, timeSlot, Number(numGuests)); if (!cap.available) return res.status(400).json({ message: cap.message }); let total = exp.price * numGuests; if (isPrivate && exp.privatePrice) total = exp.privatePrice; const booking = new Booking({ experienceId: exp._id, guestId: req.user._id, guestName: req.user.name, guestEmail: req.user.email, numGuests, bookingDate, timeSlot, guestNotes: guestNotes || "", pricing: { totalPrice: parseFloat(total.toFixed(2)) } }); await booking.save(); try { const session = await stripe.checkout.sessions.create({ payment_method_types: ['card'], line_items: [{ price_data: { currency: 'aud', product_data: { name: exp.title }, unit_amount: Math.round(total * 100) }, quantity: 1 }], mode: 'payment', success_url: `${req.headers.origin}/success.html?session_id={CHECKOUT_SESSION_ID}&booking_id=${booking._id}`, cancel_url: `${req.headers.origin}/experience.html?id=${exp._id}`, }); booking.stripeSessionId = session.id; await booking.save(); res.json({ url: session.url }); } catch (e) { res.status(500).json({ message: "Payment failed" }); } });
+app.post("/api/bookings/verify", authMiddleware, async (req, res) => { const { bookingId, sessionId } = req.body; const booking = await Booking.findById(bookingId); if (!booking || booking.status === "confirmed") return res.json({ status: booking ? booking.status : "not_found" }); try { const session = await stripe.checkout.sessions.retrieve(sessionId); if (session.payment_status === 'paid') { booking.status = "confirmed"; booking.paymentStatus = "paid"; await booking.save(); sendEmail({ to: req.user.email, subject: `Confirmed!`, html: `<p>Booking Confirmed</p>` }); const exp = await Experience.findById(booking.experienceId); const host = await User.findById(exp.hostId); if (host) { const notesHtml = booking.guestNotes ? `<p><strong>Guest Note:</strong> ${booking.guestNotes}</p>` : ""; host.notifications.push({ message: `New Booking: ${req.user.name}`, type: "success" }); await host.save(); sendEmail({ to: host.email, subject: `New Booking!`, html: `<p>${req.user.name} booked.</p>${notesHtml}` }); } return res.json({ status: "confirmed" }); } return res.status(400).json({ status: "unpaid" }); } catch (e) { res.status(500).json({ message: "Verification failed" }); } });
+app.put("/api/bookings/:id/reschedule", authMiddleware, async (req, res) => { const { newDate, newSlot } = req.body; const b = await Booking.findById(req.params.id); if (!b || b.guestId.toString() !== String(req.user._id)) return res.status(403).json({ message: "Unauthorized" }); const cap = await checkCapacity(b.experienceId, newDate, newSlot, b.numGuests); if (!cap.available) return res.status(400).json({ message: cap.message }); b.bookingDate = newDate; b.timeSlot = newSlot; await b.save(); res.json({ message: "Rescheduled successfully!" }); });
+app.post("/api/bookings/:id/cancel", authMiddleware, async (req, res) => { const b = await Booking.findById(req.params.id); if (b.guestId.toString() !== String(req.user._id)) return res.status(403).json({ message: "Unauthorized" }); const exp = await Experience.findById(b.experienceId); const refundData = calculateRefund(b, exp); b.status = "cancelled"; b.refundAmount = refundData.amount; b.cancellationReason = refundData.reason; await b.save(); res.json({ message: "Cancelled", refund: refundData }); });
+app.post("/api/bookings/:id/report", authMiddleware, async (req, res) => { const { reason } = req.body; const b = await Booking.findById(req.params.id); if (!b) return res.status(404).json({ message: "Not found" }); b.dispute = { active: true, reason, status: "pending_admin" }; await b.save(); res.json({ message: "Reported." }); });
 app.get("/api/my/bookings", authMiddleware, async (req, res) => { const bookings = await Booking.find({ guestId: req.user._id }); res.json(bookings); });
 app.get("/api/host/bookings/:experienceId", authMiddleware, async (req, res) => { const bookings = await Booking.find({ experienceId: req.params.experienceId }).populate("guestId", "name email mobile profilePic"); res.json(bookings); });
+app.post("/api/reviews", authMiddleware, async (req, res) => { const { experienceId, bookingId, rating, comment, type, targetId } = req.body; const reviewType = type || "guest_to_host"; if(await Review.findOne({ bookingId, authorId: req.user._id })) return res.status(400).json({ message: "Duplicate" }); const review = new Review({ experienceId, bookingId, authorId: req.user._id, authorName: req.user.name, targetId, type: reviewType, rating, comment }); await review.save(); if (reviewType === "guest_to_host") { const reviews = await Review.find({ experienceId, type: "guest_to_host" }); const avg = reviews.reduce((acc, r) => acc + r.rating, 0) / reviews.length; await Experience.findByIdAndUpdate(experienceId, { averageRating: avg, reviewCount: reviews.length }); } else { const userReviews = await Review.find({ targetId, type: "host_to_guest" }); const avg = userReviews.reduce((acc, r) => acc + r.rating, 0) / userReviews.length; await User.findByIdAndUpdate(targetId, { guestRating: avg, guestReviewCount: userReviews.length }); } res.json(review); });
+app.post("/api/reviews/:id/reply", authMiddleware, async (req, res) => { const review = await Review.findById(req.params.id); if(!review) return res.status(404).json({ message: "Not found" }); const exp = await Experience.findById(review.experienceId); if(exp.hostId !== String(req.user._id)) return res.status(403).json({ message: "Unauthorized" }); review.hostReply = req.body.reply; await review.save(); res.json({ message: "Replied" }); });
+app.get("/api/experiences/:id/reviews", async (req, res) => { const reviews = await Review.find({ experienceId: req.params.id, type: "guest_to_host" }).sort({ date: -1 }); res.json(reviews); });
+app.post("/api/bookmarks/:experienceId", authMiddleware, async (req, res) => { const { experienceId } = req.params; const userId = req.user._id; const existing = await Bookmark.findOne({ userId, experienceId }); if (existing) { await Bookmark.findByIdAndDelete(existing._id); return res.json({ message: "Removed" }); } await Bookmark.create({ userId, experienceId }); res.json({ message: "Added" }); });
+app.get("/api/my/bookmarks", authMiddleware, async (req, res) => { const bms = await Bookmark.find({ userId: req.user._id }); res.json(bms.map(b => b.experienceId)); });
+app.get("/api/my/bookmarks/details", authMiddleware, async (req, res) => { const bms = await Bookmark.find({ userId: req.user._id }); const exps = await Experience.find({ _id: { $in: bms.map(b => b.experienceId) } }); res.json(exps); });
+app.get("/api/admin/stats", adminMiddleware, async (req, res) => { const revenueDocs = await Booking.find({ status: 'confirmed' }, "pricing"); res.json({ userCount: await User.countDocuments(), expCount: await Experience.countDocuments(), bookingCount: await Booking.countDocuments(), totalRevenue: revenueDocs.reduce((acc, b) => acc + (b.pricing.totalPrice || 0), 0) }); });
+app.get("/api/admin/users", adminMiddleware, async (req, res) => { const users = await User.find({}, "name email role _id isPremiumHost"); res.json(users.map(u => ({ id: u._id, name: u.name, email: u.email, role: u.role }))); });
+app.delete("/api/admin/users/:id", adminMiddleware, async (req, res) => { await User.findByIdAndDelete(req.params.id); res.json({ message: "User deleted" }); });
+app.get("/api/admin/bookings", adminMiddleware, async (req, res) => { const bookings = await Booking.find().sort({ createdAt: -1 }).limit(50); res.json(bookings); });
 app.post("/api/contact", async (req, res) => { await sendEmail({ to: process.env.EMAIL_USER, subject: `Contact`, html: `<p>${req.body.message}</p>` }); res.json({ message: "Sent" }); });
-app.get("/api/recommendations", authMiddleware, async (req, res) => { const exps = await Experience.find({ isPaused: false }).sort({ averageRating: -1 }).limit(4); res.json(exps); });
-// ... (Reviews, Bookmarks, Admin routes unchanged) ...
+app.get("/api/recommendations", authMiddleware, async (req, res) => { const exps = await Experience.find({ isPaused: false }).sort({ averageRating: -1 }).limit(4); res.json(exps.length > 0 ? exps : await Experience.find({ isPaused: false }).limit(4)); });
+
+// 🔴 NUCLEAR SEED ROUTE 🔴
+app.get("/api/admin/seed-force", async (req, res) => {
+    try {
+        // WARNING: DELETES EVERYTHING
+        await User.deleteMany({}); await Experience.deleteMany({}); await Review.deleteMany({});
+        const adminPass = await bcrypt.hash("admin", 10);
+        const userPass = await bcrypt.hash("123", 10);
+        
+        await User.create({ name: `Super Admin`, email: `admin@sharedtable.com`, password: adminPass, role: `Admin`, isAdmin: true });
+        const host = await User.create({ name: `Abhishek`, email: `founder@sharedtable.com`, password: userPass, role: `Host`, isPremiumHost: true, profilePic: `https://images.unsplash.com/photo-1599566150163-29194dcaad36?q=80&w=200&auto=format&fit=crop` });
+        
+        const exp = await Experience.create({ hostId: host._id, hostName: host.name, hostPic: host.profilePic, title: `Aussie Christmas Eve Feast`, city: `Melbourne`, price: 85, tags: ["Culture & Festivals"], availableDays: ["Fri", "Sat"], images: ["https://images.unsplash.com/photo-1576402187878-974f70c890a5?q=80&w=800&auto=format&fit=crop"] });
+        
+        res.send("✅ LIVE DATABASE SEEDED! Go refresh your site.");
+    } catch(e) { res.status(500).send(e.message); }
+});
+
 app.listen(PORT, () => console.log(`Server running on http://localhost:${PORT}`));
