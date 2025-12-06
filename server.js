@@ -259,24 +259,32 @@ app.post("/api/upload", authMiddleware, upload.array("photos", 3), (req, res) =>
   res.json({ images: req.files.map(f => f.path) });
 });
 
-// 2. Auth & User
+// 2. Auth & User (UPDATED: Records Legal Timestamp)
 app.post("/api/auth/register", async (req, res) => {
   try {
     if (await User.findOne({ email: req.body.email }))
       return res.status(400).json({ message: "Taken" });
+    
     const hashedPassword = await bcrypt.hash(req.body.password, 10);
+    
     const user = new User({
       ...req.body,
       password: hashedPassword,
       role: "Guest",
-      notifications: [{ message: "Welcome!", type: "success" }]
+      notifications: [{ message: "Welcome!", type: "success" }],
+      // LEGAL TIMESTAMP (New)
+      termsAgreedAt: new Date(),
+      termsVersion: "1.0" 
     });
+
     await user.save();
+    
     sendEmail({
       to: user.email,
       subject: `Welcome to The Shared Table Story 🌏`,
       html: `<p>Welcome ${user.name}!</p>`
     });
+
     res.status(201).json({
       token: `user-${user._id}`,
       user: sanitizeUser(user)
@@ -284,64 +292,6 @@ app.post("/api/auth/register", async (req, res) => {
   } catch (e) {
     res.status(500).json({ message: "Error" });
   }
-});
-
-app.post("/api/auth/login", async (req, res) => {
-  try {
-    const user = await User.findOne({ email: req.body.email });
-    if (!user || !(await bcrypt.compare(req.body.password, user.password)))
-      return res.status(400).json({ message: "Invalid credentials" });
-    res.json({ token: `user-${user._id}`, user: sanitizeUser(user) });
-  } catch (e) {
-    res.status(500).json({ message: "Error" });
-  }
-});
-
-app.post("/api/auth/reset", async (req, res) =>
-  res.json({ message: "If valid, link sent." })
-);
-app.get("/api/auth/me", authMiddleware, (req, res) =>
-  res.json(sanitizeUser(req.user))
-);
-app.get("/api/me", authMiddleware, (req, res) =>
-  res.json(sanitizeUser(req.user))
-);
-
-app.put("/api/auth/update", authMiddleware, async (req, res) => {
-  try {
-    const { role, isAdmin, payoutDetails, vacationMode, ...updates } = req.body;
-    if (typeof vacationMode !== "undefined") {
-      req.user.vacationMode = vacationMode;
-      await Experience.updateMany(
-        { hostId: req.user._id },
-        { isPaused: vacationMode }
-      );
-    }
-    if (req.body.payoutDetails) {
-      req.user.payoutDetails = {
-        ...req.user.payoutDetails,
-        ...req.body.payoutDetails
-      };
-    }
-    Object.assign(req.user, updates);
-    await req.user.save();
-    res.json(sanitizeUser(req.user));
-  } catch (err) {
-    res.status(500).json({ message: "Update failed" });
-  }
-});
-
-app.get("/api/notifications", authMiddleware, async (req, res) => {
-  res.json((req.user.notifications || []).reverse().slice(0, 5));
-});
-
-app.post("/api/host/onboard", authMiddleware, async (req, res) => {
-  req.user.role = "Host";
-  req.user.isPremiumHost = true;
-  req.user.payoutDetails = { ...req.body, country: "Australia" };
-  req.user.notifications.push({ message: "Verified Host!", type: "success" });
-  await req.user.save();
-  res.json(sanitizeUser(req.user));
 });
 
 // 3. Experience Routes
@@ -473,6 +423,43 @@ app.get("/api/experiences/:id", async (req, res) => {
     res.json(exp);
   } catch {
     res.status(404).json({ message: "Not found" });
+  }
+});
+
+// NEW ROUTE: Recommendation Engine (Item #55)
+app.get("/api/experiences/:id/similar", async (req, res) => {
+  try {
+    const currentExp = await Experience.findById(req.params.id);
+    if (!currentExp) return res.status(404).json({ message: "Not found" });
+
+    // Logic: Find experiences with matching Tags OR same City
+    // Exclude the current experience
+    const similar = await Experience.find({
+      _id: { $ne: currentExp._id }, // Not the current one
+      isPaused: false,
+      $or: [
+        { tags: { $in: currentExp.tags } }, // Same Category
+        { city: currentExp.city }           // Same City
+      ]
+    })
+    .limit(3) // Top 3 results
+    .select('title price images imageUrl city averageRating'); // Optimization
+
+    // Fallback: If no similar found, just show generic top rated
+    if (similar.length === 0) {
+       const fallback = await Experience.find({ 
+           _id: { $ne: currentExp._id }, 
+           isPaused: false 
+       })
+       .sort({ averageRating: -1 })
+       .limit(3)
+       .select('title price images imageUrl city averageRating');
+       return res.json(fallback);
+    }
+
+    res.json(similar);
+  } catch (err) {
+    res.status(500).json({ message: "Server error" });
   }
 });
 
@@ -790,6 +777,53 @@ app.get("/api/recommendations", authMiddleware, async (req, res) => {
   if (exps.length > 0) return res.json(exps);
   const fallback = await Experience.find({ isPaused: false }).limit(4);
   res.json(fallback);
+});
+
+// --- NEW ADMIN ROUTES (Item #57) ---
+
+// A. Get ALL Users (Admin Only)
+app.get("/api/admin/users", adminMiddleware, async (req, res) => {
+  try {
+    const users = await User.find().select("-password").sort({ createdAt: -1 });
+    res.json(users);
+  } catch (err) {
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+// B. Ban/Delete User (Admin Only)
+app.delete("/api/admin/users/:id", adminMiddleware, async (req, res) => {
+  try {
+    await User.findByIdAndDelete(req.params.id);
+    // Optional: Delete their bookings/experiences too? For MVP, just the user.
+    res.json({ message: "User banned/deleted." });
+  } catch (err) {
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+// C. Get ALL Experiences (Including Paused) (Admin Only)
+app.get("/api/admin/experiences", adminMiddleware, async (req, res) => {
+  try {
+    const exps = await Experience.find().sort({ createdAt: -1 });
+    res.json(exps);
+  } catch (err) {
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+// D. Toggle Experience Status (Pause/Unpause) (Admin Only)
+app.patch("/api/admin/experiences/:id/toggle", adminMiddleware, async (req, res) => {
+  try {
+    const exp = await Experience.findById(req.params.id);
+    if (!exp) return res.status(404).json({ message: "Not found" });
+    
+    exp.isPaused = !exp.isPaused; // Toggle
+    await exp.save();
+    res.json(exp);
+  } catch (err) {
+    res.status(500).json({ message: "Server error" });
+  }
 });
 
 // 7. Public/Host Profile Route (UPDATED: Fetches Reviews & Real Stats)
