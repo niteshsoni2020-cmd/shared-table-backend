@@ -1,4 +1,4 @@
-// server.js - FINAL STABLE VERSION (Merged GPT Fixes + Gemini Features)
+// server.js - FULL VERSION (Includes 3-Pillar Data Reset)
 
 require('dotenv').config();
 const express = require("express");
@@ -9,7 +9,7 @@ const { CloudinaryStorage } = require("multer-storage-cloudinary");
 const cloudinary = require("cloudinary").v2;
 const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 const nodemailer = require("nodemailer");
-const bcrypt = require("bcryptjs"); // Using pure JS version to avoid Render crash
+const bcrypt = require("bcryptjs");
 
 // 1. Initialize App
 const app = express();
@@ -76,7 +76,7 @@ const experienceSchema = new mongoose.Schema({
 
 const bookingSchema = new mongoose.Schema({
   experienceId: String, guestId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
-  hostId: { type: String, required: false }, // Explicit Host ID storage
+  hostId: { type: String, required: false },
   guestName: String, guestEmail: String,
   numGuests: Number, bookingDate: String, timeSlot: String,
   guestNotes: { type: String, default: "" }, 
@@ -87,7 +87,7 @@ const bookingSchema = new mongoose.Schema({
   createdAt: { type: Date, default: Date.now }
 }, schemaOpts);
 
-// Virtuals for easy population
+// Virtuals
 bookingSchema.virtual('experience', { ref: 'Experience', localField: 'experienceId', foreignField: '_id', justOne: true });
 bookingSchema.virtual('user', { ref: 'User', localField: 'guestId', foreignField: '_id', justOne: true });
 
@@ -123,24 +123,19 @@ async function checkCapacity(experienceId, date, timeSlot, newGuests) {
     if (currentCount + newGuests > exp.maxGuests) return { available: false, remaining: exp.maxGuests - currentCount, message: `Only ${exp.maxGuests - currentCount} spots left.` };
     return { available: true };
 }
-function calculateRefund(booking, exp) { 
-    // Basic MVP logic: 100% refund if cancelled > 48 hours before
-    return { percent: 0, amount: 0, reason: "Manual payment - coordinate with host" }; 
-}
+function calculateRefund(booking, exp) { return { percent: 0, amount: 0, reason: "Manual payment - coordinate with host" }; }
 
 // --- ROUTES ---
 
-// 1. Upload Images
+// 1. Upload
 app.post("/api/upload", authMiddleware, upload.array("photos", 3), (req, res) => { if (!req.files) return res.status(400).json({ message: "No files" }); res.json({ images: req.files.map(f => f.path) }); });
 
-// 2. Auth Routes
+// 2. Auth & User
 app.post("/api/auth/register", async (req, res) => { try { if (await User.findOne({ email: req.body.email })) return res.status(400).json({ message: "Taken" }); const hashedPassword = await bcrypt.hash(req.body.password, 10); const user = new User({ ...req.body, password: hashedPassword, role: "Guest", notifications: [{message: "Welcome!", type: "success"}] }); await user.save(); sendEmail({ to: user.email, subject: `Welcome to The Shared Table Story 🌏`, html: `<p>Welcome ${user.name}!</p>` }); res.status(201).json({ token: `user-${user._id}`, user: sanitizeUser(user) }); } catch (e) { res.status(500).json({ message: "Error" }); } });
 app.post("/api/auth/login", async (req, res) => { try { const user = await User.findOne({ email: req.body.email }); if (!user || !(await bcrypt.compare(req.body.password, user.password))) return res.status(400).json({ message: "Invalid credentials" }); res.json({ token: `user-${user._id}`, user: sanitizeUser(user) }); } catch (e) { res.status(500).json({ message: "Error" }); } });
 app.post("/api/auth/reset", async (req, res) => res.json({ message: "If valid, link sent." }));
-
-// 🔴 FIX 1: API Alias Routes (So both /api/me and /api/auth/me work)
 app.get("/api/auth/me", authMiddleware, (req, res) => res.json(sanitizeUser(req.user)));
-app.get("/api/me", authMiddleware, (req, res) => res.json(sanitizeUser(req.user))); // Alias
+app.get("/api/me", authMiddleware, (req, res) => res.json(sanitizeUser(req.user))); 
 
 app.put("/api/auth/update", authMiddleware, async (req, res) => {
     try {
@@ -166,7 +161,7 @@ app.post("/api/experiences", authMiddleware, async (req, res) => { const exp = n
 app.put("/api/experiences/:id", authMiddleware, async (req, res) => { const exp = await Experience.findById(req.params.id); if (!exp || exp.hostId !== String(req.user._id)) return res.status(403).json({ message: "No" }); Object.assign(exp, req.body); if(req.body.images) exp.imageUrl = req.body.images[0]; await exp.save(); res.json(exp); });
 app.delete("/api/experiences/:id", authMiddleware, async (req, res) => { const exp = await Experience.findById(req.params.id); if (!exp || (exp.hostId !== String(req.user._id) && !req.user.isAdmin)) return res.status(403).json({ message: "No" }); await Booking.updateMany({ experienceId: exp._id }, { status: 'cancelled_by_host' }); await Experience.findByIdAndDelete(req.params.id); res.json({ message: "Deleted" }); });
 
-// Search Route (With Date Filtering)
+// Search (Updated with Date & Filters)
 app.get("/api/experiences", async (req, res) => { 
     const { city, q, sort, date, minPrice, maxPrice, category } = req.query; 
     let query = { isPaused: false }; 
@@ -200,13 +195,12 @@ app.post("/api/experiences/:id/book", authMiddleware, async (req, res) => {
     let total = exp.price * numGuests; 
     if (isPrivate && exp.privatePrice) total = exp.privatePrice; 
     
-    // 🔴 FIX 2: Store hostId as String for reliable querying
     const booking = new Booking({ 
         experienceId: exp._id, 
         guestId: req.user._id, 
         guestName: req.user.name, 
         guestEmail: req.user.email,
-        hostId: String(exp.hostId || req.user._id), // Force String
+        hostId: String(exp.hostId || req.user._id),
         numGuests, bookingDate, timeSlot, 
         guestNotes: guestNotes || "", 
         pricing: { totalPrice: parseFloat(total.toFixed(2)) } 
@@ -230,33 +224,25 @@ app.post("/api/experiences/:id/book", authMiddleware, async (req, res) => {
 
 app.post("/api/bookings/verify", authMiddleware, async (req, res) => { const { bookingId, sessionId } = req.body; const booking = await Booking.findById(bookingId); if (!booking || booking.status === "confirmed") return res.json({ status: booking ? booking.status : "not_found" }); try { const session = await stripe.checkout.sessions.retrieve(sessionId); if (session.payment_status === 'paid') { booking.status = "confirmed"; booking.paymentStatus = "paid"; await booking.save(); sendEmail({ to: req.user.email, subject: `Confirmed!`, html: `<p>Booking Confirmed</p>` }); const exp = await Experience.findById(booking.experienceId); const host = await User.findById(exp.hostId); if (host) { const notesHtml = booking.guestNotes ? `<p><strong>Guest Note:</strong> ${booking.guestNotes}</p>` : ""; host.notifications.push({ message: `New Booking: ${req.user.name}`, type: "success" }); await host.save(); sendEmail({ to: host.email, subject: `New Booking!`, html: `<p>${req.user.name} booked.</p>${notesHtml}` }); } return res.json({ status: "confirmed" }); } return res.status(400).json({ status: "unpaid" }); } catch (e) { res.status(500).json({ message: "Verification failed" }); } });
 
-// 🔴 FIX 3: Host Booking Routes (Fixed Querying + New Route)
+// Host Dashboard Routes
 app.get("/api/bookings/host-bookings", authMiddleware, async (req, res) => {
     try {
-        const hostId = String(req.user._id); // Ensure ID is string
-        const bookings = await Booking.find({ hostId })
-            .populate('experience', 'title images price')
-            .populate('guestId', 'name email profilePic mobile') // Populate actual Guest info
-            .populate('user', 'name email profilePic mobile')    // Fallback population
-            .sort({ bookingDate: 1 });
+        const hostId = String(req.user._id);
+        const bookings = await Booking.find({ hostId }).populate('experience', 'title images price').populate('guestId', 'name email profilePic mobile').populate('user', 'name email profilePic mobile').sort({ bookingDate: 1 });
         res.json(bookings);
     } catch (err) { res.status(500).json({ message: "Server error" }); }
 });
 
-// NEW: Per-experience guest list route (requested by frontend modal)
 app.get("/api/host/bookings/:experienceId", authMiddleware, async (req, res) => {
     try {
         const hostId = String(req.user._id);
         const experienceId = req.params.experienceId;
-        const bookings = await Booking.find({ hostId, experienceId })
-            .populate('experience', 'title images price')
-            .populate('guestId', 'name email profilePic mobile')
-            .sort({ bookingDate: 1 });
+        const bookings = await Booking.find({ hostId, experienceId }).populate('experience', 'title images price').populate('guestId', 'name email profilePic mobile').sort({ bookingDate: 1 });
         res.json(bookings);
     } catch (err) { res.status(500).json({ message: "Server error" }); }
 });
 
-// 🔴 FIX 4: My Bookings Alias Route
+// Guest Bookings Routes
 app.get("/api/bookings/my-bookings", authMiddleware, async (req, res) => { 
     const bookings = await Booking.find({ guestId: req.user._id }).populate('experience').sort({ bookingDate: -1 });
     res.json(bookings); 
@@ -266,19 +252,17 @@ app.get("/api/my/bookings", authMiddleware, async (req, res) => { // Alias
     res.json(bookings); 
 });
 
-// 🔴 FIX 5: Cancel Booking Route (Missing Feature)
+// Cancel Booking
 app.post("/api/bookings/:id/cancel", authMiddleware, async (req, res) => {
     try {
         const booking = await Booking.findById(req.params.id);
         if (!booking) return res.status(404).json({ message: "Booking not found" });
         if (String(booking.guestId) !== String(req.user._id)) return res.status(403).json({ message: "Unauthorized" });
         if (booking.status === 'cancelled' || booking.status === 'cancelled_by_host') return res.status(400).json({ message: "Already cancelled" });
-        
         booking.status = 'cancelled';
-        booking.refundAmount = 0; // Stub: Add refund logic here
+        booking.refundAmount = 0; 
         booking.cancellationReason = "User requested cancellation";
         await booking.save();
-        
         res.json({ message: "Booking cancelled.", refund: { amount: 0, reason: "Manual processing" } });
     } catch (err) { res.status(500).json({ message: "Server error" }); }
 });
@@ -291,18 +275,60 @@ app.get("/api/my/bookmarks/details", authMiddleware, async (req, res) => { const
 
 // 6. Admin & Utility Routes
 app.get("/api/admin/stats", adminMiddleware, async (req, res) => { const revenueDocs = await Booking.find({ status: 'confirmed' }, "pricing"); res.json({ userCount: await User.countDocuments(), expCount: await Experience.countDocuments(), bookingCount: await Booking.countDocuments(), totalRevenue: revenueDocs.reduce((acc, b) => acc + (b.pricing.totalPrice || 0), 0) }); });
+app.get("/api/admin/bookings", adminMiddleware, async (req, res) => { const bookings = await Booking.find().populate('experience').populate('user').sort({ createdAt: -1 }).limit(50); res.json(bookings); });
 app.get("/api/recommendations", authMiddleware, async (req, res) => { const exps = await Experience.find({ isPaused: false }).sort({ averageRating: -1 }).limit(4); res.json(exps.length > 0 ? exps : await Experience.find({ isPaused: false }).limit(4)); });
 
-// NUCLEAR SEED ROUTE
+// 🔴 NUCLEAR SEED ROUTE (Aligned to 3 Pillars)
 app.get("/api/admin/seed-force", async (req, res) => {
     try {
         await User.deleteMany({}); await Experience.deleteMany({}); await Review.deleteMany({}); await Booking.deleteMany({});
+        
         const adminPass = await bcrypt.hash("admin", 10);
-        const userPass = await bcrypt.hash("123", 10);
+        const hostPass = await bcrypt.hash("123", 10);
+        
         await User.create({ name: `Super Admin`, email: `admin@sharedtable.com`, password: adminPass, role: `Admin`, isAdmin: true });
-        const host = await User.create({ name: `Abhishek`, email: `founder@sharedtable.com`, password: userPass, role: `Host`, isPremiumHost: true, profilePic: `https://images.unsplash.com/photo-1599566150163-29194dcaad36?q=80&w=200&auto=format&fit=crop` });
-        const exp = await Experience.create({ hostId: host._id, hostName: host.name, hostPic: host.profilePic, title: `Aussie Christmas Eve Feast`, city: `Melbourne`, price: 85, tags: ["Culture & Festivals"], availableDays: ["Fri", "Sat"], images: ["https://images.unsplash.com/photo-1576402187878-974f70c890a5?q=80&w=800&auto=format&fit=crop"] });
-        res.send("✅ LIVE DATABASE SEEDED!");
+        
+        const host1 = await User.create({ name: `Elena`, email: `elena@host.com`, password: hostPass, role: `Host`, isPremiumHost: true, bio: "Sharing my grandmother's recipes.", profilePic: "https://images.unsplash.com/photo-1544005313-94ddf0286df2?auto=format&fit=crop&w=200&q=80" });
+        const host2 = await User.create({ name: `Raj`, email: `raj@host.com`, password: hostPass, role: `Host`, isPremiumHost: true, bio: "Celebrating festivals together.", profilePic: "https://images.unsplash.com/photo-1506794778202-cad84cf45f1d?auto=format&fit=crop&w=200&q=80" });
+        const host3 = await User.create({ name: `Sarah`, email: `sarah@host.com`, password: hostPass, role: `Host`, isPremiumHost: true, bio: "Nature walks and bush tucker.", profilePic: "https://images.unsplash.com/photo-1438761681033-6461ffad8d80?auto=format&fit=crop&w=200&q=80" });
+
+        // Pillar 1: FOOD
+        await Experience.create({ 
+            hostId: host1._id, hostName: host1.name, hostPic: host1.profilePic, 
+            title: `Nonna's Sunday Gravy`, 
+            city: `Melbourne`, price: 65, maxGuests: 6,
+            tags: ["Food"], 
+            description: "A slow-cooked Italian feast using recipes passed down for 3 generations.",
+            images: ["https://images.unsplash.com/photo-1543353071-873f17a7a088?auto=format&fit=crop&w=800&q=80"],
+            availableDays: ["Sat", "Sun"],
+            startDate: "2025-01-01", endDate: "2025-12-31"
+        });
+
+        // Pillar 2: CULTURE
+        await Experience.create({ 
+            hostId: host2._id, hostName: host2.name, hostPic: host2.profilePic, 
+            title: `Diwali Festival of Lights`, 
+            city: `Sydney`, price: 85, maxGuests: 10,
+            tags: ["Culture"], 
+            description: "Lighting lamps, sharing sweets, and understanding the victory of light over darkness.",
+            images: ["https://images.unsplash.com/photo-1550050638-34c9c825f952?auto=format&fit=crop&w=800&q=80"],
+            availableDays: ["Fri", "Sat"],
+            startDate: "2025-01-01", endDate: "2025-12-31"
+        });
+
+        // Pillar 3: NATURE
+        await Experience.create({ 
+            hostId: host3._id, hostName: host3.name, hostPic: host3.profilePic, 
+            title: `Coastal Foraging Walk`, 
+            city: `Byron Bay`, price: 120, maxGuests: 8,
+            tags: ["Nature"], 
+            description: "Walk the coast, learn about native ingredients, and share a picnic on the cliffs.",
+            images: ["https://images.unsplash.com/photo-1469854523086-cc02fe5d8800?auto=format&fit=crop&w=800&q=80"],
+            availableDays: ["Sun"],
+            startDate: "2025-01-01", endDate: "2025-12-31"
+        });
+
+        res.send("✅ DATABASE RESET: 3 Pillar Listings Created (Food, Culture, Nature).");
     } catch(e) { res.status(500).send(e.message); }
 });
 
