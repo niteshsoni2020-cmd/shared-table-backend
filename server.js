@@ -1,4 +1,4 @@
-// server.js - FULL VERSION (Fixed Personas & Multi-Category Support)
+// server.js - FULL VERSION (Public Profile Route Added)
 
 require('dotenv').config();
 const express = require("express");
@@ -111,7 +111,23 @@ async function authMiddleware(req, res, next) {
   try { const user = await User.findById(dbId); if (!user) return res.status(401).json({ message: "User not found" }); req.user = user; next(); } catch (err) { res.status(401).json({ message: "Invalid Token" }); }
 }
 function adminMiddleware(req, res, next) { authMiddleware(req, res, () => { if (!req.user.isAdmin) return res.status(403).json({ message: "Access denied." }); next(); }); }
-function sanitizeUser(u) { const obj = u.toObject({ virtuals: true }); if (obj.payoutDetails) { obj.payoutDetails = { ...obj.payoutDetails, bsb: "***", accountNumber: "****" + (obj.payoutDetails.accountNumber ? obj.payoutDetails.accountNumber.slice(-4) : "0000") }; } const { password, ...safe } = obj; return { ...safe, isHost: obj.isPremiumHost }; }
+// NEW UTILITY: Function to determine if a user has any active experiences
+async function isHost(userId) {
+    const count = await Experience.countDocuments({ hostId: userId });
+    return count > 0;
+}
+function sanitizeUser(u) { 
+    const obj = u.toObject({ virtuals: true }); 
+    if (obj.payoutDetails) { 
+        obj.payoutDetails = { 
+            ...obj.payoutDetails, 
+            bsb: "***", 
+            accountNumber: "****" + (obj.payoutDetails.accountNumber ? obj.payoutDetails.accountNumber.slice(-4) : "0000") 
+        }; 
+    } 
+    const { password, ...safe } = obj; 
+    return { ...safe, isHost: obj.isPremiumHost }; 
+}
 async function checkCapacity(experienceId, date, timeSlot, newGuests) {
     const existing = await Booking.find({ experienceId, bookingDate: date, timeSlot, status: { $in: ['confirmed', 'paid'] } });
     const currentCount = existing.reduce((sum, b) => sum + b.numGuests, 0);
@@ -282,6 +298,41 @@ app.get("/api/my/bookmarks/details", authMiddleware, async (req, res) => { const
 app.get("/api/admin/stats", adminMiddleware, async (req, res) => { const revenueDocs = await Booking.find({ status: 'confirmed' }, "pricing"); res.json({ userCount: await User.countDocuments(), expCount: await Experience.countDocuments(), bookingCount: await Booking.countDocuments(), totalRevenue: revenueDocs.reduce((acc, b) => acc + (b.pricing.totalPrice || 0), 0) }); });
 app.get("/api/admin/bookings", adminMiddleware, async (req, res) => { const bookings = await Booking.find().populate('experience').populate('user').sort({ createdAt: -1 }).limit(50); res.json(bookings); });
 app.get("/api/recommendations", authMiddleware, async (req, res) => { const exps = await Experience.find({ isPaused: false }).sort({ averageRating: -1 }).limit(4); res.json(exps.length > 0 ? exps : await Experience.find({ isPaused: false }).limit(4)); });
+
+// 7. Public/Host Profile Route (NEW)
+app.get("/api/users/:userId/profile", async (req, res) => {
+    try {
+        const user = await User.findById(req.params.userId);
+        if (!user) {
+            return res.status(404).json({ message: "User not found." });
+        }
+
+        // Use the utility function to check if they have any active experiences
+        const isHostProfile = await isHost(user._id);
+
+        let experiences = [];
+        if (isHostProfile) {
+            // Only fetch experiences if the user has posted any
+            experiences = await Experience.find({ hostId: user._id, isPaused: false }).sort({ averageRating: -1, createdAt: -1 });
+        }
+
+        // Sanitize user data for public view (use the existing sanitizeUser function)
+        const publicUser = sanitizeUser(user);
+        
+        // Remove sensitive fields from the public profile object
+        const { email, password, role, notifications, payoutDetails, ...safePublicUser } = publicUser;
+
+        res.json({
+            user: safePublicUser,
+            isHost: isHostProfile,
+            experiences: experiences
+        });
+
+    } catch (error) {
+        console.error("Error fetching public profile:", error);
+        res.status(500).json({ message: "Server error fetching profile." });
+    }
+});
 
 // 🔴 NUCLEAR SEED ROUTE (Fixed Personas + Multi-Category)
 app.get("/api/admin/seed-force", async (req, res) => {
