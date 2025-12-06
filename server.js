@@ -1,4 +1,4 @@
-// server.js - FULL VERSION (Fixed: Aussie Christmas Data)
+// server.js - FULL VERSION (Fixed Personas & Multi-Category Support)
 
 require('dotenv').config();
 const express = require("express");
@@ -67,7 +67,8 @@ const experienceSchema = new mongoose.Schema({
   startDate: String, endDate: String, blockedDates: [String],
   availableDays: { type: [String], default: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"] },
   isPaused: { type: Boolean, default: false },
-  tags: [String], timeSlots: [String], imageUrl: String, images: [String],
+  tags: [String], // Supports Multi-Category: ["Food", "Culture"]
+  timeSlots: [String], imageUrl: String, images: [String],
   lat: { type: Number, default: -37.8136 }, lng: { type: Number, default: 144.9631 },
   privateCapacity: Number, privatePrice: Number, dynamicDiscounts: Object,
   averageRating: { type: Number, default: 0 }, reviewCount: { type: Number, default: 0 },
@@ -168,7 +169,11 @@ app.get("/api/experiences", async (req, res) => {
 
     if (city) query.city = { $regex: city, $options: "i" }; 
     if (q) query.title = { $regex: q, $options: "i" }; 
+    
+    // 🔴 FIX: Support Multi-Category Filtering
+    // If user searches for 'Food', we find listings where 'tags' includes 'Food'
     if (category) query.tags = { $in: [category] };
+
     if (minPrice || maxPrice) { query.price = {}; if (minPrice) query.price.$gte = Number(minPrice); if (maxPrice) query.price.$lte = Number(maxPrice); } 
     if (date) { 
         query.startDate = { $lte: date }; query.endDate = { $gte: date }; 
@@ -278,7 +283,7 @@ app.get("/api/admin/stats", adminMiddleware, async (req, res) => { const revenue
 app.get("/api/admin/bookings", adminMiddleware, async (req, res) => { const bookings = await Booking.find().populate('experience').populate('user').sort({ createdAt: -1 }).limit(50); res.json(bookings); });
 app.get("/api/recommendations", authMiddleware, async (req, res) => { const exps = await Experience.find({ isPaused: false }).sort({ averageRating: -1 }).limit(4); res.json(exps.length > 0 ? exps : await Experience.find({ isPaused: false }).limit(4)); });
 
-// 🔴 NUCLEAR SEED ROUTE (Fixed Availability)
+// 🔴 NUCLEAR SEED ROUTE (Fixed Personas + Multi-Category)
 app.get("/api/admin/seed-force", async (req, res) => {
     try {
         await User.deleteMany({}); await Experience.deleteMany({}); await Review.deleteMany({}); await Booking.deleteMany({});
@@ -286,21 +291,21 @@ app.get("/api/admin/seed-force", async (req, res) => {
         const adminPass = await bcrypt.hash("admin", 10);
         const hostPass = await bcrypt.hash("123", 10);
         
+        // GENERIC / SAFE USERS (No real names)
         await User.create({ name: `Super Admin`, email: `admin@sharedtable.com`, password: adminPass, role: `Admin`, isAdmin: true });
         
-        const host1 = await User.create({ name: `Liam`, email: `liam@host.com`, password: hostPass, role: `Host`, isPremiumHost: true, bio: "Surfer, dad, and seafood lover.", profilePic: "https://images.unsplash.com/photo-1544005313-94ddf0286df2?auto=format&fit=crop&w=200&q=80" });
-        const host2 = await User.create({ name: `Nonna Maria`, email: `maria@host.com`, password: hostPass, role: `Host`, isPremiumHost: true, bio: "Feeding people is my love language.", profilePic: "https://images.unsplash.com/photo-1506794778202-cad84cf45f1d?auto=format&fit=crop&w=200&q=80" });
-        const host3 = await User.create({ name: `Sarah`, email: `sarah@host.com`, password: hostPass, role: `Host`, isPremiumHost: true, bio: "Nature walks and bush tucker.", profilePic: "https://images.unsplash.com/photo-1438761681033-6461ffad8d80?auto=format&fit=crop&w=200&q=80" });
+        const host1 = await User.create({ name: `Lucas`, email: `lucas@host.com`, password: hostPass, role: `Host`, isPremiumHost: true, bio: "Surfer & Chef.", profilePic: "https://images.unsplash.com/photo-1544005313-94ddf0286df2?auto=format&fit=crop&w=200&q=80" });
+        const host2 = await User.create({ name: `Elena`, email: `elena@host.com`, password: hostPass, role: `Host`, isPremiumHost: true, bio: "Sharing family recipes.", profilePic: "https://images.unsplash.com/photo-1506794778202-cad84cf45f1d?auto=format&fit=crop&w=200&q=80" });
+        const host3 = await User.create({ name: `Sarah`, email: `sarah@host.com`, password: hostPass, role: `Host`, isPremiumHost: true, bio: "Nature guide.", profilePic: "https://images.unsplash.com/photo-1438761681033-6461ffad8d80?auto=format&fit=crop&w=200&q=80" });
 
-        // Pillar 1: CULTURE (Aussie Christmas) -> NOW AVAILABLE ALL WEEK
+        // Pillar 1: CULTURE + FOOD (Multi-Category!)
         await Experience.create({ 
             hostId: host1._id, hostName: host1.name, hostPic: host1.profilePic, 
             title: `Aussie Christmas Eve Seafood Feast`, 
             city: `Bondi Beach`, price: 120, maxGuests: 12,
-            tags: ["Culture"], 
+            tags: ["Culture", "Food"], // <--- DUAL CATEGORY
             description: "Fresh prawns, oysters, and pavlova by the beach. Experience a true Australian summer Christmas tradition.",
-            images: ["https://images.unsplash.com/photo-1576402187878-974f70c890a5?q=80&w=800&auto=format&fit=crop"],
-            // 🔴 FIX: Open availability so it shows up regardless of 'Today'
+            images: ["https://images.unsplash.com/photo-1606131731446-5568d87113aa?auto=format&fit=crop&w=800&q=80"], // Seafood Platter
             availableDays: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
             startDate: "2025-12-01", endDate: "2025-12-31"
         });
@@ -323,13 +328,13 @@ app.get("/api/admin/seed-force", async (req, res) => {
             title: `Coastal Foraging & Picnic`, 
             city: `Byron Bay`, price: 95, maxGuests: 8,
             tags: ["Nature"], 
-            description: "Walk the coast, learn about native ingredients, and share a picnic on the cliffs.",
+            description: "Walk the coast, learn about native ingredients, and share a picnic on the cliffs at sunset.",
             images: ["https://images.unsplash.com/photo-1469854523086-cc02fe5d8800?auto=format&fit=crop&w=800&q=80"],
             availableDays: ["Sat", "Sun"],
             startDate: "2025-01-01", endDate: "2025-12-31"
         });
 
-        res.send("✅ DATABASE RESET: 3 Pillar Listings Created (Available All Week).");
+        res.send("✅ DATABASE RESET: Multi-Category Listings Created (Culture+Food).");
     } catch(e) { res.status(500).send(e.message); }
 });
 
