@@ -1,4 +1,4 @@
-// server.js - FULL VERSION (Includes 3-Pillar Data Reset)
+// server.js - FULL VERSION (Fixed: Aussie Christmas Data)
 
 require('dotenv').config();
 const express = require("express");
@@ -278,7 +278,7 @@ app.get("/api/admin/stats", adminMiddleware, async (req, res) => { const revenue
 app.get("/api/admin/bookings", adminMiddleware, async (req, res) => { const bookings = await Booking.find().populate('experience').populate('user').sort({ createdAt: -1 }).limit(50); res.json(bookings); });
 app.get("/api/recommendations", authMiddleware, async (req, res) => { const exps = await Experience.find({ isPaused: false }).sort({ averageRating: -1 }).limit(4); res.json(exps.length > 0 ? exps : await Experience.find({ isPaused: false }).limit(4)); });
 
-// 🔴 NUCLEAR SEED ROUTE (Aligned to 3 Pillars)
+// 🔴 NUCLEAR SEED ROUTE (Aligned to 3 Pillars + Australian Christmas)
 app.get("/api/admin/seed-force", async (req, res) => {
     try {
         await User.deleteMany({}); await Experience.deleteMany({}); await Review.deleteMany({}); await Booking.deleteMany({});
@@ -286,49 +286,49 @@ app.get("/api/admin/seed-force", async (req, res) => {
         const adminPass = await bcrypt.hash("admin", 10);
         const hostPass = await bcrypt.hash("123", 10);
         
-        await User.create({ name: `Super Admin`, email: `admin@sharedtable.com`, password: adminPass, role: `Admin`, isAdmin: true });
+        const admin = await User.create({ name: `Super Admin`, email: `admin@sharedtable.com`, password: adminPass, role: `Admin`, isAdmin: true });
         
-        const host1 = await User.create({ name: `Elena`, email: `elena@host.com`, password: hostPass, role: `Host`, isPremiumHost: true, bio: "Sharing my grandmother's recipes.", profilePic: "https://images.unsplash.com/photo-1544005313-94ddf0286df2?auto=format&fit=crop&w=200&q=80" });
-        const host2 = await User.create({ name: `Raj`, email: `raj@host.com`, password: hostPass, role: `Host`, isPremiumHost: true, bio: "Celebrating festivals together.", profilePic: "https://images.unsplash.com/photo-1506794778202-cad84cf45f1d?auto=format&fit=crop&w=200&q=80" });
+        const host1 = await User.create({ name: `Liam`, email: `liam@host.com`, password: hostPass, role: `Host`, isPremiumHost: true, bio: "Surfer, dad, and seafood lover.", profilePic: "https://images.unsplash.com/photo-1544005313-94ddf0286df2?auto=format&fit=crop&w=200&q=80" });
+        const host2 = await User.create({ name: `Nonna Maria`, email: `maria@host.com`, password: hostPass, role: `Host`, isPremiumHost: true, bio: "Feeding people is my love language.", profilePic: "https://images.unsplash.com/photo-1506794778202-cad84cf45f1d?auto=format&fit=crop&w=200&q=80" });
         const host3 = await User.create({ name: `Sarah`, email: `sarah@host.com`, password: hostPass, role: `Host`, isPremiumHost: true, bio: "Nature walks and bush tucker.", profilePic: "https://images.unsplash.com/photo-1438761681033-6461ffad8d80?auto=format&fit=crop&w=200&q=80" });
 
-        // Pillar 1: FOOD
+        // Pillar 1: CULTURE & FESTIVALS (Updated for AUS CHRISTMAS)
         await Experience.create({ 
             hostId: host1._id, hostName: host1.name, hostPic: host1.profilePic, 
-            title: `Nonna's Sunday Gravy`, 
+            title: `Aussie Christmas Eve Seafood Feast`, 
+            city: `Bondi Beach`, price: 120, maxGuests: 12,
+            tags: ["Culture"], 
+            description: "Fresh prawns, oysters, and pavlova by the beach. Experience a true Australian summer Christmas tradition.",
+            images: ["https://images.unsplash.com/photo-1576402187878-974f70c890a5?q=80&w=800&auto=format&fit=crop"],
+            availableDays: ["Sun", "Mon"],
+            startDate: "2025-12-01", endDate: "2025-12-31"
+        });
+
+        // Pillar 2: FOOD & DINING
+        await Experience.create({ 
+            hostId: host2._id, hostName: host2.name, hostPic: host2.profilePic, 
+            title: `Sunday Gravy with Nonna`, 
             city: `Melbourne`, price: 65, maxGuests: 6,
             tags: ["Food"], 
-            description: "A slow-cooked Italian feast using recipes passed down for 3 generations.",
+            description: "A slow-cooked Italian feast using recipes passed down for 3 generations. Come hungry.",
             images: ["https://images.unsplash.com/photo-1543353071-873f17a7a088?auto=format&fit=crop&w=800&q=80"],
             availableDays: ["Sat", "Sun"],
             startDate: "2025-01-01", endDate: "2025-12-31"
         });
 
-        // Pillar 2: CULTURE
-        await Experience.create({ 
-            hostId: host2._id, hostName: host2.name, hostPic: host2.profilePic, 
-            title: `Diwali Festival of Lights`, 
-            city: `Sydney`, price: 85, maxGuests: 10,
-            tags: ["Culture"], 
-            description: "Lighting lamps, sharing sweets, and understanding the victory of light over darkness.",
-            images: ["https://images.unsplash.com/photo-1550050638-34c9c825f952?auto=format&fit=crop&w=800&q=80"],
-            availableDays: ["Fri", "Sat"],
-            startDate: "2025-01-01", endDate: "2025-12-31"
-        });
-
-        // Pillar 3: NATURE
+        // Pillar 3: NATURE & TOURS
         await Experience.create({ 
             hostId: host3._id, hostName: host3.name, hostPic: host3.profilePic, 
-            title: `Coastal Foraging Walk`, 
-            city: `Byron Bay`, price: 120, maxGuests: 8,
+            title: `Coastal Foraging & Picnic`, 
+            city: `Byron Bay`, price: 95, maxGuests: 8,
             tags: ["Nature"], 
-            description: "Walk the coast, learn about native ingredients, and share a picnic on the cliffs.",
+            description: "Walk the coast, learn about native ingredients, and share a picnic on the cliffs at sunset.",
             images: ["https://images.unsplash.com/photo-1469854523086-cc02fe5d8800?auto=format&fit=crop&w=800&q=80"],
-            availableDays: ["Sun"],
+            availableDays: ["Sun", "Sat"],
             startDate: "2025-01-01", endDate: "2025-12-31"
         });
 
-        res.send("✅ DATABASE RESET: 3 Pillar Listings Created (Food, Culture, Nature).");
+        res.send("✅ DATABASE RESET: 3 Pillar Listings Created (Aussie Christmas, Food, Nature).");
     } catch(e) { res.status(500).send(e.message); }
 });
 
