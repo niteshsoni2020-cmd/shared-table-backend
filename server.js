@@ -294,6 +294,37 @@ app.post("/api/auth/register", async (req, res) => {
   }
 });
 
+// 2b. Auth Login
+app.post("/api/auth/login", async (req, res) => {
+  try {
+    const { email, password } = req.body || {};
+    if (!email || !password) {
+      return res.status(400).json({ message: "Email and password required" });
+    }
+
+    const user = await User.findOne({
+      email: String(email).toLowerCase().trim()
+    });
+
+    if (!user) {
+      return res.status(401).json({ message: "Invalid credentials" });
+    }
+
+    const ok = await bcrypt.compare(String(password), user.password || "");
+    if (!ok) {
+      return res.status(401).json({ message: "Invalid credentials" });
+    }
+
+    return res.json({
+      token: `user-${user._id}`,
+      user: sanitizeUser(user)
+    });
+  } catch (e) {
+    console.error("Login error:", e);
+    return res.status(500).json({ message: "Login failed" });
+  }
+});
+
 // 3. Experience Routes
 
 // CREATE EXPERIENCE – with category sanitization
