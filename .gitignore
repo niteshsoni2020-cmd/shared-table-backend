@@ -1,3 +1,11 @@
 node_modules
 .env
 .DS_Store
+
+# local one-off backups
+_local_bak/
+*.bak*
+server.js.pre_*
+server.js.bad_syntax_*
+seed.js.pre_*
+.env*

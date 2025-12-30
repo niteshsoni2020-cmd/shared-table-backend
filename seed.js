@@ -165,7 +165,7 @@ const seed = async () => {
         title: 'Secret Laneway Coffee Walk',
         city: 'Melbourne',
         price: 35,
-        tags: ['Nature', 'Budget'],
+        tags: ['Nature'],
         description:
           "Discover hidden laneway cafés, street art, and third-wave coffee spots. Perfect for solo travellers who want to explore Melbourne's coffee culture without a tour bus.",
         imageUrl:
@@ -178,7 +178,7 @@ const seed = async () => {
         title: 'Sunset Pasta & Wine',
         city: 'Sydney',
         price: 90,
-        tags: ['Food', 'Date Night'],
+        tags: ['Food'],
         description:
           'Hand-rolled pasta, good wine, and golden-hour views. Share a slow, lingering dinner on a balcony overlooking the water in Sydney.',
         imageUrl:

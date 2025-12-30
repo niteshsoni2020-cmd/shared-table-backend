@@ -8,17 +8,170 @@ const multer = require("multer");
 const { CloudinaryStorage } = require("multer-storage-cloudinary");
 const cloudinary = require("cloudinary").v2;
 const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
+const STRIPE_WEBHOOK_SECRET = String(process.env.STRIPE_WEBHOOK_SECRET || "");
 const nodemailer = require("nodemailer");
 const bcrypt = require("bcryptjs");
+const rateLimit = require("express-rate-limit");
 
+const jwt = require("jsonwebtoken");
 // 🔹 Single Source of Truth for Categories (3 Pillars)
 const CATEGORY_PILLARS = ["Culture", "Food", "Nature"];
 
 // 1. Initialize App
 const app = express();
 const PORT = process.env.PORT || 4000;
+// --- Rate limiting (basic abuse protection) ---
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 min
+  limit: 300,               // per IP per window
+  standardHeaders: true,
+  legacyHeaders: false
+});
 
-app.use(cors());
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 30,
+  standardHeaders: true,
+  legacyHeaders: false
+});
+
+
+// --- CORS (locked allowlist) ---
+// Set CORS_ORIGINS as comma-separated list
+// Example: "https://thesharedtablestory.com,https://www.thesharedtablestory.com,http://localhost:3000"
+const CORS_ORIGINS = String(process.env.CORS_ORIGINS || "http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173")
+  .split(",")
+  .map(v => v.trim())
+  .filter(Boolean);
+
+const corsOptions = {
+  origin: function (origin, cb) {
+    // allow non-browser requests (curl/postman) with no Origin header
+    if (!origin) return cb(null, true);
+    if (CORS_ORIGINS.includes(origin)) return cb(null, true);
+    return cb(new Error("CORS blocked: origin not allowed"), false);
+  },
+  credentials: true,
+  methods: ["GET","POST","PUT","PATCH","DELETE","OPTIONS"],
+  allowedHeaders: ["Content-Type","Authorization"],
+  optionsSuccessStatus: 204
+};
+
+app.use(cors(corsOptions));
+app.options("*", cors(corsOptions));
+
+app.use("/api", apiLimiter);
+app.use("/api/auth", authLimiter);
+
+
+// --- STRIPE WEBHOOK (authoritative payment source of truth) ---
+// NOTE: must be registered BEFORE express.json() so raw body is preserved for signature verification.
+app.post("/api/stripe/webhook", express.raw({ type: "application/json" }), async (req, res) => {
+  try {
+    if (!STRIPE_WEBHOOK_SECRET) return res.status(500).send("Missing STRIPE_WEBHOOK_SECRET");
+
+    const sig = req.headers["stripe-signature"];
+    let event;
+    try {
+      event = stripe.webhooks.constructEvent(req.body, sig, STRIPE_WEBHOOK_SECRET);
+    } catch (err) {
+      return res.status(400).send("Webhook signature verification failed");
+    }
+
+    
+if (event.type === "checkout.session.completed") {
+      const session = event.data.object || {};
+
+      const bookingId =
+        session.client_reference_id ||
+        (session.metadata && session.metadata.bookingId);
+
+      if (!bookingId) return res.json({ received: true });
+
+      const BookingModel = mongoose.models.Booking || mongoose.model("Booking", bookingSchema);
+      const booking = await BookingModel.findById(bookingId);
+      if (!booking) return res.json({ received: true });
+
+      booking.status = "confirmed";
+      booking.paymentStatus = "paid";
+      booking.stripeSessionId = String(session.id || booking.stripeSessionId || "");
+
+      try {
+        if (session.id) {
+          const full = await stripe.checkout.sessions.retrieve(String(session.id), {
+            expand: ["payment_intent", "line_items"]
+          });
+
+          // GUARANTEES: always persist these fields even if Stripe omits some totals
+          if (!booking.currency) booking.currency = String((full.currency || session.currency || (booking.pricing && booking.pricing.currency) || "aud")).toLowerCase();
+
+          const amt =
+            (Number.isFinite(full.amount_total) && Number(full.amount_total)) ||
+            (Number.isFinite(session.amount_total) && Number(session.amount_total)) ||
+            (booking.pricing && Number.isFinite(booking.pricing.totalCents) && Number(booking.pricing.totalCents)) ||
+            null;
+
+          if (amt !== null) booking.amountCents = amt;
+
+          const piObj = full.payment_intent;
+          const pi2 =
+            (piObj && (piObj.id || piObj)) ||
+            session.payment_intent ||
+            null;
+
+          if (pi2) booking.stripePaymentIntentId = String(pi2);
+
+
+          const pi =
+            (full && full.payment_intent && (full.payment_intent.id || full.payment_intent)) ||
+            (full && full.payment_intent) ||
+            session.payment_intent;
+
+          if (pi) booking.stripePaymentIntentId = String(pi);
+
+          if (Number.isFinite(full && full.amount_total)) {
+            booking.amountCents = Number(full.amount_total);
+          } else if (Number.isFinite(session.amount_total)) {
+            booking.amountCents = Number(session.amount_total);
+          }
+
+          if (full && full.currency) {
+            booking.currency = String(full.currency).toLowerCase();
+          } else if (session.currency) {
+            booking.currency = String(session.currency).toLowerCase();
+          }
+        } else {
+          if (session.payment_intent) booking.stripePaymentIntentId = String(session.payment_intent);
+          if (Number.isFinite(session.amount_total)) booking.amountCents = Number(session.amount_total);
+          if (session.currency) booking.currency = String(session.currency).toLowerCase();
+        }
+      } catch (e) {
+        if (session.payment_intent) booking.stripePaymentIntentId = String(session.payment_intent);
+        if (Number.isFinite(session.amount_total)) booking.amountCents = Number(session.amount_total);
+        if (session.currency) booking.currency = String(session.currency).toLowerCase();
+      }
+
+      booking.currency = String((booking.currency || "aud")).toLowerCase();
+      booking.paidAt = booking.paidAt || new Date();
+
+      await booking.save();
+    }
+
+
+    return res.json({ received: true });
+  } catch (e) {
+    return res.status(500).send("Webhook handler error");
+  }
+});
+
+// --- CORS error handler (clean response) ---
+app.use((err, req, res, next) => {
+  if (err && String(err.message || "").startsWith("CORS blocked")) {
+    return res.status(403).json({ error: "CORS blocked" });
+  }
+  return next(err);
+});
+
 app.use(express.json());
 
 // --- 2. CONNECT TO MONGODB ---
@@ -178,18 +331,39 @@ const Booking = mongoose.model("Booking", bookingSchema);
 const Review = mongoose.model("Review", reviewSchema);
 
 // --- MIDDLEWARE ---
+const JWT_SECRET = String(process.env.JWT_SECRET || "");
+function signToken(user) {
+  if (!JWT_SECRET) throw new Error("Missing JWT_SECRET");
+  return jwt.sign(
+    { userId: String(user._id), isAdmin: !!user.isAdmin },
+    JWT_SECRET,
+    { expiresIn: "30d" }
+  );
+}
 async function authMiddleware(req, res, next) {
   const authHeader = req.headers["authorization"];
   if (!authHeader) return res.status(401).json({ message: "Missing header" });
-  const token = authHeader.split(" ")[1];
-  const dbId = token.replace("user-", "");
+
+  const parts = String(authHeader).split(" ");
+  if (parts.length !== 2 || parts[0] !== "Bearer") {
+    return res.status(401).json({ message: "Invalid auth header" });
+  }
+
+  const token = parts[1];
   try {
-    const user = await User.findById(dbId);
+    if (!JWT_SECRET) return res.status(500).json({ message: "Server missing JWT_SECRET" });
+    const payload = jwt.verify(token, JWT_SECRET);
+    const userId = String(payload.userId || "");
+    if (!userId) return res.status(401).json({ message: "Invalid token" });
+
+    const user = await User.findById(userId);
     if (!user) return res.status(401).json({ message: "User not found" });
+
     req.user = user;
+    req.auth = { userId, isAdmin: !!payload.isAdmin };
     next();
   } catch (err) {
-    res.status(401).json({ message: "Invalid Token" });
+    return res.status(401).json({ message: "Invalid Token" });
   }
 }
 function adminMiddleware(req, res, next) {
@@ -286,7 +460,7 @@ app.post("/api/auth/register", async (req, res) => {
     });
 
     res.status(201).json({
-      token: `user-${user._id}`,
+      token: signToken(user),
       user: sanitizeUser(user)
     });
   } catch (e) {
@@ -316,7 +490,7 @@ app.post("/api/auth/login", async (req, res) => {
     }
 
     return res.json({
-      token: `user-${user._id}`,
+      token: signToken(user),
       user: sanitizeUser(user)
     });
   } catch (e) {
@@ -325,6 +499,46 @@ app.post("/api/auth/login", async (req, res) => {
   }
 });
 
+
+// 2c. Current User
+app.get("/api/auth/me", authMiddleware, async (req, res) => {
+  try {
+    return res.json({ user: sanitizeUser(req.user) });
+  } catch (e) {
+    return res.status(500).json({ message: "Server error" });
+  }
+});
+
+// 2d. Update Profile (Allowlist)
+app.put("/api/auth/update", authMiddleware, async (req, res) => {
+  try {
+    const body = req.body || {};
+    const allowed = ["name", "bio", "location", "mobile", "profilePic", "preferences"];
+    const updates = {};
+    for (const k of allowed) {
+      if (Object.prototype.hasOwnProperty.call(body, k)) updates[k] = body[k];
+    }
+
+    // never allow privilege changes
+    delete updates.isAdmin;
+    delete updates.role;
+    delete updates.isPremiumHost;
+    delete updates.vacationMode;
+    delete updates.payoutDetails;
+    delete updates.email;
+    delete updates.password;
+
+    const user = await User.findByIdAndUpdate(
+      req.user._id,
+      { $set: updates },
+      { new: true }
+    );
+    return res.json({ user: sanitizeUser(user) });
+  } catch (e) {
+    console.error("Update profile error:", e);
+    return res.status(500).json({ message: "Update failed" });
+  }
+});
 // 3. Experience Routes
 
 // CREATE EXPERIENCE – with category sanitization
@@ -515,20 +729,24 @@ app.post("/api/experiences/:id/book", authMiddleware, async (req, res) => {
   if (!cap.available) return res.status(400).json({ message: cap.message });
 
   // --- 🔴 PRICING LOGIC START (Zero Blind Spots) ---
-  let unitPrice = exp.price;
-  let total = unitPrice * guests;
+  // --- 🔴 PRICING LOGIC START (Zero Blind Spots) ---
+  // P0: use integer cents end-to-end (no float rounding leaks)
+  const toCents = (n) => Math.round(Number(n) * 100);
+
+  const unitCents = toCents(exp.price);
+  let totalCents = unitCents * guests;
   let description = `${guests} Guests`;
 
-  // Apply 10% Discount for 3+ Guests
+  // Apply 10% Discount for 3+ Guests (integer cents)
   if (guests >= 3) {
-      total = total * 0.90; // Apply 10% off
-      description += " (10% Group Discount Applied)";
+    totalCents = Math.round(totalCents * 0.90);
+    description += " (10% Group Discount Applied)";
   }
 
-  // Handle Private Booking Override (if applicable)
+  // Private Booking Override (if applicable)
   if (isPrivate && exp.privatePrice) {
-      total = exp.privatePrice;
-      description = "Private Booking";
+    totalCents = toCents(exp.privatePrice);
+    description = "Private Booking";
   }
   // --- 🔴 PRICING LOGIC END ---
 
@@ -537,18 +755,21 @@ app.post("/api/experiences/:id/book", authMiddleware, async (req, res) => {
     guestId: req.user._id,
     guestName: req.user.name,
     guestEmail: req.user.email,
-    hostId: String(exp.hostId || req.user._id),
+    hostId: String(exp.hostId),
     numGuests: guests,
     bookingDate,
     timeSlot,
     guestNotes: guestNotes || "",
-    pricing: { totalPrice: parseFloat(total.toFixed(2)) }
+    pricing: { totalPrice: Number((totalCents / 100).toFixed(2)), totalCents, currency: "aud" }
   });
 
   await booking.save();
 
   try {
+    const baseUrl = String(process.env.PUBLIC_URL || ("http://localhost:" + (process.env.PORT || 4000)));
     const session = await stripe.checkout.sessions.create({
+      client_reference_id: String(booking._id),
+      metadata: { bookingId: String(booking._id), experienceId: String(exp._id), guestId: String(req.user._id) },
       payment_method_types: ["card"],
       line_items: [
         {
@@ -558,14 +779,14 @@ app.post("/api/experiences/:id/book", authMiddleware, async (req, res) => {
                 name: exp.title,
                 description: description // Shows up on Stripe Checkout Page
             },
-            unit_amount: Math.round(total * 100 / guests) // Stripe expects unit price, so we reverse-calc
+            unit_amount: totalCents,
           },
-          quantity: guests
+          quantity: 1
         }
       ],
       mode: "payment",
-      success_url: `${req.headers.origin}/success.html?session_id={CHECKOUT_SESSION_ID}&booking_id=${booking._id}`,
-      cancel_url: `${req.headers.origin}/experience.html?id=${exp._id}`
+      success_url: `${baseUrl}/success.html?session_id={CHECKOUT_SESSION_ID}&booking_id=${booking._id}`,
+      cancel_url: `${baseUrl}/experience.html?id=${exp._id}`
     });
     booking.stripeSessionId = session.id;
     await booking.save();
@@ -577,47 +798,61 @@ app.post("/api/experiences/:id/book", authMiddleware, async (req, res) => {
 });
 
 app.post("/api/bookings/verify", authMiddleware, async (req, res) => {
-  const { bookingId, sessionId } = req.body;
+  const { bookingId, sessionId } = req.body || {};
   const booking = await Booking.findById(bookingId);
-  if (!booking || booking.status === "confirmed")
-    return res.json({ status: booking ? booking.status : "not_found" });
+  if (!booking) return res.json({ status: "not_found" });
+
+  if (booking.paymentStatus === "paid" || booking.status === "confirmed") {
+    return res.json({ status: "confirmed" });
+  }
+
   try {
-    const session = await stripe.checkout.sessions.retrieve(sessionId);
-    if (session.payment_status === "paid") {
+    const session = await stripe.checkout.sessions.retrieve(String(sessionId || ""), { expand: ["payment_intent"] });
+
+    const metaBookingId =
+      (session && session.client_reference_id) ||
+      (session && session.metadata && session.metadata.bookingId) ||
+      "";
+
+    if (String(metaBookingId) !== String(booking._id)) {
+      return res.status(400).json({ status: "mismatch", error: "session does not match booking" });
+    }
+
+    const currency = String(session.currency || "aud").toLowerCase();
+    const amountTotal = Number.isFinite(session.amount_total) ? Number(session.amount_total) : null;
+
+    const expectedCents = booking.pricing && Number.isFinite(booking.pricing.totalCents) ? Number(booking.pricing.totalCents) : null;
+
+    if (expectedCents !== null && amountTotal !== null && amountTotal !== expectedCents) {
+      return res.status(400).json({ status: "mismatch", error: "amount mismatch" });
+    }
+
+    if (expectedCents !== null && amountTotal === null) {
+      // no totals available: still return status without confirming
+      return res.json({ status: String(session.payment_status || "unknown"), bookingStatus: booking.status, paymentStatus: booking.paymentStatus });
+    }
+
+    const stripeStatus = String(session.payment_status || "unknown");
+
+    if (stripeStatus === "paid") {
       booking.status = "confirmed";
       booking.paymentStatus = "paid";
+      booking.stripeSessionId = String(session.id || booking.stripeSessionId || "");
+      if (session.payment_intent) booking.stripePaymentIntentId = String(session.payment_intent.id || session.payment_intent);
+      booking.amountCents = expectedCents !== null ? expectedCents : amountTotal;
+      booking.currency = currency;
+      booking.paidAt = booking.paidAt || new Date();
       await booking.save();
-
-      sendEmail({
-        to: req.user.email,
-        subject: `Confirmed!`,
-        html: `<p>Booking Confirmed</p>`
-      });
-
-      const exp = await Experience.findById(booking.experienceId);
-      const host = await User.findById(exp.hostId);
-      if (host) {
-        const notesHtml = booking.guestNotes
-          ? `<p><strong>Guest Note:</strong> ${booking.guestNotes}</p>`
-          : "";
-        host.notifications.push({
-          message: `New Booking: ${req.user.name}`,
-          type: "success"
-        });
-        await host.save();
-        sendEmail({
-          to: host.email,
-          subject: `New Booking!`,
-          html: `<p>${req.user.name} booked.</p>${notesHtml}`
-        });
-      }
       return res.json({ status: "confirmed" });
     }
-    return res.status(400).json({ status: "unpaid" });
+
+    return res.json({ status: stripeStatus, bookingStatus: booking.status, paymentStatus: booking.paymentStatus });
   } catch (e) {
-    res.status(500).json({ message: "Verification failed" });
+    return res.status(500).json({ message: "Verification failed" });
   }
 });
+
+
 
 // Host Dashboard Routes
 app.get("/api/bookings/host-bookings", authMiddleware, async (req, res) => {
@@ -925,10 +1160,22 @@ app.get("/api/users/:userId/profile", async (req, res) => {
     res.status(500).json({ message: "Server error fetching profile." });
   }
 });
-
 // 🔴 NUCLEAR SEED ROUTE (Fixed Personas + Multi-Category)
-app.get("/api/admin/seed-force", async (req, res) => {
+app.post("/api/admin/seed-force", adminMiddleware, async (req, res) => {
   try {
+    const isProd = String(process.env.NODE_ENV || "").toLowerCase() === "production";
+    const allowSeedForce = String(process.env.ALLOW_SEED_FORCE || "").toLowerCase() === "true";
+    const requiredKey = String(process.env.SEED_FORCE_KEY || "");
+    const providedKey = String(req.headers["x-seed-key"] || "");
+    if (isProd) {
+      return res.status(403).json({ error: "seed-force disabled in production" });
+    }
+    if (!allowSeedForce) {
+      return res.status(403).json({ error: "seed-force disabled (set ALLOW_SEED_FORCE=true to enable)" });
+    }
+    if (!requiredKey || providedKey !== requiredKey) {
+      return res.status(401).json({ error: "unauthorized" });
+    }
     await User.deleteMany({});
     await Experience.deleteMany({});
     await Review.deleteMany({});
