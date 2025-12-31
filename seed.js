@@ -1,3 +1,7 @@
+const YEAR = new Date().getFullYear();
+const START_OF_YEAR = `${YEAR}-01-01`;
+const END_OF_YEAR = `${YEAR}-12-31`;
+
 // backend/seed.js
 
 require('dotenv').config();
@@ -158,8 +162,8 @@ const seed = async () => {
         imageUrl:
           'https://images.unsplash.com/photo-1576402187878-974f70c890a5?q=80&w=800&auto=format&fit=crop',
         availableDays: ['Fri', 'Sat', 'Sun'],
-        startDate: '2025-12-01',
-        endDate: '2025-12-31',
+        startDate: START_OF_YEAR,
+        endDate: END_OF_YEAR,
       },
       {
         title: 'Secret Laneway Coffee Walk',
@@ -171,8 +175,8 @@ const seed = async () => {
         imageUrl:
           'https://images.unsplash.com/photo-1497935586351-b67a49e012bf?auto=format&fit=crop&w=900&q=80',
         availableDays: ['Sat', 'Sun'],
-        startDate: '2025-01-01',
-        endDate: '2025-12-31',
+        startDate: START_OF_YEAR,
+        endDate: END_OF_YEAR,
       },
       {
         title: 'Sunset Pasta & Wine',
@@ -184,8 +188,8 @@ const seed = async () => {
         imageUrl:
           'https://images.unsplash.com/photo-1556910103-1c02745a30bf?auto=format&fit=crop&w=900&q=80',
         availableDays: ['Fri', 'Sat'],
-        startDate: '2025-01-01',
-        endDate: '2025-12-31',
+        startDate: START_OF_YEAR,
+        endDate: END_OF_YEAR,
       },
     ];
 
