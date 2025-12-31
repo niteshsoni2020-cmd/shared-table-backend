@@ -1,6 +1,6 @@
-// server.js - FULL VERSION (Public Profile Route + Category Pillars + DISCOUNT LOGIC)
+// server.js - FULL VERSION (Privacy-first attendee discovery + Like/Comment + Public profile hardening)
 
-require('dotenv').config();
+require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const mongoose = require("mongoose");
@@ -12,37 +12,57 @@ const STRIPE_WEBHOOK_SECRET = String(process.env.STRIPE_WEBHOOK_SECRET || "");
 const nodemailer = require("nodemailer");
 const bcrypt = require("bcryptjs");
 const rateLimit = require("express-rate-limit");
-
+const helmet = require("helmet");
 const jwt = require("jsonwebtoken");
-// 🔹 Single Source of Truth for Categories (3 Pillars)
+
+// Single Source of Truth for Categories (3 Pillars)
 const CATEGORY_PILLARS = ["Culture", "Food", "Nature"];
 
 // 1. Initialize App
 const app = express();
 const PORT = process.env.PORT || 4000;
-// --- Rate limiting (basic abuse protection) ---
+
+// Security headers (baseline hardening)
+app.disable("x-powered-by");
+app.use(
+  helmet({
+    crossOriginResourcePolicy: false,
+  })
+);
+
+// Rate limiting (basic abuse protection)
 const apiLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 min
-  limit: 300,               // per IP per window
+  windowMs: 15 * 60 * 1000,
+  limit: 300,
   standardHeaders: true,
-  legacyHeaders: false
+  legacyHeaders: false,
 });
 
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   limit: 30,
   standardHeaders: true,
-  legacyHeaders: false
+  legacyHeaders: false,
 });
 
-
-// --- CORS (locked allowlist) ---
+// CORS (locked allowlist)
 // Set CORS_ORIGINS as comma-separated list
 // Example: "https://thesharedtablestory.com,https://www.thesharedtablestory.com,http://localhost:3000"
-const CORS_ORIGINS = String(process.env.CORS_ORIGINS || "http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173")
+const DEFAULT_CORS_ORIGINS = [
+  "http://localhost:3000",
+  "http://127.0.0.1:3000",
+  "http://localhost:5173",
+  "http://127.0.0.1:5173",
+  "https://thesharedtablestory.com",
+  "https://www.thesharedtablestory.com"
+];
+
+const ENV_CORS_ORIGINS = String(process.env.CORS_ORIGINS || "")
   .split(",")
-  .map(v => v.trim())
+  .map((v) => v.trim())
   .filter(Boolean);
+
+const CORS_ORIGINS = Array.from(new Set([...DEFAULT_CORS_ORIGINS, ...ENV_CORS_ORIGINS]));
 
 const corsOptions = {
   origin: function (origin, cb) {
@@ -52,9 +72,9 @@ const corsOptions = {
     return cb(new Error("CORS blocked: origin not allowed"), false);
   },
   credentials: true,
-  methods: ["GET","POST","PUT","PATCH","DELETE","OPTIONS"],
-  allowedHeaders: ["Content-Type","Authorization"],
-  optionsSuccessStatus: 204
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+  optionsSuccessStatus: 204,
 };
 
 app.use(cors(corsOptions));
@@ -63,108 +83,7 @@ app.options("*", cors(corsOptions));
 app.use("/api", apiLimiter);
 app.use("/api/auth", authLimiter);
 
-
-// --- STRIPE WEBHOOK (authoritative payment source of truth) ---
-// NOTE: must be registered BEFORE express.json() so raw body is preserved for signature verification.
-app.post("/api/stripe/webhook", express.raw({ type: "application/json" }), async (req, res) => {
-  try {
-    if (!STRIPE_WEBHOOK_SECRET) return res.status(500).send("Missing STRIPE_WEBHOOK_SECRET");
-
-    const sig = req.headers["stripe-signature"];
-    let event;
-    try {
-      event = stripe.webhooks.constructEvent(req.body, sig, STRIPE_WEBHOOK_SECRET);
-    } catch (err) {
-      return res.status(400).send("Webhook signature verification failed");
-    }
-
-    
-if (event.type === "checkout.session.completed") {
-      const session = event.data.object || {};
-
-      const bookingId =
-        session.client_reference_id ||
-        (session.metadata && session.metadata.bookingId);
-
-      if (!bookingId) return res.json({ received: true });
-
-      const BookingModel = mongoose.models.Booking || mongoose.model("Booking", bookingSchema);
-      const booking = await BookingModel.findById(bookingId);
-      if (!booking) return res.json({ received: true });
-
-      booking.status = "confirmed";
-      booking.paymentStatus = "paid";
-      booking.stripeSessionId = String(session.id || booking.stripeSessionId || "");
-
-      try {
-        if (session.id) {
-          const full = await stripe.checkout.sessions.retrieve(String(session.id), {
-            expand: ["payment_intent", "line_items"]
-          });
-
-          // GUARANTEES: always persist these fields even if Stripe omits some totals
-          if (!booking.currency) booking.currency = String((full.currency || session.currency || (booking.pricing && booking.pricing.currency) || "aud")).toLowerCase();
-
-          const amt =
-            (Number.isFinite(full.amount_total) && Number(full.amount_total)) ||
-            (Number.isFinite(session.amount_total) && Number(session.amount_total)) ||
-            (booking.pricing && Number.isFinite(booking.pricing.totalCents) && Number(booking.pricing.totalCents)) ||
-            null;
-
-          if (amt !== null) booking.amountCents = amt;
-
-          const piObj = full.payment_intent;
-          const pi2 =
-            (piObj && (piObj.id || piObj)) ||
-            session.payment_intent ||
-            null;
-
-          if (pi2) booking.stripePaymentIntentId = String(pi2);
-
-
-          const pi =
-            (full && full.payment_intent && (full.payment_intent.id || full.payment_intent)) ||
-            (full && full.payment_intent) ||
-            session.payment_intent;
-
-          if (pi) booking.stripePaymentIntentId = String(pi);
-
-          if (Number.isFinite(full && full.amount_total)) {
-            booking.amountCents = Number(full.amount_total);
-          } else if (Number.isFinite(session.amount_total)) {
-            booking.amountCents = Number(session.amount_total);
-          }
-
-          if (full && full.currency) {
-            booking.currency = String(full.currency).toLowerCase();
-          } else if (session.currency) {
-            booking.currency = String(session.currency).toLowerCase();
-          }
-        } else {
-          if (session.payment_intent) booking.stripePaymentIntentId = String(session.payment_intent);
-          if (Number.isFinite(session.amount_total)) booking.amountCents = Number(session.amount_total);
-          if (session.currency) booking.currency = String(session.currency).toLowerCase();
-        }
-      } catch (e) {
-        if (session.payment_intent) booking.stripePaymentIntentId = String(session.payment_intent);
-        if (Number.isFinite(session.amount_total)) booking.amountCents = Number(session.amount_total);
-        if (session.currency) booking.currency = String(session.currency).toLowerCase();
-      }
-
-      booking.currency = String((booking.currency || "aud")).toLowerCase();
-      booking.paidAt = booking.paidAt || new Date();
-
-      await booking.save();
-    }
-
-
-    return res.json({ received: true });
-  } catch (e) {
-    return res.status(500).send("Webhook handler error");
-  }
-});
-
-// --- CORS error handler (clean response) ---
+// CORS error handler (clean response)
 app.use((err, req, res, next) => {
   if (err && String(err.message || "").startsWith("CORS blocked")) {
     return res.status(403).json({ error: "CORS blocked" });
@@ -172,29 +91,134 @@ app.use((err, req, res, next) => {
   return next(err);
 });
 
+// IMPORTANT: webhook must be registered BEFORE express.json()
+app.post(
+  "/api/stripe/webhook",
+  express.raw({ type: "application/json" }),
+  async (req, res) => {
+    try {
+      if (!STRIPE_WEBHOOK_SECRET)
+        return res.status(500).send("Missing STRIPE_WEBHOOK_SECRET");
+
+      const sig = req.headers["stripe-signature"];
+      let event;
+      try {
+        event = stripe.webhooks.constructEvent(
+          req.body,
+          sig,
+          STRIPE_WEBHOOK_SECRET
+        );
+      } catch (err) {
+        return res.status(400).send("Webhook signature verification failed");
+      }
+
+      if (event.type === "checkout.session.completed") {
+        const session = event.data.object || {};
+
+        const bookingId =
+          session.client_reference_id ||
+          (session.metadata && session.metadata.bookingId);
+
+        if (!bookingId) return res.json({ received: true });
+
+        // models are registered later during file load, so by runtime this exists
+        const BookingModel = mongoose.model("Booking");
+        const booking = await BookingModel.findById(bookingId);
+        if (!booking) return res.json({ received: true });
+
+        booking.status = "confirmed";
+        booking.paymentStatus = "paid";
+        booking.stripeSessionId = String(
+          session.id || booking.stripeSessionId || ""
+        );
+
+        try {
+          if (session.id) {
+            const full = await stripe.checkout.sessions.retrieve(
+              String(session.id),
+              {
+                expand: ["payment_intent", "line_items"],
+              }
+            );
+
+            if (!booking.currency)
+              booking.currency = String(
+                (full.currency ||
+                  session.currency ||
+                  (booking.pricing && booking.pricing.currency) ||
+                  "aud")
+              ).toLowerCase();
+
+            const amt =
+              (Number.isFinite(full.amount_total) && Number(full.amount_total)) ||
+              (Number.isFinite(session.amount_total) && Number(session.amount_total)) ||
+              (booking.pricing &&
+                Number.isFinite(booking.pricing.totalCents) &&
+                Number(booking.pricing.totalCents)) ||
+              null;
+
+            if (amt !== null) booking.amountCents = amt;
+
+            const piObj = full.payment_intent;
+            const pi =
+              (piObj && (piObj.id || piObj)) ||
+              session.payment_intent ||
+              null;
+
+            if (pi) booking.stripePaymentIntentId = String(pi);
+          } else {
+            if (session.payment_intent)
+              booking.stripePaymentIntentId = String(session.payment_intent);
+            if (Number.isFinite(session.amount_total))
+              booking.amountCents = Number(session.amount_total);
+            if (session.currency)
+              booking.currency = String(session.currency).toLowerCase();
+          }
+        } catch (e) {
+          if (session.payment_intent)
+            booking.stripePaymentIntentId = String(session.payment_intent);
+          if (Number.isFinite(session.amount_total))
+            booking.amountCents = Number(session.amount_total);
+          if (session.currency) booking.currency = String(session.currency).toLowerCase();
+        }
+
+        booking.currency = String(booking.currency || "aud").toLowerCase();
+        booking.paidAt = booking.paidAt || new Date();
+
+        await booking.save();
+      }
+
+      return res.json({ received: true });
+    } catch (e) {
+      return res.status(500).send("Webhook handler error");
+    }
+  }
+);
+
 app.use(express.json());
 
-// --- 2. CONNECT TO MONGODB ---
-mongoose.connect(process.env.MONGO_URI)
+// 2. CONNECT TO MONGODB
+mongoose
+  .connect(process.env.MONGO_URI)
   .then(() => console.log("✅ Connected to MongoDB Atlas"))
-  .catch(err => console.error("❌ MongoDB Error:", err));
+  .catch((err) => console.error("❌ MongoDB Error:", err));
 
-// --- 3. SETUP CLOUDINARY ---
+// 3. SETUP CLOUDINARY
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
   api_key: process.env.CLOUDINARY_API_KEY,
-  api_secret: process.env.CLOUDINARY_API_SECRET
+  api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 const storage = new CloudinaryStorage({
   cloudinary: cloudinary,
-  params: { folder: "shared-table-uploads", allowed_formats: ["jpg", "png", "jpeg"] }
+  params: { folder: "shared-table-uploads", allowed_formats: ["jpg", "png", "jpeg"] },
 });
 const upload = multer({ storage: storage });
 
-// --- 4. EMAIL ---
+// 4. EMAIL
 const transporter = nodemailer.createTransport({
-  service: 'gmail',
-  auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS }
+  service: "gmail",
+  auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS },
 });
 async function sendEmail({ to, subject, html }) {
   if (!process.env.EMAIL_USER) return;
@@ -203,143 +227,226 @@ async function sendEmail({ to, subject, html }) {
       from: `"The Shared Table Story" <${process.env.EMAIL_USER}>`,
       to,
       subject,
-      html
+      html,
     });
   } catch (err) {
     console.error("❌ Email failed:", err.message);
   }
 }
 
-// --- 5. SCHEMAS ---
+// 5. SCHEMAS
 const schemaOpts = { toJSON: { virtuals: true }, toObject: { virtuals: true } };
 
-const notificationSchema = new mongoose.Schema({
-  message: String,
-  type: { type: String, default: "info" },
-  date: { type: Date, default: Date.now }
-});
-
-const userSchema = new mongoose.Schema({
-  name: String,
-  email: { type: String, unique: true },
-  password: String,
-  role: { type: String, default: "Guest" },
-  profilePic: { type: String, default: "" },
-  isPremiumHost: { type: Boolean, default: false },
-  vacationMode: { type: Boolean, default: false },
-  isAdmin: { type: Boolean, default: false },
-  bio: String,
-  location: String,
-  mobile: String,
-  preferences: [String],
-  payoutDetails: Object,
-  notifications: [notificationSchema],
-  guestRating: { type: Number, default: 0 },
-  guestReviewCount: { type: Number, default: 0 }
-}, schemaOpts);
-
-const experienceSchema = new mongoose.Schema({
-  hostId: String,
-  hostName: String,
-  hostPic: String,
-  title: String,
-  description: String,
-  city: String,
-  price: Number,
-  maxGuests: Number,
-  originalMaxGuests: Number,
-  startDate: String,
-  endDate: String,
-  blockedDates: [String],
-  availableDays: {
-    type: [String],
-    default: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+const notificationSchema = new mongoose.Schema(
+  {
+    message: String,
+    type: { type: String, default: "info" },
+    date: { type: Date, default: Date.now },
   },
-  isPaused: { type: Boolean, default: false },
-  tags: [String], // Supports Multi-Category: ["Food", "Culture"]
-  timeSlots: [String],
-  imageUrl: String,
-  images: [String],
-  lat: { type: Number, default: -37.8136 },
-  lng: { type: Number, default: 144.9631 },
-  privateCapacity: Number,
-  privatePrice: Number,
-  dynamicDiscounts: Object,
-  averageRating: { type: Number, default: 0 },
-  reviewCount: { type: Number, default: 0 },
-  createdAt: { type: Date, default: Date.now }
-}, schemaOpts);
+  schemaOpts
+);
 
-const bookingSchema = new mongoose.Schema({
-  experienceId: String,
-  guestId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
-  hostId: { type: String, required: false },
-  guestName: String,
-  guestEmail: String,
-  numGuests: Number,
-  bookingDate: String,
-  timeSlot: String,
-  guestNotes: { type: String, default: "" },
-  status: { type: String, default: "pending_payment" },
-  stripeSessionId: String,
-  paymentStatus: { type: String, default: "unpaid" },
-  pricing: Object,
-  refundAmount: Number,
-  cancellationReason: String,
-  dispute: {
-    active: { type: Boolean, default: false },
-    reason: String,
-    status: String
+const userSchema = new mongoose.Schema(
+  {
+    name: String,
+    email: { type: String, unique: true },
+    password: String,
+    role: { type: String, default: "Guest" },
+    profilePic: { type: String, default: "" },
+    isPremiumHost: { type: Boolean, default: false },
+    vacationMode: { type: Boolean, default: false },
+    isAdmin: { type: Boolean, default: false },
+    bio: { type: String, default: "" },
+    location: { type: String, default: "" },
+    mobile: { type: String, default: "" },
+    preferences: [String],
+    payoutDetails: Object,
+    notifications: [notificationSchema],
+    guestRating: { type: Number, default: 0 },
+    guestReviewCount: { type: Number, default: 0 },
+
+    // Legal / Consent
+    termsAgreedAt: { type: Date, default: null },
+    termsVersion: { type: String, default: "" },
+
+    // Social foundation (privacy-preserving)
+    handle: { type: String, unique: true, sparse: true }, // exact-match lookup only
+    allowHandleSearch: { type: Boolean, default: false }, // opt-in
+    showExperiencesToFriends: { type: Boolean, default: false }, // opt-in visibility
+
+    // Public profile (privacy-first)
+    publicProfile: { type: Boolean, default: false }, // opt-in: bio/pic shown
   },
-  createdAt: { type: Date, default: Date.now }
-}, schemaOpts);
+  schemaOpts
+);
+
+const experienceSchema = new mongoose.Schema(
+  {
+    hostId: String,
+    hostName: String,
+    hostPic: String,
+    title: String,
+    description: String,
+    city: String,
+    price: Number,
+    maxGuests: Number,
+    originalMaxGuests: Number,
+    startDate: String,
+    endDate: String,
+    blockedDates: [String],
+    availableDays: { type: [String], default: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"] },
+    isPaused: { type: Boolean, default: false },
+    tags: [String],
+    timeSlots: [String],
+    imageUrl: String,
+    images: [String],
+    lat: { type: Number, default: -37.8136 },
+    lng: { type: Number, default: 144.9631 },
+    privateCapacity: Number,
+    privatePrice: Number,
+    dynamicDiscounts: Object,
+    averageRating: { type: Number, default: 0 },
+    reviewCount: { type: Number, default: 0 },
+    createdAt: { type: Date, default: Date.now },
+  },
+  schemaOpts
+);
+
+const bookingSchema = new mongoose.Schema(
+  {
+    experienceId: String,
+    guestId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+    hostId: { type: String, required: false },
+    guestName: String,
+    guestEmail: String,
+    numGuests: Number,
+    bookingDate: String,
+    timeSlot: String,
+    guestNotes: { type: String, default: "" },
+    status: { type: String, default: "pending_payment" },
+    stripeSessionId: String,
+    paymentStatus: { type: String, default: "unpaid" },
+    pricing: Object,
+
+    // Payment reconciliation
+    amountCents: Number,
+    currency: String,
+    stripePaymentIntentId: String,
+    paidAt: Date,
+
+    // Social visibility (opt-in by guest)
+    visibilityToFriends: { type: Boolean, default: false },
+
+    refundAmount: Number,
+    cancellationReason: String,
+    dispute: {
+      active: { type: Boolean, default: false },
+      reason: String,
+      status: String,
+    },
+    createdAt: { type: Date, default: Date.now },
+  },
+  schemaOpts
+);
 
 // Virtuals
-bookingSchema.virtual('experience', {
-  ref: 'Experience',
-  localField: 'experienceId',
-  foreignField: '_id',
-  justOne: true
+bookingSchema.virtual("experience", {
+  ref: "Experience",
+  localField: "experienceId",
+  foreignField: "_id",
+  justOne: true,
 });
-bookingSchema.virtual('user', {
-  ref: 'User',
-  localField: 'guestId',
-  foreignField: '_id',
-  justOne: true
+bookingSchema.virtual("user", {
+  ref: "User",
+  localField: "guestId",
+  foreignField: "_id",
+  justOne: true,
 });
 
-const reviewSchema = new mongoose.Schema({
-  experienceId: String,
-  bookingId: String,
-  authorId: String,
-  authorName: String,
-  targetId: String,
-  type: { type: String, default: "guest_to_host" },
-  rating: Number,
-  comment: String,
-  hostReply: String,
-  date: { type: Date, default: Date.now }
-}, schemaOpts);
+const reviewSchema = new mongoose.Schema(
+  {
+    experienceId: String,
+    bookingId: String,
+    authorId: String,
+    authorName: String,
+    targetId: String,
+    type: { type: String, default: "guest_to_host" },
+    rating: Number,
+    comment: String,
+    hostReply: String,
+    date: { type: Date, default: Date.now },
+  },
+  schemaOpts
+);
 
-const Bookmark = mongoose.model("Bookmark", new mongoose.Schema({
-  userId: String,
-  experienceId: String
-}, schemaOpts));
+// Likes (experience-level)
+const experienceLikeSchema = new mongoose.Schema(
+  {
+    experienceId: { type: String, required: true },
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+    createdAt: { type: Date, default: Date.now },
+  },
+  schemaOpts
+);
+experienceLikeSchema.index({ experienceId: 1, userId: 1 }, { unique: true });
+
+// Comments (experience-level)
+const experienceCommentSchema = new mongoose.Schema(
+  {
+    experienceId: { type: String, required: true },
+    authorId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+    text: { type: String, required: true },
+    createdAt: { type: Date, default: Date.now },
+  },
+  schemaOpts
+);
+
+const Bookmark = mongoose.model(
+  "Bookmark",
+  new mongoose.Schema(
+    {
+      userId: String,
+      experienceId: String,
+    },
+    schemaOpts
+  )
+);
+
 const User = mongoose.model("User", userSchema);
 const Experience = mongoose.model("Experience", experienceSchema);
 const Booking = mongoose.model("Booking", bookingSchema);
 const Review = mongoose.model("Review", reviewSchema);
+const ExperienceLike = mongoose.model("ExperienceLike", experienceLikeSchema);
+const ExperienceComment = mongoose.model("ExperienceComment", experienceCommentSchema);
+
+// Social: privacy-preserving connections
+const connectionSchema = new mongoose.Schema(
+  {
+    requesterId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+    addresseeId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+    status: {
+      type: String,
+      enum: ["pending", "accepted", "rejected", "blocked"],
+      default: "pending",
+    },
+    createdAt: { type: Date, default: Date.now },
+    respondedAt: { type: Date, default: null },
+  },
+  schemaOpts
+);
+connectionSchema.index({ requesterId: 1, addresseeId: 1 }, { unique: true });
+const Connection = mongoose.models.Connection || mongoose.model("Connection", connectionSchema);
 
 // --- MIDDLEWARE ---
 const JWT_SECRET = String(process.env.JWT_SECRET || "");
+
 function signToken(user) {
   if (!JWT_SECRET) throw new Error("Missing JWT_SECRET");
-  return jwt.sign(
-    { userId: String(user._id), isAdmin: !!user.isAdmin },
-    JWT_SECRET,
-    { expiresIn: "30d" }
-  );
+  return jwt.sign({ userId: String(user._id), isAdmin: !!user.isAdmin }, JWT_SECRET, {
+    expiresIn: "30d",
+  });
 }
+
 async function authMiddleware(req, res, next) {
   const authHeader = req.headers["authorization"];
   if (!authHeader) return res.status(401).json({ message: "Missing header" });
@@ -366,6 +473,7 @@ async function authMiddleware(req, res, next) {
     return res.status(401).json({ message: "Invalid Token" });
   }
 }
+
 function adminMiddleware(req, res, next) {
   authMiddleware(req, res, () => {
     if (!req.user.isAdmin) return res.status(403).json({ message: "Access denied." });
@@ -373,134 +481,208 @@ function adminMiddleware(req, res, next) {
   });
 }
 
-// NEW UTILITY: Function to determine if a user has any active experiences
+// Determine if a user has any experiences (host profile allowed)
 async function isHost(userId) {
-  const count = await Experience.countDocuments({ hostId: userId });
+  const count = await Experience.countDocuments({ hostId: String(userId) });
   return count > 0;
 }
 
+// Auth-safe user (for /me) — still includes email/mobile (PRIVATE)
 function sanitizeUser(u) {
   const obj = u.toObject({ virtuals: true });
   if (obj.payoutDetails) {
     obj.payoutDetails = {
       ...obj.payoutDetails,
       bsb: "***",
-      accountNumber:
-        "****" +
-        (obj.payoutDetails.accountNumber
-          ? obj.payoutDetails.accountNumber.slice(-4)
-          : "0000")
+      accountNumber: "****" + (obj.payoutDetails.accountNumber ? obj.payoutDetails.accountNumber.slice(-4) : "0000"),
     };
   }
   const { password, ...safe } = obj;
   return { ...safe, isHost: obj.isPremiumHost };
 }
 
-async function checkCapacity(experienceId, date, timeSlot, newGuests) {
-  const existing = await Booking.find({
-    experienceId,
-    bookingDate: date,
-    timeSlot,
-    status: { $in: ['confirmed', 'paid'] }
+// Public-safe card (NO email/mobile)
+function publicUserCardFromDoc(u) {
+  if (!u) return null;
+  return {
+    _id: u._id,
+    name: String(u.name || ""),
+    profilePic: String(u.profilePic || ""),
+    bio: u.publicProfile ? String(u.bio || "") : "",
+    handle: String(u.handle || ""),
+    publicProfile: !!u.publicProfile,
+  };
+}
+
+function normalizeHandle(h) {
+  return String(h || "").trim().toLowerCase();
+}
+
+async function minimalUserCard(userId) {
+  const u = await User.findById(userId).select("name profilePic bio handle publicProfile");
+  return publicUserCardFromDoc(u);
+}
+
+async function viewerCanSeeAttendees(expId, viewerId) {
+  const exp = await Experience.findById(expId);
+  if (!exp) return { ok: false, reason: "Experience not found" };
+
+  const isHostViewer = String(exp.hostId) === String(viewerId);
+  if (isHostViewer) return { ok: true, exp, role: "host" };
+
+  const attendee = await Booking.findOne({
+    experienceId: String(exp._id),
+    guestId: viewerId,
+    $or: [{ status: "confirmed" }, { paymentStatus: "paid" }],
   });
-  const currentCount = existing.reduce((sum, b) => sum + b.numGuests, 0);
+
+  if (attendee) return { ok: true, exp, role: "attendee" };
+  return { ok: false, reason: "Not allowed" };
+}
+
+async function computeConnectionStatuses(meId, otherIds) {
+  const me = String(meId);
+  if (!otherIds || otherIds.length === 0) return new Map();
+
+  const conns = await Connection.find({
+    status: { $in: ["pending", "accepted", "blocked"] },
+    $or: [
+      { requesterId: meId, addresseeId: { $in: otherIds } },
+      { addresseeId: meId, requesterId: { $in: otherIds } },
+    ],
+  }).select("requesterId addresseeId status");
+
+  const m = new Map();
+  for (const oid of otherIds.map(String)) m.set(oid, "none");
+
+  for (const c of conns) {
+    const reqId = String(c.requesterId);
+    const addId = String(c.addresseeId);
+    const status = String(c.status);
+
+    const other = reqId === me ? addId : reqId;
+    if (!m.has(other)) continue;
+
+    if (status === "accepted") m.set(other, "friends");
+    else if (status === "blocked") m.set(other, "blocked");
+    else if (status === "pending") m.set(other, reqId === me ? "pending_outgoing" : "pending_incoming");
+  }
+  return m;
+}
+
+async function checkCapacity(experienceId, date, timeSlot, newGuests) {
+  const dateStr = String(date || "").trim();
+  const slot = String(timeSlot || "").trim();
+
+  const isoOk = /^\d{4}-\d{2}-\d{2}$/.test(dateStr);
+  if (!isoOk) return { available: false, message: "Invalid bookingDate (YYYY-MM-DD required)." };
+  if (!slot) return { available: false, message: "timeSlot is required." };
+
   const exp = await Experience.findById(experienceId);
+  if (!exp) return { available: false, message: "Experience not found." };
+
   if (exp.isPaused) return { available: false, message: "Host is paused." };
-  if (exp.blockedDates && exp.blockedDates.includes(date)) return { available: false, message: "Date blocked." };
+  if (exp.blockedDates && exp.blockedDates.includes(dateStr)) return { available: false, message: "Date blocked." };
+
+  if (Array.isArray(exp.timeSlots) && exp.timeSlots.length > 0 && !exp.timeSlots.includes(slot)) {
+    return { available: false, message: "Invalid time slot." };
+  }
+
+  const d = new Date(dateStr + "T00:00:00Z");
+  if (Number.isNaN(d.getTime())) return { available: false, message: "Invalid bookingDate." };
   const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-  const searchDay = days[new Date(date).getUTCDay()];
-  if (exp.availableDays && !exp.availableDays.includes(searchDay)) {
+  const searchDay = days[d.getUTCDay()];
+
+  if (Array.isArray(exp.availableDays) && exp.availableDays.length > 0 && !exp.availableDays.includes(searchDay)) {
     return { available: false, message: `Closed on ${searchDay}s.` };
   }
-  if (currentCount + newGuests > exp.maxGuests) {
-    return {
-      available: false,
-      remaining: exp.maxGuests - currentCount,
-      message: `Only ${exp.maxGuests - currentCount} spots left.`
-    };
+
+  const startOk = !exp.startDate || String(exp.startDate) <= dateStr;
+  const endOk = !exp.endDate || String(exp.endDate) >= dateStr;
+  if (!startOk || !endOk) return { available: false, message: "Date outside experience availability." };
+
+  const existing = await Booking.find({
+    experienceId: String(exp._id),
+    bookingDate: dateStr,
+    timeSlot: slot,
+    $or: [{ status: "confirmed" }, { paymentStatus: "paid" }],
+  });
+
+  const currentCount = existing.reduce((sum, b) => sum + (Number(b.numGuests) || 0), 0);
+  const incoming = Number(newGuests) || 1;
+
+  if ((Number(exp.maxGuests) || 0) > 0 && currentCount + incoming > Number(exp.maxGuests)) {
+    const remaining = Number(exp.maxGuests) - currentCount;
+    return { available: false, remaining, message: `Only ${remaining} spots left.` };
   }
+
   return { available: true };
-}
-function calculateRefund(booking, exp) {
-  return { percent: 0, amount: 0, reason: "Manual payment - coordinate with host" };
 }
 
 // --- ROUTES ---
 
-// 1. Upload
+// Upload
 app.post("/api/upload", authMiddleware, upload.array("photos", 3), (req, res) => {
   if (!req.files) return res.status(400).json({ message: "No files" });
-  res.json({ images: req.files.map(f => f.path) });
+  res.json({ images: req.files.map((f) => f.path) });
 });
 
-// 2. Auth & User (UPDATED: Records Legal Timestamp)
+// Auth: Register
 app.post("/api/auth/register", async (req, res) => {
   try {
-    if (await User.findOne({ email: req.body.email }))
-      return res.status(400).json({ message: "Taken" });
-    
-    const hashedPassword = await bcrypt.hash(req.body.password, 10);
-    
+    const body = req.body || {};
+    if (typeof body.handle !== "undefined") body.handle = String(body.handle || "").trim().toLowerCase();
+    if (typeof body.email !== "undefined") body.email = String(body.email).toLowerCase().trim();
+
+    if (!body.email || !body.password) return res.status(400).json({ message: "Email and password required" });
+    if (await User.findOne({ email: body.email })) return res.status(400).json({ message: "Taken" });
+
+    const hashedPassword = await bcrypt.hash(String(body.password), 10);
+
     const user = new User({
-      ...req.body,
+      ...body,
       password: hashedPassword,
       role: "Guest",
       notifications: [{ message: "Welcome!", type: "success" }],
-      // LEGAL TIMESTAMP (New)
       termsAgreedAt: new Date(),
-      termsVersion: "1.0" 
+      termsVersion: "1.0",
     });
 
     await user.save();
-    
+
     sendEmail({
       to: user.email,
-      subject: `Welcome to The Shared Table Story 🌏`,
-      html: `<p>Welcome ${user.name}!</p>`
+      subject: "Welcome to The Shared Table Story 🌏",
+      html: `<p>Welcome ${String(user.name || "")}!</p>`,
     });
 
-    res.status(201).json({
-      token: signToken(user),
-      user: sanitizeUser(user)
-    });
+    res.status(201).json({ token: signToken(user), user: sanitizeUser(user) });
   } catch (e) {
+    console.error("Register error:", e);
     res.status(500).json({ message: "Error" });
   }
 });
 
-// 2b. Auth Login
+// Auth: Login
 app.post("/api/auth/login", async (req, res) => {
   try {
     const { email, password } = req.body || {};
-    if (!email || !password) {
-      return res.status(400).json({ message: "Email and password required" });
-    }
+    if (!email || !password) return res.status(400).json({ message: "Email and password required" });
 
-    const user = await User.findOne({
-      email: String(email).toLowerCase().trim()
-    });
+    const user = await User.findOne({ email: String(email).toLowerCase().trim() });
+    if (!user) return res.status(401).json({ message: "Invalid credentials" });
 
-    if (!user) {
-      return res.status(401).json({ message: "Invalid credentials" });
-    }
+    const ok = await bcrypt.compare(String(password), String(user.password || ""));
+    if (!ok) return res.status(401).json({ message: "Invalid credentials" });
 
-    const ok = await bcrypt.compare(String(password), user.password || "");
-    if (!ok) {
-      return res.status(401).json({ message: "Invalid credentials" });
-    }
-
-    return res.json({
-      token: signToken(user),
-      user: sanitizeUser(user)
-    });
+    return res.json({ token: signToken(user), user: sanitizeUser(user) });
   } catch (e) {
     console.error("Login error:", e);
     return res.status(500).json({ message: "Login failed" });
   }
 });
 
-
-// 2c. Current User
+// Auth: Current user
 app.get("/api/auth/me", authMiddleware, async (req, res) => {
   try {
     return res.json({ user: sanitizeUser(req.user) });
@@ -509,14 +691,29 @@ app.get("/api/auth/me", authMiddleware, async (req, res) => {
   }
 });
 
-// 2d. Update Profile (Allowlist)
+// Auth: Update profile (allowlist)
 app.put("/api/auth/update", authMiddleware, async (req, res) => {
   try {
     const body = req.body || {};
-    const allowed = ["name", "bio", "location", "mobile", "profilePic", "preferences"];
+    const allowed = [
+      "name",
+      "bio",
+      "location",
+      "mobile",
+      "profilePic",
+      "preferences",
+      "handle",
+      "allowHandleSearch",
+      "showExperiencesToFriends",
+      "publicProfile",
+    ];
+
     const updates = {};
-    for (const k of allowed) {
-      if (Object.prototype.hasOwnProperty.call(body, k)) updates[k] = body[k];
+    for (const k of allowed) if (Object.prototype.hasOwnProperty.call(body, k)) updates[k] = body[k];
+
+    if (typeof updates.handle !== "undefined") {
+      updates.handle = normalizeHandle(updates.handle);
+      if (!updates.handle) delete updates.handle;
     }
 
     // never allow privilege changes
@@ -528,44 +725,35 @@ app.put("/api/auth/update", authMiddleware, async (req, res) => {
     delete updates.email;
     delete updates.password;
 
-    const user = await User.findByIdAndUpdate(
-      req.user._id,
-      { $set: updates },
-      { new: true }
-    );
+    const user = await User.findByIdAndUpdate(req.user._id, { $set: updates }, { new: true });
     return res.json({ user: sanitizeUser(user) });
   } catch (e) {
     console.error("Update profile error:", e);
     return res.status(500).json({ message: "Update failed" });
   }
 });
-// 3. Experience Routes
 
-// CREATE EXPERIENCE – with category sanitization
+// Experiences: Create (category sanitize)
 app.post("/api/experiences", authMiddleware, async (req, res) => {
   try {
     const body = req.body || {};
 
-    // Normalize and sanitize tags against CATEGORY_PILLARS
     let tags = [];
-    if (Array.isArray(body.tags)) {
-      tags = body.tags;
-    } else if (body.tags) {
-      tags = [body.tags];
-    }
-    tags = [...new Set(tags.filter(t => CATEGORY_PILLARS.includes(t)))];
+    if (Array.isArray(body.tags)) tags = body.tags;
+    else if (body.tags) tags = [body.tags];
+    tags = [...new Set(tags.filter((t) => CATEGORY_PILLARS.includes(t)))];
 
     const images = Array.isArray(body.images) ? body.images : [];
     const imageUrl = images[0] || body.imageUrl || "";
 
     const exp = new Experience({
-      hostId: req.user._id.toString(),
+      hostId: String(req.user._id),
       hostName: req.user.name,
       hostPic: req.user.profilePic || "",
-      isPaused: req.user.vacationMode || false,
+      isPaused: !!req.user.vacationMode,
       ...body,
       tags,
-      imageUrl
+      imageUrl,
     });
 
     await exp.save();
@@ -576,32 +764,25 @@ app.post("/api/experiences", authMiddleware, async (req, res) => {
   }
 });
 
-// UPDATE EXPERIENCE – with category sanitization
+// Experiences: Update (category sanitize)
 app.put("/api/experiences/:id", authMiddleware, async (req, res) => {
   try {
     const exp = await Experience.findById(req.params.id);
-    if (!exp || exp.hostId !== String(req.user._id))
-      return res.status(403).json({ message: "No" });
+    if (!exp || exp.hostId !== String(req.user._id)) return res.status(403).json({ message: "No" });
 
     const body = req.body || {};
     const { images, tags, ...updates } = body;
 
-    // Handle tags if provided
     if (typeof tags !== "undefined") {
       let newTags = [];
-      if (Array.isArray(tags)) {
-        newTags = tags;
-      } else if (tags) {
-        newTags = [tags];
-      }
-      newTags = [...new Set(newTags.filter(t => CATEGORY_PILLARS.includes(t)))];
+      if (Array.isArray(tags)) newTags = tags;
+      else if (tags) newTags = [tags];
+      newTags = [...new Set(newTags.filter((t) => CATEGORY_PILLARS.includes(t)))];
       exp.tags = newTags;
     }
 
-    // Apply other updates
     Object.assign(exp, updates);
 
-    // Handle primary image from images array
     if (Array.isArray(images) && images.length > 0) {
       exp.images = images;
       exp.imageUrl = images[0];
@@ -615,19 +796,17 @@ app.put("/api/experiences/:id", authMiddleware, async (req, res) => {
   }
 });
 
+// Experiences: Delete
 app.delete("/api/experiences/:id", authMiddleware, async (req, res) => {
   const exp = await Experience.findById(req.params.id);
-  if (!exp || (exp.hostId !== String(req.user._id) && !req.user.isAdmin))
-    return res.status(403).json({ message: "No" });
-  await Booking.updateMany(
-    { experienceId: exp._id },
-    { status: "cancelled_by_host" }
-  );
+  if (!exp || (exp.hostId !== String(req.user._id) && !req.user.isAdmin)) return res.status(403).json({ message: "No" });
+
+  await Booking.updateMany({ experienceId: String(exp._id) }, { status: "cancelled_by_host" });
   await Experience.findByIdAndDelete(req.params.id);
   res.json({ message: "Deleted" });
 });
 
-// Search (Updated with Date & Filters + Category Pillars)
+// Experiences: Search (filters + pillars)
 app.get("/api/experiences", async (req, res) => {
   const { city, q, sort, date, minPrice, maxPrice, category } = req.query;
   let query = { isPaused: false };
@@ -635,11 +814,7 @@ app.get("/api/experiences", async (req, res) => {
   if (city) query.city = { $regex: city, $options: "i" };
   if (q) query.title = { $regex: q, $options: "i" };
 
-  // Multi-Category Filtering with validation
-  if (category && CATEGORY_PILLARS.includes(category)) {
-    // experiences where tags includes `category`
-    query.tags = { $in: [category] };
-  }
+  if (category && CATEGORY_PILLARS.includes(category)) query.tags = { $in: [category] };
 
   if (minPrice || maxPrice) {
     query.price = {};
@@ -648,10 +823,15 @@ app.get("/api/experiences", async (req, res) => {
   }
 
   if (date) {
-    query.startDate = { $lte: date };
-    query.endDate = { $gte: date };
+    const dateStr = String(date).trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return res.status(400).json({ message: "Invalid date filter (YYYY-MM-DD)." });
+
+    query.startDate = { $lte: dateStr };
+    query.endDate = { $gte: dateStr };
+
+    const d = new Date(dateStr + "T00:00:00Z");
     const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-    query.availableDays = { $in: [days[new Date(date).getUTCDay()]] };
+    query.availableDays = { $in: [days[d.getUTCDay()]] };
   }
 
   let sortObj = {};
@@ -662,6 +842,7 @@ app.get("/api/experiences", async (req, res) => {
   res.json(exps);
 });
 
+// Experience detail
 app.get("/api/experiences/:id", async (req, res) => {
   try {
     const exp = await Experience.findById(req.params.id);
@@ -671,35 +852,26 @@ app.get("/api/experiences/:id", async (req, res) => {
   }
 });
 
-// NEW ROUTE: Recommendation Engine (Item #55)
+// Similar experiences
 app.get("/api/experiences/:id/similar", async (req, res) => {
   try {
     const currentExp = await Experience.findById(req.params.id);
     if (!currentExp) return res.status(404).json({ message: "Not found" });
 
-    // Logic: Find experiences with matching Tags OR same City
-    // Exclude the current experience
     const similar = await Experience.find({
-      _id: { $ne: currentExp._id }, // Not the current one
+      _id: { $ne: currentExp._id },
       isPaused: false,
-      $or: [
-        { tags: { $in: currentExp.tags } }, // Same Category
-        { city: currentExp.city }           // Same City
-      ]
+      $or: [{ tags: { $in: currentExp.tags } }, { city: currentExp.city }],
     })
-    .limit(3) // Top 3 results
-    .select('title price images imageUrl city averageRating'); // Optimization
+      .limit(3)
+      .select("title price images imageUrl city averageRating");
 
-    // Fallback: If no similar found, just show generic top rated
     if (similar.length === 0) {
-       const fallback = await Experience.find({ 
-           _id: { $ne: currentExp._id }, 
-           isPaused: false 
-       })
-       .sort({ averageRating: -1 })
-       .limit(3)
-       .select('title price images imageUrl city averageRating');
-       return res.json(fallback);
+      const fallback = await Experience.find({ _id: { $ne: currentExp._id }, isPaused: false })
+        .sort({ averageRating: -1 })
+        .limit(3)
+        .select("title price images imageUrl city averageRating");
+      return res.json(fallback);
     }
 
     res.json(similar);
@@ -708,65 +880,100 @@ app.get("/api/experiences/:id/similar", async (req, res) => {
   }
 });
 
-// 4. Booking Routes (UPDATED with Item #62 & #54 Discount Logic)
+// --- PRIVACY-FIRST ATTENDEES (Option 1 locked) ---
+// Only host OR confirmed attendee can request attendee list.
+// Only users with publicProfile=true appear, and only safe fields are returned.
+app.get("/api/experiences/:id/attendees", authMiddleware, async (req, res) => {
+  try {
+    const gate = await viewerCanSeeAttendees(req.params.id, req.user._id);
+    if (!gate.ok) return res.status(403).json({ message: "Not allowed" });
+
+    const expId = String(gate.exp._id);
+
+    const bookings = await Booking.find({
+      experienceId: expId,
+      $or: [{ status: "confirmed" }, { paymentStatus: "paid" }],
+    }).populate("guestId", "name profilePic bio handle publicProfile");
+
+    const seen = new Set();
+    const publicGuests = [];
+    for (const b of bookings) {
+      if (!b.guestId) continue;
+      const u = b.guestId;
+      if (!u.publicProfile) continue;
+      const uid = String(u._id);
+      if (seen.has(uid)) continue;
+      seen.add(uid);
+      publicGuests.push(u);
+    }
+
+    const otherIds = publicGuests.map((u) => u._id);
+    const statusMap = await computeConnectionStatuses(req.user._id, otherIds);
+
+    const out = publicGuests.map((u) => ({
+      ...publicUserCardFromDoc(u),
+      connectionStatus: statusMap.get(String(u._id)) || "none",
+    }));
+
+    return res.json({ experienceId: expId, count: out.length, attendees: out });
+  } catch (e) {
+    return res.status(500).json({ message: "Server error" });
+  }
+});
+
+// Booking: Create + Stripe checkout
 app.post("/api/experiences/:id/book", authMiddleware, async (req, res) => {
   const exp = await Experience.findById(req.params.id);
   if (!exp) return res.status(404).json({ message: "Experience not found" });
 
-  if (exp.hostId === String(req.user._id))
-    return res.status(400).json({ message: "No self-booking." });
+  if (exp.hostId === String(req.user._id)) return res.status(400).json({ message: "No self-booking." });
 
-  const { numGuests, isPrivate, bookingDate, timeSlot, guestNotes } = req.body;
-  const guests = parseInt(numGuests) || 1;
+  const { numGuests, isPrivate, bookingDate, timeSlot, guestNotes } = req.body || {};
+  const guests = Number.parseInt(numGuests, 10) || 1;
 
-  // Check Capacity
-  const cap = await checkCapacity(
-    exp._id,
-    bookingDate,
-    timeSlot,
-    guests
-  );
+  const bookingDateStr = String(bookingDate || "").trim();
+  const timeSlotStr = String(timeSlot || "").trim();
+
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(bookingDateStr)) return res.status(400).json({ message: "bookingDate required (YYYY-MM-DD)." });
+  if (!timeSlotStr) return res.status(400).json({ message: "timeSlot is required." });
+  if (!Number.isFinite(guests) || guests < 1) return res.status(400).json({ message: "numGuests must be >= 1." });
+
+  const cap = await checkCapacity(exp._id, bookingDateStr, timeSlotStr, guests);
   if (!cap.available) return res.status(400).json({ message: cap.message });
 
-  // --- 🔴 PRICING LOGIC START (Zero Blind Spots) ---
-  // --- 🔴 PRICING LOGIC START (Zero Blind Spots) ---
-  // P0: use integer cents end-to-end (no float rounding leaks)
   const toCents = (n) => Math.round(Number(n) * 100);
 
   const unitCents = toCents(exp.price);
   let totalCents = unitCents * guests;
   let description = `${guests} Guests`;
 
-  // Apply 10% Discount for 3+ Guests (integer cents)
   if (guests >= 3) {
-    totalCents = Math.round(totalCents * 0.90);
+    totalCents = Math.round(totalCents * 0.9);
     description += " (10% Group Discount Applied)";
   }
 
-  // Private Booking Override (if applicable)
   if (isPrivate && exp.privatePrice) {
     totalCents = toCents(exp.privatePrice);
     description = "Private Booking";
   }
-  // --- 🔴 PRICING LOGIC END ---
 
   const booking = new Booking({
-    experienceId: exp._id,
+    experienceId: String(exp._id),
     guestId: req.user._id,
     guestName: req.user.name,
     guestEmail: req.user.email,
     hostId: String(exp.hostId),
     numGuests: guests,
-    bookingDate,
-    timeSlot,
+    bookingDate: bookingDateStr,
+    timeSlot: timeSlotStr,
     guestNotes: guestNotes || "",
-    pricing: { totalPrice: Number((totalCents / 100).toFixed(2)), totalCents, currency: "aud" }
+    pricing: { totalPrice: Number((totalCents / 100).toFixed(2)), totalCents, currency: "aud" },
   });
 
   await booking.save();
 
   try {
-    const baseUrl = String(process.env.PUBLIC_URL || ("http://localhost:" + (process.env.PORT || 4000)));
+    const baseUrl = String(process.env.PUBLIC_URL || `http://localhost:${process.env.PORT || 4000}`);
     const session = await stripe.checkout.sessions.create({
       client_reference_id: String(booking._id),
       metadata: { bookingId: String(booking._id), experienceId: String(exp._id), guestId: String(req.user._id) },
@@ -775,19 +982,17 @@ app.post("/api/experiences/:id/book", authMiddleware, async (req, res) => {
         {
           price_data: {
             currency: "aud",
-            product_data: { 
-                name: exp.title,
-                description: description // Shows up on Stripe Checkout Page
-            },
+            product_data: { name: exp.title, description },
             unit_amount: totalCents,
           },
-          quantity: 1
-        }
+          quantity: 1,
+        },
       ],
       mode: "payment",
       success_url: `${baseUrl}/success.html?session_id={CHECKOUT_SESSION_ID}&booking_id=${booking._id}`,
-      cancel_url: `${baseUrl}/experience.html?id=${exp._id}`
+      cancel_url: `${baseUrl}/experience.html?id=${exp._id}`,
     });
+
     booking.stripeSessionId = session.id;
     await booking.save();
     res.json({ url: session.url });
@@ -797,14 +1002,13 @@ app.post("/api/experiences/:id/book", authMiddleware, async (req, res) => {
   }
 });
 
+// Booking verify
 app.post("/api/bookings/verify", authMiddleware, async (req, res) => {
   const { bookingId, sessionId } = req.body || {};
   const booking = await Booking.findById(bookingId);
   if (!booking) return res.json({ status: "not_found" });
 
-  if (booking.paymentStatus === "paid" || booking.status === "confirmed") {
-    return res.json({ status: "confirmed" });
-  }
+  if (booking.paymentStatus === "paid" || booking.status === "confirmed") return res.json({ status: "confirmed" });
 
   try {
     const session = await stripe.checkout.sessions.retrieve(String(sessionId || ""), { expand: ["payment_intent"] });
@@ -814,23 +1018,14 @@ app.post("/api/bookings/verify", authMiddleware, async (req, res) => {
       (session && session.metadata && session.metadata.bookingId) ||
       "";
 
-    if (String(metaBookingId) !== String(booking._id)) {
-      return res.status(400).json({ status: "mismatch", error: "session does not match booking" });
-    }
+    if (String(metaBookingId) !== String(booking._id)) return res.status(400).json({ status: "mismatch", error: "session does not match booking" });
 
     const currency = String(session.currency || "aud").toLowerCase();
     const amountTotal = Number.isFinite(session.amount_total) ? Number(session.amount_total) : null;
 
     const expectedCents = booking.pricing && Number.isFinite(booking.pricing.totalCents) ? Number(booking.pricing.totalCents) : null;
 
-    if (expectedCents !== null && amountTotal !== null && amountTotal !== expectedCents) {
-      return res.status(400).json({ status: "mismatch", error: "amount mismatch" });
-    }
-
-    if (expectedCents !== null && amountTotal === null) {
-      // no totals available: still return status without confirming
-      return res.json({ status: String(session.payment_status || "unknown"), bookingStatus: booking.status, paymentStatus: booking.paymentStatus });
-    }
+    if (expectedCents !== null && amountTotal !== null && amountTotal !== expectedCents) return res.status(400).json({ status: "mismatch", error: "amount mismatch" });
 
     const stripeStatus = String(session.payment_status || "unknown");
 
@@ -852,16 +1047,13 @@ app.post("/api/bookings/verify", authMiddleware, async (req, res) => {
   }
 });
 
-
-
-// Host Dashboard Routes
+// Host dashboard bookings (NO mobile leakage)
 app.get("/api/bookings/host-bookings", authMiddleware, async (req, res) => {
   try {
     const hostId = String(req.user._id);
     const bookings = await Booking.find({ hostId })
-      .populate("experience", "title images price")
-      .populate("guestId", "name email profilePic mobile")
-      .populate("user", "name email profilePic mobile")
+      .populate("experience", "title images price imageUrl city")
+      .populate("guestId", "name email profilePic handle publicProfile") // mobile NOT included
       .sort({ bookingDate: 1 });
     res.json(bookings);
   } catch (err) {
@@ -869,81 +1061,56 @@ app.get("/api/bookings/host-bookings", authMiddleware, async (req, res) => {
   }
 });
 
-app.get(
-  "/api/host/bookings/:experienceId",
-  authMiddleware,
-  async (req, res) => {
-    try {
-      const hostId = String(req.user._id);
-      const experienceId = req.params.experienceId;
-      const bookings = await Booking.find({ hostId, experienceId })
-        .populate("experience", "title images price")
-        .populate("guestId", "name email profilePic mobile")
-        .sort({ bookingDate: 1 });
-      res.json(bookings);
-    } catch (err) {
-      res.status(500).json({ message: "Server error" });
-    }
-  }
-);
-
-// Guest Bookings Routes
-app.get("/api/bookings/my-bookings", authMiddleware, async (req, res) => {
-  const bookings = await Booking.find({ guestId: req.user._id })
-    .populate("experience")
-    .sort({ bookingDate: -1 });
-  res.json(bookings);
-});
-app.get("/api/my/bookings", authMiddleware, async (req, res) => {
-  const bookings = await Booking.find({ guestId: req.user._id })
-    .populate("experience")
-    .sort({ bookingDate: -1 });
-  res.json(bookings);
-});
-
-// Cancel Booking
-app.post("/api/bookings/:id/cancel", authMiddleware, async (req, res) => {
+app.get("/api/host/bookings/:experienceId", authMiddleware, async (req, res) => {
   try {
-    const booking = await Booking.findById(req.params.id);
-    if (!booking) return res.status(404).json({ message: "Booking not found" });
-    if (String(booking.guestId) !== String(req.user._id))
-      return res.status(403).json({ message: "Unauthorized" });
-    if (
-      booking.status === "cancelled" ||
-      booking.status === "cancelled_by_host"
-    )
-      return res.status(400).json({ message: "Already cancelled" });
-    booking.status = "cancelled";
-    booking.refundAmount = 0;
-    booking.cancellationReason = "User requested cancellation";
-    await booking.save();
-    res.json({
-      message: "Booking cancelled.",
-      refund: { amount: 0, reason: "Manual processing" }
-    });
+    const hostId = String(req.user._id);
+    const experienceId = req.params.experienceId;
+    const bookings = await Booking.find({ hostId, experienceId })
+      .populate("experience", "title images price imageUrl city")
+      .populate("guestId", "name email profilePic handle publicProfile") // mobile NOT included
+      .sort({ bookingDate: 1 });
+    res.json(bookings);
   } catch (err) {
     res.status(500).json({ message: "Server error" });
   }
 });
 
-// 5. Review & Bookmark Routes
+// Guest bookings
+app.get("/api/bookings/my-bookings", authMiddleware, async (req, res) => {
+  const bookings = await Booking.find({ guestId: req.user._id }).populate("experience").sort({ bookingDate: -1 });
+  res.json(bookings);
+});
+app.get("/api/my/bookings", authMiddleware, async (req, res) => {
+  const bookings = await Booking.find({ guestId: req.user._id }).populate("experience").sort({ bookingDate: -1 });
+  res.json(bookings);
+});
+
+// Cancel booking
+app.post("/api/bookings/:id/cancel", authMiddleware, async (req, res) => {
+  try {
+    const booking = await Booking.findById(req.params.id);
+    if (!booking) return res.status(404).json({ message: "Booking not found" });
+    if (String(booking.guestId) !== String(req.user._id)) return res.status(403).json({ message: "Unauthorized" });
+    if (booking.status === "cancelled" || booking.status === "cancelled_by_host") return res.status(400).json({ message: "Already cancelled" });
+
+    booking.status = "cancelled";
+    booking.refundAmount = 0;
+    booking.cancellationReason = "User requested cancellation";
+    await booking.save();
+
+    res.json({ message: "Booking cancelled.", refund: { amount: 0, reason: "Manual processing" } });
+  } catch (err) {
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+// Reviews
 app.post("/api/reviews", authMiddleware, async (req, res) => {
-  const {
-    experienceId,
-    bookingId,
-    rating,
-    comment,
-    type,
-    targetId
-  } = req.body;
+  const { experienceId, bookingId, rating, comment, type, targetId } = req.body || {};
   const reviewType = type || "guest_to_host";
-  if (
-    await Review.findOne({
-      bookingId,
-      authorId: req.user._id
-    })
-  )
-    return res.status(400).json({ message: "Duplicate" });
+
+  if (await Review.findOne({ bookingId, authorId: req.user._id })) return res.status(400).json({ message: "Duplicate" });
+
   const review = new Review({
     experienceId,
     bookingId,
@@ -952,81 +1119,409 @@ app.post("/api/reviews", authMiddleware, async (req, res) => {
     targetId,
     type: reviewType,
     rating,
-    comment
+    comment,
   });
+
   await review.save();
+
   if (reviewType === "guest_to_host") {
-    const reviews = await Review.find({
-      experienceId,
-      type: "guest_to_host"
-    });
-    const avg =
-      reviews.reduce((acc, r) => acc + r.rating, 0) / reviews.length;
-    await Experience.findByIdAndUpdate(experienceId, {
-      averageRating: avg,
-      reviewCount: reviews.length
-    });
+    const reviews = await Review.find({ experienceId, type: "guest_to_host" });
+    const avg = reviews.reduce((acc, r) => acc + r.rating, 0) / reviews.length;
+    await Experience.findByIdAndUpdate(experienceId, { averageRating: avg, reviewCount: reviews.length });
   } else {
-    const userReviews = await Review.find({
-      targetId,
-      type: "host_to_guest"
-    });
-    const avg =
-      userReviews.reduce((acc, r) => acc + r.rating, 0) /
-      userReviews.length;
-    await User.findByIdAndUpdate(targetId, {
-      guestRating: avg,
-      guestReviewCount: userReviews.length
-    });
+    const userReviews = await Review.find({ targetId, type: "host_to_guest" });
+    const avg = userReviews.reduce((acc, r) => acc + r.rating, 0) / userReviews.length;
+    await User.findByIdAndUpdate(targetId, { guestRating: avg, guestReviewCount: userReviews.length });
   }
+
   res.json(review);
 });
 
 app.get("/api/experiences/:id/reviews", async (req, res) => {
-  const reviews = await Review.find({
-    experienceId: req.params.id,
-    type: "guest_to_host"
-  }).sort({ date: -1 });
+  const reviews = await Review.find({ experienceId: req.params.id, type: "guest_to_host" }).sort({ date: -1 });
   res.json(reviews);
 });
 
+// --- Likes --- (toggle + count)
+app.post("/api/experiences/:id/like", authMiddleware, async (req, res) => {
+  try {
+    const expId = String(req.params.id);
+    const existing = await ExperienceLike.findOne({ experienceId: expId, userId: req.user._id });
+    if (existing) {
+      await ExperienceLike.findByIdAndDelete(existing._id);
+      const count = await ExperienceLike.countDocuments({ experienceId: expId });
+      return res.json({ liked: false, count });
+    }
+    await ExperienceLike.create({ experienceId: expId, userId: req.user._id });
+    const count = await ExperienceLike.countDocuments({ experienceId: expId });
+    return res.json({ liked: true, count });
+  } catch (e) {
+    return res.status(500).json({ message: "Server error" });
+  }
+});
+
+app.get("/api/experiences/:id/like", authMiddleware, async (req, res) => {
+  try {
+    const expId = String(req.params.id);
+    const liked = !!(await ExperienceLike.findOne({ experienceId: expId, userId: req.user._id }));
+    const count = await ExperienceLike.countDocuments({ experienceId: expId });
+    return res.json({ liked, count });
+  } catch (e) {
+    return res.status(500).json({ message: "Server error" });
+  }
+});
+
+// --- Comments --- (host + confirmed attendees only)
+async function canComment(expId, userId) {
+  const exp = await Experience.findById(expId);
+  if (!exp) return { ok: false, reason: "Experience not found" };
+  if (String(exp.hostId) === String(userId)) return { ok: true, exp, role: "host" };
+
+  const b = await Booking.findOne({
+    experienceId: String(exp._id),
+    guestId: userId,
+    $or: [{ status: "confirmed" }, { paymentStatus: "paid" }],
+  });
+
+  if (b) return { ok: true, exp, role: "attendee" };
+  return { ok: false, reason: "Not allowed" };
+}
+
+app.post("/api/experiences/:id/comments", authMiddleware, async (req, res) => {
+  try {
+    const expId = String(req.params.id);
+    const gate = await canComment(expId, req.user._id);
+    if (!gate.ok) return res.status(403).json({ message: "Not allowed" });
+
+    const text = String((req.body && req.body.text) || "").trim();
+    if (!text) return res.status(400).json({ message: "Comment text required" });
+    if (text.length > 1000) return res.status(400).json({ message: "Comment too long" });
+
+    const c = await ExperienceComment.create({ experienceId: expId, authorId: req.user._id, text });
+
+    return res.json({
+      _id: c._id,
+      experienceId: expId,
+      text: c.text,
+      createdAt: c.createdAt,
+      author: {
+        _id: req.user._id,
+        name: String(req.user.name || ""),
+        profilePic: req.user.publicProfile ? String(req.user.profilePic || "") : "",
+        bio: req.user.publicProfile ? String(req.user.bio || "") : "",
+        handle: String(req.user.handle || ""),
+        publicProfile: !!req.user.publicProfile,
+      },
+    });
+  } catch (e) {
+    return res.status(500).json({ message: "Server error" });
+  }
+});
+
+app.get("/api/experiences/:id/comments", authMiddleware, async (req, res) => {
+  try {
+    const expId = String(req.params.id);
+    const gate = await canComment(expId, req.user._id);
+    if (!gate.ok) return res.status(403).json({ message: "Not allowed" });
+
+    const comments = await ExperienceComment.find({ experienceId: expId })
+      .sort({ createdAt: -1 })
+      .limit(50)
+      .populate("authorId", "name profilePic bio handle publicProfile");
+
+    const out = comments.map((c) => {
+      const u = c.authorId;
+      return {
+        _id: c._id,
+        experienceId: expId,
+        text: c.text,
+        createdAt: c.createdAt,
+        author: u
+          ? {
+              _id: u._id,
+              name: String(u.name || ""),
+              profilePic: u.publicProfile ? String(u.profilePic || "") : "",
+              bio: u.publicProfile ? String(u.bio || "") : "",
+              handle: String(u.handle || ""),
+              publicProfile: !!u.publicProfile,
+            }
+          : null,
+      };
+    });
+
+    return res.json(out);
+  } catch (e) {
+    return res.status(500).json({ message: "Server error" });
+  }
+});
+
+// Bookmarks
 app.post("/api/bookmarks/:experienceId", authMiddleware, async (req, res) => {
   const { experienceId } = req.params;
   const userId = req.user._id;
+
   const existing = await Bookmark.findOne({ userId, experienceId });
   if (existing) {
     await Bookmark.findByIdAndDelete(existing._id);
     return res.json({ message: "Removed" });
   }
+
   await Bookmark.create({ userId, experienceId });
   res.json({ message: "Added" });
 });
 
 app.get("/api/my/bookmarks/details", authMiddleware, async (req, res) => {
   const bms = await Bookmark.find({ userId: req.user._id });
-  const exps = await Experience.find({
-    _id: { $in: bms.map(b => b.experienceId) }
-  });
+  const exps = await Experience.find({ _id: { $in: bms.map((b) => b.experienceId) } });
   res.json(exps);
 });
 
-// 6. Admin & Utility Routes
+// Booking visibility (friends feed opt-in)
+app.put("/api/bookings/:id/visibility", authMiddleware, async (req, res) => {
+  try {
+    const booking = await Booking.findById(req.params.id);
+    if (!booking) return res.status(404).json({ message: "Booking not found" });
+    if (String(booking.guestId) !== String(req.user._id)) return res.status(403).json({ message: "Unauthorized" });
+
+    const toFriends = !!(req.body && req.body.toFriends);
+    booking.visibilityToFriends = toFriends;
+    await booking.save();
+    return res.json({ ok: true, visibilityToFriends: booking.visibilityToFriends });
+  } catch (e) {
+    return res.status(500).json({ message: "Server error" });
+  }
+});
+
+// Social: connect
+app.post("/api/social/connect", authMiddleware, async (req, res) => {
+  try {
+    const targetUserId = String((req.body && req.body.targetUserId) || "").trim();
+    const handle = normalizeHandle((req.body && req.body.handle) || "");
+
+    let target = null;
+    if (targetUserId) target = await User.findById(targetUserId);
+    if (!target && handle) target = await User.findOne({ handle, allowHandleSearch: true });
+
+    if (!target) return res.status(404).json({ message: "User not found." });
+    if (String(target._id) === String(req.user._id)) return res.status(400).json({ message: "Cannot connect to yourself." });
+
+    const reverse = await Connection.findOne({ requesterId: target._id, addresseeId: req.user._id });
+    if (reverse && reverse.status === "pending") {
+      reverse.status = "accepted";
+      reverse.respondedAt = new Date();
+      await reverse.save();
+      return res.json({ status: "accepted", connectionId: reverse._id });
+    }
+
+    const existing = await Connection.findOne({ requesterId: req.user._id, addresseeId: target._id });
+    if (existing) {
+      if (existing.status === "accepted") return res.json({ status: "accepted", connectionId: existing._id });
+      if (existing.status === "pending") return res.json({ status: "pending", connectionId: existing._id });
+      if (existing.status === "blocked") return res.status(403).json({ message: "Connection blocked." });
+    }
+
+    const c = await Connection.create({ requesterId: req.user._id, addresseeId: target._id, status: "pending" });
+    return res.json({ status: "pending", connectionId: c._id });
+  } catch (e) {
+    return res.status(500).json({ message: "Server error" });
+  }
+});
+
+// Social: incoming requests
+app.get("/api/social/requests", authMiddleware, async (req, res) => {
+  try {
+    const reqs = await Connection.find({ addresseeId: req.user._id, status: "pending" }).sort({ createdAt: -1 });
+    const out = [];
+    for (const r of reqs) out.push({ _id: r._id, from: await minimalUserCard(r.requesterId), createdAt: r.createdAt });
+    return res.json(out);
+  } catch (e) {
+    return res.status(500).json({ message: "Server error" });
+  }
+});
+
+// Social: accept / reject / block
+app.post("/api/social/requests/:id/accept", authMiddleware, async (req, res) => {
+  try {
+    const c = await Connection.findById(req.params.id);
+    if (!c) return res.status(404).json({ message: "Not found" });
+    if (String(c.addresseeId) !== String(req.user._id)) return res.status(403).json({ message: "Unauthorized" });
+    if (c.status !== "pending") return res.status(400).json({ message: "Not pending" });
+
+    c.status = "accepted";
+    c.respondedAt = new Date();
+    await c.save();
+    return res.json({ status: "accepted" });
+  } catch (e) {
+    return res.status(500).json({ message: "Server error" });
+  }
+});
+
+app.post("/api/social/requests/:id/reject", authMiddleware, async (req, res) => {
+  try {
+    const c = await Connection.findById(req.params.id);
+    if (!c) return res.status(404).json({ message: "Not found" });
+    if (String(c.addresseeId) !== String(req.user._id)) return res.status(403).json({ message: "Unauthorized" });
+    if (c.status !== "pending") return res.status(400).json({ message: "Not pending" });
+
+    c.status = "rejected";
+    c.respondedAt = new Date();
+    await c.save();
+    return res.json({ status: "rejected" });
+  } catch (e) {
+    return res.status(500).json({ message: "Server error" });
+  }
+});
+
+app.post("/api/social/requests/:id/block", authMiddleware, async (req, res) => {
+  try {
+    const c = await Connection.findById(req.params.id);
+    if (!c) return res.status(404).json({ message: "Not found" });
+
+    const me = String(req.user._id);
+    if (String(c.addresseeId) !== me && String(c.requesterId) !== me) return res.status(403).json({ message: "Unauthorized" });
+
+    c.status = "blocked";
+    c.respondedAt = new Date();
+    await c.save();
+    return res.json({ status: "blocked" });
+  } catch (e) {
+    return res.status(500).json({ message: "Server error" });
+  }
+});
+
+// Social: list accepted connections
+app.get("/api/social/connections", authMiddleware, async (req, res) => {
+  try {
+    const me = req.user._id;
+    const conns = await Connection.find({
+      status: "accepted",
+      $or: [{ requesterId: me }, { addresseeId: me }],
+    }).sort({ respondedAt: -1 });
+
+    const out = [];
+    for (const c of conns) {
+      const otherId = String(c.requesterId) === String(me) ? c.addresseeId : c.requesterId;
+      out.push({ _id: c._id, user: await minimalUserCard(otherId) });
+    }
+    return res.json(out);
+  } catch (e) {
+    return res.status(500).json({ message: "Server error" });
+  }
+});
+
+// Social: friends feed (opt-in)
+app.get("/api/social/feed", authMiddleware, async (req, res) => {
+  try {
+    const me = req.user._id;
+
+    const conns = await Connection.find({
+      status: "accepted",
+      $or: [{ requesterId: me }, { addresseeId: me }],
+    });
+
+    const friendIds = conns.map((c) => (String(c.requesterId) === String(me) ? c.addresseeId : c.requesterId));
+    if (friendIds.length === 0) return res.json([]);
+
+    const bookings = await Booking.find({
+      guestId: { $in: friendIds },
+      visibilityToFriends: true,
+      $or: [{ status: "confirmed" }, { paymentStatus: "paid" }],
+    })
+      .sort({ createdAt: -1 })
+      .limit(30)
+      .populate("experience", "title images imageUrl city")
+      .populate("guestId", "name profilePic handle publicProfile");
+
+    const out = bookings.map((b) => ({
+      _id: b._id,
+      when: b.bookingDate,
+      timeSlot: b.timeSlot,
+      guest: b.guestId
+        ? {
+            _id: b.guestId._id,
+            name: b.guestId.name,
+            profilePic: b.guestId.publicProfile ? (b.guestId.profilePic || "") : "",
+            handle: b.guestId.handle || "",
+          }
+        : null,
+      experience: b.experience
+        ? {
+            _id: b.experience._id,
+            title: b.experience.title,
+            city: b.experience.city,
+            imageUrl: b.experience.imageUrl || (Array.isArray(b.experience.images) ? b.experience.images[0] : ""),
+          }
+        : { _id: b.experienceId },
+    }));
+
+    return res.json(out);
+  } catch (e) {
+    return res.status(500).json({ message: "Server error" });
+  }
+});
+
+// ✅ Friend-circle history endpoint (privacy gates)
+app.get("/api/social/user/:userId/visible-bookings", authMiddleware, async (req, res) => {
+  try {
+    const me = String(req.user._id);
+    const other = String(req.params.userId || "");
+    if (!other) return res.status(400).json({ message: "userId required" });
+    if (me === other) return res.status(400).json({ message: "Use your bookings endpoint" });
+
+    const target = await User.findById(other);
+    if (!target) return res.status(404).json({ message: "User not found" });
+    if (!target.showExperiencesToFriends) return res.json([]);
+
+    const conn = await Connection.findOne({
+      status: "accepted",
+      $or: [
+        { requesterId: me, addresseeId: other },
+        { requesterId: other, addresseeId: me },
+      ],
+    });
+    if (!conn) return res.status(403).json({ message: "Not allowed" });
+
+    const bookings = await Booking.find({
+      guestId: other,
+      visibilityToFriends: true,
+      $or: [{ status: "confirmed" }, { paymentStatus: "paid" }],
+    })
+      .sort({ bookingDate: -1 })
+      .limit(50)
+      .populate("experience", "title images imageUrl city");
+
+    const out = bookings.map((b) => ({
+      _id: b._id,
+      when: b.bookingDate,
+      timeSlot: b.timeSlot,
+      experience: b.experience
+        ? {
+            _id: b.experience._id,
+            title: b.experience.title,
+            city: b.experience.city,
+            imageUrl: b.experience.imageUrl || (Array.isArray(b.experience.images) ? b.experience.images[0] : ""),
+          }
+        : { _id: b.experienceId },
+    }));
+
+    return res.json(out);
+  } catch (e) {
+    return res.status(500).json({ message: "Server error" });
+  }
+});
+
+// Admin stats
 app.get("/api/admin/stats", adminMiddleware, async (req, res) => {
-  const revenueDocs = await Booking.find(
-    { status: "confirmed" },
-    "pricing"
-  );
+  const revenueDocs = await Booking.find({ status: "confirmed" }, "pricing");
   res.json({
     userCount: await User.countDocuments(),
     expCount: await Experience.countDocuments(),
     bookingCount: await Booking.countDocuments(),
-    totalRevenue: revenueDocs.reduce(
-      (acc, b) => acc + (b.pricing.totalPrice || 0),
-      0
-    )
+    totalRevenue: revenueDocs.reduce((acc, b) => acc + (b.pricing && b.pricing.totalPrice ? b.pricing.totalPrice : 0), 0),
   });
 });
 
+// Admin bookings
 app.get("/api/admin/bookings", adminMiddleware, async (req, res) => {
   const bookings = await Booking.find()
     .populate("experience")
@@ -1036,18 +1531,15 @@ app.get("/api/admin/bookings", adminMiddleware, async (req, res) => {
   res.json(bookings);
 });
 
+// Recommendations
 app.get("/api/recommendations", authMiddleware, async (req, res) => {
-  const exps = await Experience.find({ isPaused: false })
-    .sort({ averageRating: -1 })
-    .limit(4);
+  const exps = await Experience.find({ isPaused: false }).sort({ averageRating: -1 }).limit(4);
   if (exps.length > 0) return res.json(exps);
   const fallback = await Experience.find({ isPaused: false }).limit(4);
   res.json(fallback);
 });
 
-// --- NEW ADMIN ROUTES (Item #57) ---
-
-// A. Get ALL Users (Admin Only)
+// Admin users
 app.get("/api/admin/users", adminMiddleware, async (req, res) => {
   try {
     const users = await User.find().select("-password").sort({ createdAt: -1 });
@@ -1057,18 +1549,15 @@ app.get("/api/admin/users", adminMiddleware, async (req, res) => {
   }
 });
 
-// B. Ban/Delete User (Admin Only)
 app.delete("/api/admin/users/:id", adminMiddleware, async (req, res) => {
   try {
     await User.findByIdAndDelete(req.params.id);
-    // Optional: Delete their bookings/experiences too? For MVP, just the user.
     res.json({ message: "User banned/deleted." });
   } catch (err) {
     res.status(500).json({ message: "Server error" });
   }
 });
 
-// C. Get ALL Experiences (Including Paused) (Admin Only)
 app.get("/api/admin/experiences", adminMiddleware, async (req, res) => {
   try {
     const exps = await Experience.find().sort({ createdAt: -1 });
@@ -1078,13 +1567,11 @@ app.get("/api/admin/experiences", adminMiddleware, async (req, res) => {
   }
 });
 
-// D. Toggle Experience Status (Pause/Unpause) (Admin Only)
 app.patch("/api/admin/experiences/:id/toggle", adminMiddleware, async (req, res) => {
   try {
     const exp = await Experience.findById(req.params.id);
     if (!exp) return res.status(404).json({ message: "Not found" });
-    
-    exp.isPaused = !exp.isPaused; // Toggle
+    exp.isPaused = !exp.isPaused;
     await exp.save();
     res.json(exp);
   } catch (err) {
@@ -1092,16 +1579,20 @@ app.patch("/api/admin/experiences/:id/toggle", adminMiddleware, async (req, res)
   }
 });
 
-// 7. Public/Host Profile Route (UPDATED: Fetches Reviews & Real Stats)
 app.get("/api/users/:userId/profile", async (req, res) => {
   try {
-    const user = await User.findById(req.params.userId);
-    if (!user) {
-      return res.status(404).json({ message: "User not found." });
-    }
+    const user = await User.findById(req.params.userId)
+      .select("name profilePic bio handle publicProfile createdAt")
+      .lean();
 
-    // Check if they are a host
+    if (!user) return res.status(404).json({ message: "User not found." });
+
     const isHostProfile = await isHost(user._id);
+
+    // Guests must opt-in; hosts are always viewable (trust model)
+    if (!isHostProfile && !user.publicProfile) {
+      return res.status(403).json({ message: "Profile is private." });
+    }
 
     let experiences = [];
     let reviews = [];
@@ -1109,189 +1600,37 @@ app.get("/api/users/:userId/profile", async (req, res) => {
     let hostReviewCount = 0;
 
     if (isHostProfile) {
-      // 1. Get Active Experiences
       experiences = await Experience.find({
-        hostId: user._id,
+        hostId: String(user._id),
         isPaused: false
       }).sort({ averageRating: -1, createdAt: -1 });
 
-      // 2. Get Recent Reviews for this Host's Experiences
-      // We find all reviews where the experienceId belongs to this host
-      const expIds = experiences.map(e => e._id.toString());
-      reviews = await Review.find({ 
-          experienceId: { $in: expIds }, 
-          type: 'guest_to_host' 
-      })
-      .sort({ date: -1 })
-      .limit(10); // Limit to 10 most recent
+      const expIds = experiences.map(e => String(e._id));
 
-      // 3. Calculate Real Host Stats
-      if (experiences.length > 0) {
-          // Sum up review counts
-          hostReviewCount = reviews.length; // Or aggregate total from experiences if fetching all
-          
-          // Calculate average rating across all rated experiences
-          const ratedExps = experiences.filter(e => e.averageRating > 0);
-          if (ratedExps.length > 0) {
-              const totalRating = ratedExps.reduce((sum, e) => sum + e.averageRating, 0);
-              hostRating = totalRating / ratedExps.length;
-          }
+      reviews = await Review.find({
+        experienceId: { $in: expIds },
+        type: "guest_to_host"
+      }).sort({ date: -1 }).limit(10);
+
+      hostReviewCount = reviews.length;
+
+      const rated = experiences.filter(e => Number(e.averageRating) > 0);
+      if (rated.length > 0) {
+        hostRating = rated.reduce((s, e) => s + Number(e.averageRating || 0), 0) / rated.length;
       }
     }
 
-    // Sanitize user data
-    const publicUser = sanitizeUser(user);
-    const {
-      email, password, role, notifications, payoutDetails, ...safePublicUser
-    } = publicUser;
-
-    res.json({
-      user: safePublicUser,
+    return res.json({
+      user: publicUserCardFromDoc(user),
       isHost: isHostProfile,
-      experiences: experiences,
-      reviews: reviews, // Send reviews to frontend
-      hostStats: {      // Send calculated stats
-          rating: hostRating, 
-          reviewCount: hostReviewCount 
-      }
-    });
-  } catch (error) {
-    console.error("Error fetching public profile:", error);
-    res.status(500).json({ message: "Server error fetching profile." });
-  }
-});
-// 🔴 NUCLEAR SEED ROUTE (Fixed Personas + Multi-Category)
-app.post("/api/admin/seed-force", adminMiddleware, async (req, res) => {
-  try {
-    const isProd = String(process.env.NODE_ENV || "").toLowerCase() === "production";
-    const allowSeedForce = String(process.env.ALLOW_SEED_FORCE || "").toLowerCase() === "true";
-    const requiredKey = String(process.env.SEED_FORCE_KEY || "");
-    const providedKey = String(req.headers["x-seed-key"] || "");
-    if (isProd) {
-      return res.status(403).json({ error: "seed-force disabled in production" });
-    }
-    if (!allowSeedForce) {
-      return res.status(403).json({ error: "seed-force disabled (set ALLOW_SEED_FORCE=true to enable)" });
-    }
-    if (!requiredKey || providedKey !== requiredKey) {
-      return res.status(401).json({ error: "unauthorized" });
-    }
-    await User.deleteMany({});
-    await Experience.deleteMany({});
-    await Review.deleteMany({});
-    await Booking.deleteMany({});
-
-    const adminPass = await bcrypt.hash("admin", 10);
-    const hostPass = await bcrypt.hash("123", 10);
-
-    // GENERIC / SAFE USERS (No real names)
-    await User.create({
-      name: `Super Admin`,
-      email: `admin@sharedtable.com`,
-      password: adminPass,
-      role: `Admin`,
-      isAdmin: true
+      experiences,
+      reviews,
+      hostStats: { rating: hostRating, reviewCount: hostReviewCount }
     });
 
-    const host1 = await User.create({
-      name: `Lucas`,
-      email: `lucas@host.com`,
-      password: hostPass,
-      role: `Host`,
-      isPremiumHost: true,
-      bio: "Surfer & Chef.",
-      profilePic:
-        "https://images.unsplash.com/photo-1544005313-94ddf0286df2?auto=format&fit=crop&w=200&q=80"
-    });
-    const host2 = await User.create({
-      name: `Elena`,
-      email: `elena@host.com`,
-      password: hostPass,
-      role: `Host`,
-      isPremiumHost: true,
-      bio: "Sharing family recipes.",
-      profilePic:
-        "https://images.unsplash.com/photo-1506794778202-cad84cf45f1d?auto=format&fit=crop&w=200&q=80"
-    });
-    const host3 = await User.create({
-      name: `Sarah`,
-      email: `sarah@host.com`,
-      password: hostPass,
-      role: `Host`,
-      isPremiumHost: true,
-      bio: "Nature guide.",
-      profilePic:
-        "https://images.unsplash.com/photo-1438761681033-6461ffad8d80?auto=format&fit=crop&w=200&q=80"
-    });
-
-    // Pillar 1: CULTURE + FOOD (Multi-Category!)
-    await Experience.create({
-      hostId: host1._id,
-      hostName: host1.name,
-      hostPic: host1.profilePic,
-      title: `Aussie Christmas Eve Seafood Feast`,
-      city: `Bondi Beach`,
-      price: 120,
-      maxGuests: 12,
-      tags: ["Culture", "Food"], // <--- DUAL CATEGORY
-      description:
-        "Fresh prawns, oysters, and pavlova by the beach. Experience a true Australian summer Christmas tradition.",
-      images: [
-        "https://images.unsplash.com/photo-1606131731446-5568d87113aa?auto=format&fit=crop&w=800&q=80"
-      ], // Seafood Platter
-      availableDays: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
-      startDate: "2025-12-01",
-      endDate: "2025-12-31"
-    });
-
-    // Pillar 2: FOOD
-    await Experience.create({
-      hostId: host2._id,
-      hostName: host2.name,
-      hostPic: host2.profilePic,
-      title: `Sunday Gravy with Nonna`,
-      city: `Melbourne`,
-      price: 65,
-      maxGuests: 6,
-      tags: ["Food"],
-      description:
-        "A slow-cooked Italian feast using recipes passed down for 3 generations.",
-      images: [
-        "https://images.unsplash.com/photo-1543353071-873f17a7a088?auto=format&fit=crop&w=800&q=80"
-      ],
-      availableDays: ["Sat", "Sun"],
-      startDate: "2025-01-01",
-      endDate: "2025-12-31"
-    });
-
-    // Pillar 3: NATURE
-    await Experience.create({
-      hostId: host3._id,
-      hostName: host3.name,
-      hostPic: host3.profilePic,
-      title: `Coastal Foraging & Picnic`,
-      city: `Byron Bay`,
-      price: 95,
-      maxGuests: 8,
-      tags: ["Nature"],
-      description:
-        "Walk the coast, learn about native ingredients, and share a picnic on the cliffs at sunset.",
-      images: [
-        "https://images.unsplash.com/photo-1469854523086-cc02fe5d8800?auto=format&fit=crop&w=800&q=80"
-      ],
-      availableDays: ["Sat", "Sun"],
-      startDate: "2025-01-01",
-      endDate: "2025-12-31"
-    });
-
-    res.send(
-      "✅ DATABASE RESET: Multi-Category Listings Created (Culture+Food)."
-    );
-  } catch (e) {
-    res.status(500).send(e.message);
+  } catch (err) {
+    return res.status(500).json({ message: "Server error fetching profile." });
   }
 });
 
-app.listen(PORT, () =>
-  console.log(`Server running on http://localhost:${PORT}`)
-);
+app.listen(PORT, () => console.log(`Server running on http://localhost:${PORT}`));
