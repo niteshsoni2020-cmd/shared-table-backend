@@ -197,6 +197,9 @@ app.post(
 
 app.use(express.json());
 
+function reTest(r, v){ try { return r.test(String(v||"")); } catch(_) { return false; } }
+
+
 // 2. CONNECT TO MONGODB
 mongoose
   .connect(process.env.MONGO_URI)
@@ -288,6 +291,11 @@ const experienceSchema = new mongoose.Schema(
     title: String,
     description: String,
     city: String,
+    suburb: { type: String, default: "" },
+    postcode: { type: String, default: "" },
+    addressLine: { type: String, default: "" },
+    addressNotes: { type: String, default: "" },
+
     price: Number,
     maxGuests: Number,
     originalMaxGuests: Number,
@@ -414,6 +422,38 @@ const Bookmark = mongoose.model(
 
 const User = mongoose.model("User", userSchema);
 const Experience = mongoose.model("Experience", experienceSchema);
+
+
+function stripExperiencePrivateFields(expObj) {
+  if (!expObj || typeof expObj !== "object") return expObj;
+  // Remove private location/contact details from public surfaces
+  delete expObj.addressLine;
+  delete expObj.addressNotes;
+  return expObj;
+}
+
+async function canSeeExperiencePrivate(req, exp) {
+  try {
+    if (!req || !req.user || !exp) return false;
+    const userId = String(req.user._id || "");
+    if (!userId) return false;
+
+    // host/admin can always see
+    if (String(exp.hostId || "") === userId) return true;
+    if (req.user && req.user.isAdmin) return true;
+
+    // paid/confirmed booking can see
+    const b = await Booking.findOne({
+      experienceId: String(exp._id),
+      guestId: req.user._id,
+      $or: [{ paymentStatus: "paid" }, { status: "confirmed" }],
+    }).lean();
+    return !!b;
+  } catch (_) {
+    return false;
+  }
+}
+
 const Booking = mongoose.model("Booking", bookingSchema);
 const Review = mongoose.model("Review", reviewSchema);
 const ExperienceLike = mongoose.model("ExperienceLike", experienceLikeSchema);
@@ -736,6 +776,14 @@ app.put("/api/auth/update", authMiddleware, async (req, res) => {
 // Experiences: Create (category sanitize)
 app.post("/api/experiences", authMiddleware, async (req, res) => {
   try {
+    const { suburb, postcode, addressLine, addressNotes } = req.body || {};
+    if (!String(suburb || "").trim()) return res.status(400).json({ message: "Suburb / Area is required." });
+    const pc = String(postcode || "").trim();
+    if (!reTest(/^[0-9]{4}$/, pc)) return res.status(400).json({ message: "Postcode must be 4 digits." });
+    if (!String(addressLine || "").trim()) return res.status(400).json({ message: "Street address is required." });
+  } catch (_) {}
+
+  try {
     const body = req.body || {};
 
     let tags = [];
@@ -747,6 +795,11 @@ app.post("/api/experiences", authMiddleware, async (req, res) => {
     const imageUrl = images[0] || body.imageUrl || "";
 
     const exp = new Experience({
+      suburb: String((req.body && req.body.suburb) || '').trim(),
+      postcode: String((req.body && req.body.postcode) || '').trim(),
+      addressLine: String((req.body && req.body.addressLine) || '').trim(),
+      addressNotes: String((req.body && req.body.addressNotes) || '').trim(),
+
       hostId: String(req.user._id),
       hostName: req.user.name,
       hostPic: req.user.profilePic || "",
@@ -789,7 +842,7 @@ app.put("/api/experiences/:id", authMiddleware, async (req, res) => {
     }
 
     await exp.save();
-    res.json(exp);
+    return res.json(exp);
   } catch (err) {
     console.error("Update experience error:", err);
     res.status(500).json({ message: "Failed to update experience" });
@@ -839,14 +892,17 @@ app.get("/api/experiences", async (req, res) => {
   if (sort === "rating_desc") sortObj.averageRating = -1;
 
   const exps = await Experience.find(query).sort(sortObj);
-  res.json(exps);
+  const safe = (exps || []).map(e => stripExperiencePrivateFields((e.toObject ? e.toObject() : e)));
+  res.json(safe);
 });
 
 // Experience detail
 app.get("/api/experiences/:id", async (req, res) => {
   try {
     const exp = await Experience.findById(req.params.id);
-    res.json(exp);
+    if (!exp) return res.status(404).json({ message: "Not found" });
+    const safe = stripExperiencePrivateFields((exp.toObject ? exp.toObject() : exp));
+    return res.json(safe);
   } catch {
     res.status(404).json({ message: "Not found" });
   }
@@ -924,7 +980,7 @@ app.get("/api/experiences/:id/attendees", authMiddleware, async (req, res) => {
 // Booking: Create + Stripe checkout
 app.post("/api/experiences/:id/book", authMiddleware, async (req, res) => {
   const exp = await Experience.findById(req.params.id);
-  if (!exp) return res.status(404).json({ message: "Experience not found" });
+    if (!exp) return res.status(404).json({ message: "Experience not found" });
 
   if (exp.hostId === String(req.user._id)) return res.status(400).json({ message: "No self-booking." });
 
@@ -1623,7 +1679,7 @@ app.get("/api/users/:userId/profile", async (req, res) => {
     return res.json({
       user: publicUserCardFromDoc(user),
       isHost: isHostProfile,
-      experiences,
+      experiences: safe,
       reviews,
       hostStats: { rating: hostRating, reviewCount: hostReviewCount }
     });
