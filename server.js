@@ -426,10 +426,16 @@ const Experience = mongoose.model("Experience", experienceSchema);
 
 function stripExperiencePrivateFields(expObj) {
   if (!expObj || typeof expObj !== "object") return expObj;
+
+  // Always return a NEW object (do not mutate mongoose docs or shared refs)
+  const o = (expObj && typeof expObj.toObject === "function") ? expObj.toObject() : expObj;
+  const safe = { ...o };
+
   // Remove private location/contact details from public surfaces
-  delete expObj.addressLine;
-  delete expObj.addressNotes;
-  return expObj;
+  delete safe.addressLine;
+  delete safe.addressNotes;
+
+  return safe;
 }
 
 async function canSeeExperiencePrivate(req, exp) {
