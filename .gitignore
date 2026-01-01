@@ -9,3 +9,5 @@ server.js.pre_*
 server.js.bad_syntax_*
 seed.js.pre_*
 .env*
+.tsts_audit/
+server.log
