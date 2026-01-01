@@ -201,6 +201,13 @@ app.post(
           error: "",
           data: (event && event.data) ? event.data : null,
         });
+        // Force-persist raw Stripe payload (bypass mongoose strict schema)
+        try {
+          await evCol.updateOne(
+            { eventId },
+            { $set: { data: (event && event.data) ? event.data : null } }
+          );
+        } catch (_) {}
       } catch (e) {
         if (__isDuplicateKeyError(e)) {
           // Duplicate eventId: claim processing only if not processed yet.
