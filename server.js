@@ -640,7 +640,7 @@ async function checkCapacity(experienceId, date, timeSlot, newGuests) {
   const searchDay = days[d.getUTCDay()];
 
   if (Array.isArray(exp.availableDays) && exp.availableDays.length > 0 && !exp.availableDays.includes(searchDay)) {
-    return { available: false, message: `Closed on ${searchDay}s.` };
+    return { available: false, message: `Closed on ${searchDay}.` };
   }
 
   const startOk = !exp.startDate || String(exp.startDate) <= dateStr;
@@ -806,11 +806,11 @@ app.post("/api/experiences", authMiddleware, async (req, res) => {
       addressLine: String((req.body && req.body.addressLine) || '').trim(),
       addressNotes: String((req.body && req.body.addressNotes) || '').trim(),
 
+      ...body,
       hostId: String(req.user._id),
       hostName: req.user.name,
       hostPic: req.user.profilePic || "",
       isPaused: !!req.user.vacationMode,
-      ...body,
       tags,
       imageUrl,
     });
@@ -831,6 +831,13 @@ app.put("/api/experiences/:id", authMiddleware, async (req, res) => {
 
     const body = req.body || {};
     const { images, tags, ...updates } = body;
+    delete updates.hostId;
+    delete updates.hostName;
+    delete updates.hostPic;
+    delete updates.isPaused;
+    delete updates.averageRating;
+    delete updates.reviewCount;
+    delete updates.createdAt;
 
     if (typeof tags !== "undefined") {
       let newTags = [];
