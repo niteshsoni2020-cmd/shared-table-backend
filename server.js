@@ -1685,7 +1685,7 @@ app.get("/api/users/:userId/profile", async (req, res) => {
     return res.json({
       user: publicUserCardFromDoc(user),
       isHost: isHostProfile,
-      experiences: safe,
+      experiences: (experiences || []).map(e => stripExperiencePrivateFields((e && typeof e.toObject === "function") ? e.toObject() : e)),
       reviews,
       hostStats: { rating: hostRating, reviewCount: hostReviewCount }
     });
