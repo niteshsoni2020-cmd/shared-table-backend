@@ -187,7 +187,7 @@ app.post(
 
       try { await __ensureStripeWebhookIndex(); } catch (_) {}
 
-      const evCol = mongoose.connection.collection("stripe_webhook_events");
+      const evCol = mongoose.connection.db.collection("stripe_webhook_events");
       try {
         await evCol.insertOne({
           eventId,
@@ -362,7 +362,7 @@ app.post(
     } catch (e) {
       try {
         if (mongoose && mongoose.connection && mongoose.connection.readyState === 1) {
-          const evCol2 = mongoose.connection.collection("stripe_webhook_events");
+          const evCol2 = mongoose.connection.db.collection("stripe_webhook_events");
           if (typeof eventId === "string" && eventId.length > 0) {
             await evCol2.updateOne(
               { eventId },
