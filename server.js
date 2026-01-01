@@ -236,12 +236,8 @@ app.post(
 
 
       if (event.type === "checkout.session.completed") {
-        const session = event.data.object || {};
-
-        const bookingId =
-          session.client_reference_id ||
-          (session.metadata && session.metadata.bookingId);
-
+        const session = (event && event.data && event.data.object) ? event.data.object : {};
+        const bookingId = session.client_reference_id || (session.metadata && session.metadata.bookingId);
         if (!bookingId) {
           try {
             await mongoose.connection
@@ -314,7 +310,6 @@ app.post(
         }
 
         booking.currency = String(booking.currency || "aud").toLowerCase();
-        booking.paidAt = booking.paidAt || new Date();
 
         await booking.save();
 
@@ -1847,7 +1842,7 @@ app.post("/api/bookings/verify", authMiddleware, async (req, res) => {
           booking.paymentAnomalyAt = booking.paymentAnomalyAt || new Date();
           booking.stripeSessionId = String(session.id || booking.stripeSessionId || "");
           if (session.payment_intent) booking.stripePaymentIntentId = String(session.payment_intent.id || session.payment_intent);
-          booking.paidAt = booking.paidAt || new Date();
+
           await booking.save();
           return res.json({ status: "paid_after_expiry" });
         }
