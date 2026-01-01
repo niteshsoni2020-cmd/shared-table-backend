@@ -635,6 +635,8 @@ const bookingSchema = new mongoose.Schema(
     status: { type: String, default: "pending_payment" },
     stripeSessionId: String,
     paymentStatus: { type: String, default: "unpaid" },
+
+    expiresAt: { type: Date, default: null },
     pricing: Object,
 
     // Payment reconciliation
@@ -685,6 +687,26 @@ const bookingSchema = new mongoose.Schema(
   },
   schemaOpts
 );
+
+// --- Capacity reservations (race-safe) ---
+// Tracks reserved guests per experience/date/slot to prevent overbooking.
+const capacitySlotSchema = new mongoose.Schema(
+  {
+    experienceId: { type: String, required: true },
+    bookingDate: { type: String, required: true },   // YYYY-MM-DD
+    timeSlot: { type: String, required: true },
+    reservedGuests: { type: Number, default: 0 },
+    maxGuests: { type: Number, default: 0 },
+    createdAt: { type: Date, default: Date.now },
+    updatedAt: { type: Date, default: Date.now },
+  },
+  schemaOpts
+);
+
+capacitySlotSchema.index({ experienceId: 1, bookingDate: 1, timeSlot: 1 }, { unique: true });
+
+const CapacitySlot = mongoose.models.CapacitySlot || mongoose.model("CapacitySlot", capacitySlotSchema);
+
 
 // Virtuals
 bookingSchema.virtual("experience", {
@@ -1116,6 +1138,91 @@ async function computeConnectionStatuses(meId, otherIds) {
     else if (status === "pending") m.set(other, reqId === me ? "pending_outgoing" : "pending_incoming");
   }
   return m;
+}
+
+
+
+async function reserveCapacitySlot(experienceId, dateStr, timeSlot, guests) {
+  const expId = String(experienceId || "").trim();
+  const d = String(dateStr || "").trim();
+  const slot = String(timeSlot || "").trim();
+  const g = Number.parseInt(String(guests || "0"), 10) || 0;
+
+  const ok = Boolean(expId.length > 0 && d.length > 0 && slot.length > 0 && g > 0);
+  if (ok == false) return { ok: false, message: "Invalid capacity reservation request." };
+
+  const exp = await Experience.findById(expId).lean();
+  if (exp == null) return { ok: false, message: "Experience not found." };
+
+  const maxGuests = Number(exp.maxGuests) || 0;
+  if (maxGuests <= 0) return { ok: true, maxGuests: 0 };
+
+  const limit = maxGuests - g;
+
+  const OR = String.fromCharCode(36) + "or";
+  const EXISTS = String.fromCharCode(36) + "exists";
+  const LTE = String.fromCharCode(36) + "lte";
+  const INC = String.fromCharCode(36) + "inc";
+  const SET = String.fromCharCode(36) + "set";
+  const SET_ON_INSERT = String.fromCharCode(36) + "setOnInsert";
+
+  const q = { experienceId: String(expId), bookingDate: d, timeSlot: slot };
+  q[OR] = [
+    { reservedGuests: (function(){ const x={}; x[EXISTS]=false; return x; })() },
+    { reservedGuests: (function(){ const x={}; x[LTE]=limit; return x; })() }
+  ];
+
+  const upd = {};
+  upd[INC] = { reservedGuests: g };
+  upd[SET] = { updatedAt: new Date() };
+  upd[SET_ON_INSERT] = { maxGuests: maxGuests, createdAt: new Date() };
+
+  const r = await CapacitySlot.updateOne(q, upd, { upsert: true });
+
+  const matched = Number(r && r.matchedCount) || 0;
+  const upserted = Number(r && r.upsertedCount) || 0;
+  const did = Boolean(matched > 0 || upserted > 0);
+
+  if (did) return { ok: true, maxGuests: maxGuests };
+
+  const cur = await CapacitySlot.findOne({ experienceId: String(expId), bookingDate: d, timeSlot: slot }).lean();
+  const curReserved = cur && (typeof cur.reservedGuests === "number") ? Number(cur.reservedGuests) : 0;
+  const remaining = maxGuests - curReserved;
+  return { ok: false, remaining: remaining, message: remaining > 0 ? ("Only " + String(remaining) + " spots left.") : "Fully booked." };
+}
+
+async function releaseCapacitySlot(experienceId, dateStr, timeSlot, guests) {
+  const expId = String(experienceId || "").trim();
+  const d = String(dateStr || "").trim();
+  const slot = String(timeSlot || "").trim();
+  const g = Number.parseInt(String(guests || "0"), 10) || 0;
+
+  const ok = Boolean(expId.length > 0 && d.length > 0 && slot.length > 0 && g > 0);
+  if (ok == false) return;
+
+  const OR = String.fromCharCode(36) + "or";
+  const EXISTS = String.fromCharCode(36) + "exists";
+  const GTE = String.fromCharCode(36) + "gte";
+  const INC = String.fromCharCode(36) + "inc";
+  const SET = String.fromCharCode(36) + "set";
+  const LT  = String.fromCharCode(36) + "lt";
+
+  const q = { experienceId: String(expId), bookingDate: d, timeSlot: slot };
+  q[OR] = [
+    { reservedGuests: (function(){ const x={}; x[EXISTS]=true; x[GTE]=g; return x; })() },
+    { reservedGuests: (function(){ const x={}; x[EXISTS]=true; return x; })() }
+  ];
+
+  const upd = {};
+  upd[INC] = { reservedGuests: (0 - g) };
+  upd[SET] = { updatedAt: new Date() };
+
+  await CapacitySlot.updateOne(q, upd);
+
+  const q2 = { experienceId: String(expId), bookingDate: d, timeSlot: slot, reservedGuests: (function(){ const x={}; x[LT]=0; return x; })() };
+  const upd2 = {};
+  upd2[SET] = { reservedGuests: 0, updatedAt: new Date() };
+  await CapacitySlot.updateOne(q2, upd2);
 }
 
 async function checkCapacity(experienceId, date, timeSlot, newGuests) {
@@ -1588,6 +1695,10 @@ app.post("/api/experiences/:id/book", authMiddleware, async (req, res) => {
 
   const cap = await checkCapacity(exp._id, bookingDateStr, timeSlotStr, guests);
   const capOk = Boolean(cap && cap.available);
+
+  const hold = await reserveCapacitySlot(String(exp._id), bookingDateStr, timeSlotStr, guests);
+  const holdOk = Boolean(hold && hold.ok);
+  if (holdOk == false) return res.status(400).json({ message: String(hold.message || "Fully booked.") });
   const policyVersionAccepted = String(((req.body || {}).policyVersionAccepted) || ((req.body || {}).policyVersion) || "").trim();
   const termsVersionAccepted = String(((req.body || {}).termsVersionAccepted) || ((req.body || {}).termsVersion) || "").trim();
 
@@ -1599,7 +1710,6 @@ app.post("/api/experiences/:id/book", authMiddleware, async (req, res) => {
   const okAccept = Boolean(hasPolicy && hasTerms);
   if (okAccept == false) return res.status(400).json({ message: "Policy and terms acceptance required", activePolicy: { ok: true, policy: activeSnap } });
 
-  if (capOk == false) return res.status(400).json({ message: cap.message });
   const toCents = (n) => Math.round(Number(n) * 100);
 
   const unitCents = toCents(exp.price);
@@ -1627,6 +1737,9 @@ app.post("/api/experiences/:id/book", authMiddleware, async (req, res) => {
     timeSlot: timeSlotStr,
     guestNotes: guestNotes || "",
     pricing: { totalPrice: Number((totalCents / 100).toFixed(2)), totalCents, currency: "aud" },
+
+    expiresAt: new Date(Date.now() + (30 * 60 * 1000)),
+
 
     policySnapshot: activeSnap || {},
     policyVersionId: activePolicyDoc ? String(activePolicyDoc._id) : "",
@@ -1665,6 +1778,9 @@ app.post("/api/experiences/:id/book", authMiddleware, async (req, res) => {
     await booking.save();
     res.json({ url: session.url });
   } catch (e) {
+    try {
+      await releaseCapacitySlot(String(exp._id), bookingDateStr, timeSlotStr, guests);
+    } catch (_) {}
     console.error("Stripe Error:", e);
     res.status(500).json({ message: "Payment initialization failed" });
   }
@@ -2427,5 +2543,50 @@ app.get("/api/users/:userId/profile", async (req, res) => {
     return res.status(500).json({ message: "Server error fetching profile." });
   }
 });
+
+
+// UNPAID_BOOKING_EXPIRY_CLEANUP_V1
+// Expires unpaid bookings and releases reserved capacity.
+setInterval(async () => {
+  try {
+    const now = new Date();
+
+    const LTE = String.fromCharCode(36) + "lte";
+    const SET = String.fromCharCode(36) + "set";
+
+    const q = {
+      status: "pending_payment",
+      paymentStatus: "unpaid",
+      expiresAt: (function(){ const x={}; x[LTE]=now; return x; })(),
+    };
+
+    const expired = await Booking.find(q)
+      .select("_id experienceId bookingDate timeSlot numGuests")
+      .lean();
+
+    if (Array.isArray(expired) == false) return;
+
+    for (const b of expired) {
+      const expId = String(b.experienceId || "");
+      const dateStr = String(b.bookingDate || "");
+      const slot = String(b.timeSlot || "");
+      const g = Number.parseInt(String(b.numGuests || "0"), 10) || 0;
+
+      const ok = Boolean(expId.length > 0 && dateStr.length > 0 && slot.length > 0 && g > 0);
+      if (ok) {
+        await releaseCapacitySlot(expId, dateStr, slot, g);
+      }
+
+      const upd = {};
+      upd[SET] = { status: "expired", paymentStatus: "unpaid" };
+
+      await Booking.updateOne(
+        { _id: b._id, status: "pending_payment", paymentStatus: "unpaid" },
+        upd
+      );
+    }
+  } catch (e) {}
+}, 60 * 1000);
+
 
 app.listen(PORT, () => console.log(`Server running on http://localhost:${PORT}`));
