@@ -1379,7 +1379,7 @@ app.get("/api/bookings/host-bookings", authMiddleware, async (req, res) => {
     const hostId = String(req.user._id);
     const bookings = await Booking.find({ hostId })
       .populate("experience", "title images price imageUrl city")
-      .populate("guestId", "name email profilePic handle publicProfile") // mobile NOT included
+      .populate("guestId", "name profilePic handle publicProfile") // mobile NOT included
       .sort({ bookingDate: 1 });
     res.json(bookings);
   } catch (err) {
@@ -1393,7 +1393,7 @@ app.get("/api/host/bookings/:experienceId", authMiddleware, async (req, res) => 
     const experienceId = req.params.experienceId;
     const bookings = await Booking.find({ hostId, experienceId })
       .populate("experience", "title images price imageUrl city")
-      .populate("guestId", "name email profilePic handle publicProfile") // mobile NOT included
+      .populate("guestId", "name profilePic handle publicProfile") // mobile NOT included
       .sort({ bookingDate: 1 });
     res.json(bookings);
   } catch (err) {
@@ -1402,14 +1402,13 @@ app.get("/api/host/bookings/:experienceId", authMiddleware, async (req, res) => 
 });
 
 // Guest bookings
-app.get("/api/bookings/my-bookings", authMiddleware, async (req, res) => {
+async function getMyBookings(req, res) {
   const bookings = await Booking.find({ guestId: req.user._id }).populate("experience").sort({ bookingDate: -1 });
   res.json(bookings);
-});
-app.get("/api/my/bookings", authMiddleware, async (req, res) => {
-  const bookings = await Booking.find({ guestId: req.user._id }).populate("experience").sort({ bookingDate: -1 });
-  res.json(bookings);
-});
+}
+
+app.get("/api/bookings/my-bookings", authMiddleware, async (req, res) => getMyBookings(req, res));
+app.get("/api/my/bookings", authMiddleware, async (req, res) => getMyBookings(req, res));
 
 // Cancel booking
 app.post("/api/bookings/:id/cancel", authMiddleware, async (req, res) => {
@@ -1790,8 +1789,12 @@ app.get("/api/social/feed", authMiddleware, async (req, res) => {
     const friendIds = conns.map((c) => (String(c.requesterId) === String(me) ? c.addresseeId : c.requesterId));
     if (friendIds.length === 0) return res.json([]);
 
+    const allowedUsers = await User.find({ _id: { $in: friendIds }, showExperiencesToFriends: true }).select("_id");
+    const allowedFriendIds = allowedUsers.map((u) => u._id);
+    if (allowedFriendIds.length === 0) return res.json([]);
+
     const bookings = await Booking.find({
-      guestId: { $in: friendIds },
+      guestId: { $in: allowedFriendIds },
       visibilityToFriends: true,
       $or: [{ status: "confirmed" }, { paymentStatus: "paid" }],
     })
