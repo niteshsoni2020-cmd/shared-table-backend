@@ -195,21 +195,29 @@ app.post(
           livemode: Boolean(event.livemode),
           createdAt: (event && event.created) ? new Date(Number(event.created) * 1000) : null,
           receivedAt: new Date(),
+          processingAt: new Date(),
           processedAt: null,
+          attempts: 1,
+          error: "",
+          data: (event && event.data) ? event.data : null,
         });
       } catch (e) {
         if (__isDuplicateKeyError(e)) {
-          // Duplicate eventId: only ACK if it was already processed.
-          // If previous run crashed before processedAt was set, we must continue processing.
+          // Duplicate eventId: claim processing only if not processed yet.
           try {
-            const existing = await evCol.findOne({ eventId }, { projection: { processedAt: 1 } });
-            if (existing && existing.processedAt) {
-              return res.json({ received: true, duplicate: true, alreadyProcessed: true });
+            const claimed = await evCol.findOneAndUpdate(
+              { eventId, processedAt: null, $or: [{ processingAt: null }, { processingAt: { $exists: false } }, { processingAt: { $lte: new Date(Date.now() - 10 * 60 * 1000) } }] },
+              { $set: { processingAt: new Date(), error: "", type: String(event.type || ""), livemode: Boolean(event.livemode), createdAt: (event && event.created) ? new Date(Number(event.created) * 1000) : null, receivedAt: new Date() }, $inc: { attempts: 1 } },
+              { returnDocument: "after" }
+            );
+            if (!claimed || !claimed.value) {
+              // Someone else is processing or already processed; ACK to stop retries.
+              return res.json({ received: true, duplicate: true });
             }
           } catch (_) {
-            // If we cannot read the marker doc, fall through and attempt processing.
+            // If claim fails, do not ACK; force retry.
+            throw e;
           }
-          // Continue processing (do NOT throw on duplicate when processedAt is missing)
         } else {
           throw e;
         }
@@ -332,15 +340,30 @@ app.post(
         booking.status = "refunded";
         await booking.save();
       }
-      // Mark processed for ALL events (best-effort; do not fail webhook ACK if this write fails)
+
+      // Mark processed only after successful handling
       try {
         await mongoose.connection
           .collection("stripe_webhook_events")
-          .updateOne({ eventId }, { $set: { processedAt: new Date() } });
+          .updateOne(
+            { eventId },
+            { $set: { processedAt: new Date(), processingAt: null, error: "" } }
+          );
       } catch (_) {}
 
       return res.json({ received: true });
     } catch (e) {
+      try {
+        if (mongoose && mongoose.connection && mongoose.connection.readyState === 1) {
+          const evCol2 = mongoose.connection.collection("stripe_webhook_events");
+          if (typeof eventId === "string" && eventId.length > 0) {
+            await evCol2.updateOne(
+              { eventId },
+              { $set: { error: String((e && e.message) ? e.message : "webhook_error"), processingAt: null } }
+            );
+          }
+        }
+      } catch (_) {}
       return res.status(500).send("Webhook handler error");
     }
   }
