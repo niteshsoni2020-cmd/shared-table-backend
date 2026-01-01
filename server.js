@@ -46,6 +46,13 @@ const authLimiter = rateLimit({
   legacyHeaders: false,
 });
 
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
 // CORS (locked allowlist)
 // Set CORS_ORIGINS as comma-separated list
 // Example: "https://thesharedtablestory.com,https://www.thesharedtablestory.com,http://localhost:3000"
@@ -946,7 +953,7 @@ app.post("/api/auth/register", async (req, res) => {
 });
 
 // Auth: Login
-app.post("/api/auth/login", async (req, res) => {
+app.post("/api/auth/login", loginLimiter, async (req, res) => {
   try {
     const { email, password } = req.body || {};
     if (!email || !password) return res.status(400).json({ message: "Email and password required" });
