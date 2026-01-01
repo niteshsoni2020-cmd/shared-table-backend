@@ -849,9 +849,11 @@ app.put("/api/experiences/:id", authMiddleware, async (req, res) => {
 
     Object.assign(exp, updates);
 
-    if (Array.isArray(images) && images.length > 0) {
-      exp.images = images;
-      exp.imageUrl = images[0];
+    if (typeof images !== "undefined") {
+      if (Array.isArray(images)) {
+        exp.images = images;
+        exp.imageUrl = images[0] || "";
+      }
     }
 
     await exp.save();
