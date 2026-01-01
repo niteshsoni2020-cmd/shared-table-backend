@@ -457,6 +457,82 @@ async function sendEmail({ to, subject, html, text }) {
   }
 }
 
+function escapeHtml(s) {
+  return String(s || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/\"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function emailLayout(title, bodyHtml, cta) {
+  const safeTitle = escapeHtml(title);
+  const href = cta && cta.href ? String(cta.href) : "";
+  const hasCta = href.trim().length > 0;
+
+  const DOCTYPE = "<" + "!" + "doctype html>";
+
+  const ctaHtml = hasCta
+    ? `<div style="margin:20px 0 0">
+         <a href="${escapeHtml(href)}"
+            style="display:inline-block;padding:12px 16px;border-radius:10px;background:#111827;color:#ffffff;text-decoration:none;font-weight:600">
+           ${escapeHtml(cta.text || "Open")}
+         </a>
+       </div>`
+    : "";
+
+  return `${DOCTYPE}
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${safeTitle}</title>
+</head>
+<body style="margin:0;background:#f6f7fb;font-family:system-ui">
+  <div style="max-width:560px;margin:0 auto;padding:24px">
+    <div style="background:#fff;border:1px solid #e5e7eb;border-radius:14px;padding:22px">
+      <h1 style="margin:0 0 12px 0;font-size:18px">${safeTitle}</h1>
+      <div style="font-size:14px;line-height:1.6">
+        ${bodyHtml || ""}
+        ${ctaHtml}
+      </div>
+    </div>
+    <div style="font-size:12px;color:#6b7280;margin-top:12px">
+      The Shared Table Story
+    </div>
+  </div>
+</body>
+</html>`;
+}
+
+function welcomeEmailHtml(name) {
+  const who = escapeHtml(String(name || "").trim());
+  const hi = who.length > 0 ? ("Hi " + who + ",") : "Hi,";
+
+  return emailLayout(
+    "Welcome",
+    `<p style="margin:0 0 12px 0">${hi}</p>
+     <p style="margin:0 0 12px 0">Welcome to The Shared Table Story.</p>
+     <p style="margin:0 0 12px 0">The Shared Table Story is a curated marketplace for local experiences across Culture, Food, and Nature.</p>
+     <p style="margin:0 0 12px 0">It is built for people who value depth, presence, and genuine connection over mass tourism.</p>
+     <p style="margin:0 0 12px 0">Each experience is hosted by individuals who share a table, a trail, a tradition, or a craft with a small group, thoughtfully and intentionally.</p>
+     <p style="margin:0">If you did not create this account, you can ignore this email.</p>`,
+    null
+  );
+}
+function resetPasswordEmailHtml(resetUrl) {
+  const href = String(resetUrl || "").trim();
+  return emailLayout(
+    "Reset your password",
+    `<p style="margin:0 0 12px 0">Use the button below to reset your password. The link is valid for 30 minutes.</p>
+     <p style="margin:0">If you did not request this, you can ignore this email.</p>`,
+    { text: "Reset password", href }
+  );
+}
+
+
+
 // 5. SCHEMAS
 const schemaOpts = { toJSON: { virtuals: true }, toObject: { virtuals: true } };
 
@@ -577,6 +653,10 @@ const bookingSchema = new mongoose.Schema(
     policyEffectiveFrom: { type: Date, default: null },
     policyVersionId: { type: String, default: "" },
     policyPublishedAt: { type: Date, default: null },
+    policyAcceptedAt: { type: Date, default: null },
+    termsVersionAccepted: { type: String, default: "" },
+    termsAcceptedAt: { type: Date, default: null },
+
     termsSnapshot: { type: Object, default: null },
     // Cancellation + refund decision (computed from snapshot; idempotent)
     cancellation: {
@@ -1111,18 +1191,14 @@ app.post("/api/auth/register", registerLimiter, async (req, res) => {
       ...body,
       password: hashedPassword,
       role: "Guest",
-      notifications: [{ message: "Welcome!", type: "success" }],
+      notifications: [{ message: "Welcome", type: "success" }],
       termsAgreedAt: new Date(),
       termsVersion: "1.0",
     });
 
     await user.save();
 
-    sendEmail({
-      to: user.email,
-      subject: "Welcome to The Shared Table Story 🌏",
-      html: `<p>Welcome ${String(user.name || "")}!</p>`,
-    });
+    sendEmail({ to: user.email, subject: "Welcome to The Shared Table Story 🌏", html: welcomeEmailHtml(user.name), text: "Welcome " + String(user.name || "").trim() });
 
     res.status(201).json({ token: signToken(user), user: sanitizeUser(user) });
   } catch (e) {
@@ -1177,11 +1253,7 @@ app.post("/api/auth/forgot-password", forgotPasswordLimiter, async (req, res) =>
       const resetUrl = `${frontendBase}/reset-password?email=${encodeURIComponent(email)}&token=${encodeURIComponent(token)}`;
       if (canEmail) {
         // Do not fail the endpoint if email fails
-        await sendEmail({
-          to: email,
-          subject: "Reset your password",
-          text: `Reset your password using this link (valid 30 minutes): ${resetUrl}`,
-        });
+        await sendEmail({ to: email, subject: "Reset your password", html: resetPasswordEmailHtml(resetUrl), text: "Reset your password link (valid 30 minutes): " + String(resetUrl || "") });
       }
 
       // DEV-only escape hatch (no official email yet)
@@ -1515,7 +1587,19 @@ app.post("/api/experiences/:id/book", authMiddleware, async (req, res) => {
   if (!Number.isFinite(guests) || guests < 1) return res.status(400).json({ message: "numGuests must be >= 1." });
 
   const cap = await checkCapacity(exp._id, bookingDateStr, timeSlotStr, guests);
-  if (!cap.available) return res.status(400).json({ message: cap.message });
+  const capOk = Boolean(cap && cap.available);
+  const policyVersionAccepted = String(((req.body || {}).policyVersionAccepted) || ((req.body || {}).policyVersion) || "").trim();
+  const termsVersionAccepted = String(((req.body || {}).termsVersionAccepted) || ((req.body || {}).termsVersion) || "").trim();
+
+  const activePolicyDoc = await getActivePolicyDoc();
+  const activeSnap = policySnapshotFromDoc(activePolicyDoc);
+  const activeVer = String((activeSnap && activeSnap.version) || "");
+  const hasPolicy = Boolean(policyVersionAccepted && activeVer && (policyVersionAccepted == activeVer));
+  const hasTerms = Boolean(termsVersionAccepted && (termsVersionAccepted.length > 0));
+  const okAccept = Boolean(hasPolicy && hasTerms);
+  if (okAccept == false) return res.status(400).json({ message: "Policy and terms acceptance required", activePolicy: { ok: true, policy: activeSnap } });
+
+  if (capOk == false) return res.status(400).json({ message: cap.message });
   const toCents = (n) => Math.round(Number(n) * 100);
 
   const unitCents = toCents(exp.price);
@@ -1543,6 +1627,15 @@ app.post("/api/experiences/:id/book", authMiddleware, async (req, res) => {
     timeSlot: timeSlotStr,
     guestNotes: guestNotes || "",
     pricing: { totalPrice: Number((totalCents / 100).toFixed(2)), totalCents, currency: "aud" },
+
+    policySnapshot: activeSnap || {},
+    policyVersionId: activePolicyDoc ? String(activePolicyDoc._id) : "",
+    policyVersion: String((activeSnap && activeSnap.version) || ""),
+    policyEffectiveFrom: (activeSnap && activeSnap.effectiveFrom) ? new Date(activeSnap.effectiveFrom) : null,
+    policyPublishedAt: (activeSnap && activeSnap.publishedAt) ? new Date(activeSnap.publishedAt) : null,
+    policyAcceptedAt: new Date(),
+    termsVersionAccepted: termsVersionAccepted,
+    termsAcceptedAt: new Date(),
   });
 
   await booking.save();
