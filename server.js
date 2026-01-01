@@ -91,6 +91,31 @@ app.use((err, req, res, next) => {
   return next(err);
 });
 
+// Stripe webhook idempotency: dedupe by Stripe event.id
+let __stripeWebhookIndexPromise = null;
+async function __ensureStripeWebhookIndex() {
+  try {
+    if (__stripeWebhookIndexPromise) return __stripeWebhookIndexPromise;
+    if (mongoose == null) return null;
+    if (mongoose.connection == null) return null;
+    __stripeWebhookIndexPromise = mongoose.connection
+      .collection("stripe_webhook_events")
+      .createIndex({ eventId: 1 }, { unique: true, background: true });
+    return __stripeWebhookIndexPromise;
+  } catch (_) {
+    return null;
+  }
+}
+function __isDuplicateKeyError(e) {
+  try {
+    if (e == null) return false;
+    if (e.code === 11000) return true;
+    return String(e.message || '').includes('E11000');
+  } catch (_) {
+    return false;
+  }
+}
+
 // IMPORTANT: webhook must be registered BEFORE express.json()
 app.post(
   "/api/stripe/webhook",
@@ -111,6 +136,36 @@ app.post(
       } catch (err) {
         return res.status(400).send("Webhook signature verification failed");
       }
+
+      // Require DB for idempotency + booking state updates.
+      // If DB is not connected, fail so Stripe retries (do not ACK when we cannot process).
+      if (mongoose == null || mongoose.connection == null || mongoose.connection.readyState !== 1) {
+        return res.status(500).send("DB not ready");
+      }
+
+      // Event-level idempotency: insert Stripe event.id first
+      const eventId = String((event && event.id) ? event.id : "");
+      if (eventId.length === 0) return res.json({ received: true });
+
+      try { await __ensureStripeWebhookIndex(); } catch (_) {}
+
+      const evCol = mongoose.connection.collection("stripe_webhook_events");
+      try {
+        await evCol.insertOne({
+          eventId,
+          type: String(event.type || ""),
+          livemode: Boolean(event.livemode),
+          createdAt: (event && event.created) ? new Date(Number(event.created) * 1000) : null,
+          receivedAt: new Date(),
+          processedAt: null,
+        });
+      } catch (e) {
+        if (__isDuplicateKeyError(e)) {
+          return res.json({ received: true, duplicate: true });
+        }
+        throw e;
+      }
+
 
       if (event.type === "checkout.session.completed") {
         const session = event.data.object || {};
@@ -186,6 +241,14 @@ app.post(
         booking.paidAt = booking.paidAt || new Date();
 
         await booking.save();
+
+        // Mark processed (best-effort; do not fail webhook ACK if this write fails)
+        try {
+          await mongoose.connection
+            .collection("stripe_webhook_events")
+            .updateOne({ eventId }, { $set: { processedAt: new Date() } });
+        } catch (_) {}
+
       }
 
       return res.json({ received: true });
@@ -629,7 +692,7 @@ async function checkCapacity(experienceId, date, timeSlot, newGuests) {
   const dateStr = String(date || "").trim();
   const slot = String(timeSlot || "").trim();
 
-  const isoOk = /^\d{4}-\d{2}-\d{2}$/.test(dateStr);
+  const isoOk = /^d{4}-d{2}-d{2}$/.test(dateStr);
   if (!isoOk) return { available: false, message: "Invalid bookingDate (YYYY-MM-DD required)." };
   if (!slot) return { available: false, message: "timeSlot is required." };
 
@@ -901,7 +964,7 @@ app.get("/api/experiences", async (req, res) => {
 
   if (date) {
     const dateStr = String(date).trim();
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return res.status(400).json({ message: "Invalid date filter (YYYY-MM-DD)." });
+    if (!/^d{4}-d{2}-d{2}$/.test(dateStr)) return res.status(400).json({ message: "Invalid date filter (YYYY-MM-DD)." });
 
     query.startDate = { $lte: dateStr };
     query.endDate = { $gte: dateStr };
@@ -1014,7 +1077,7 @@ app.post("/api/experiences/:id/book", authMiddleware, async (req, res) => {
   const bookingDateStr = String(bookingDate || "").trim();
   const timeSlotStr = String(timeSlot || "").trim();
 
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(bookingDateStr)) return res.status(400).json({ message: "bookingDate required (YYYY-MM-DD)." });
+  if (!/^d{4}-d{2}-d{2}$/.test(bookingDateStr)) return res.status(400).json({ message: "bookingDate required (YYYY-MM-DD)." });
   if (!timeSlotStr) return res.status(400).json({ message: "timeSlot is required." });
   if (!Number.isFinite(guests) || guests < 1) return res.status(400).json({ message: "numGuests must be >= 1." });
 
