@@ -160,6 +160,7 @@ app.post(
   express.raw({ type: "application/json" }),
   async (req, res) => {
     try {
+      console.log("WEBHOOK_HIT", new Date().toISOString());
       if (!STRIPE_WEBHOOK_SECRET)
         return res.status(500).send("Missing STRIPE_WEBHOOK_SECRET");
 
