@@ -520,6 +520,15 @@ async function authMiddleware(req, res, next) {
   }
 }
 
+
+function adminSafeUser(u) {
+  if (!u || typeof u !== "object") return u;
+  const o = (typeof u.toObject === "function") ? u.toObject() : { ...u };
+  delete o.password;
+  delete o.email;
+  return o;
+}
+
 function adminMiddleware(req, res, next) {
   authMiddleware(req, res, () => {
     if (!req.user.isAdmin) return res.status(403).json({ message: "Access denied." });
@@ -1594,12 +1603,26 @@ app.get("/api/admin/stats", adminMiddleware, async (req, res) => {
 
 // Admin bookings
 app.get("/api/admin/bookings", adminMiddleware, async (req, res) => {
-  const bookings = await Booking.find()
-    .populate("experience")
-    .populate("user")
-    .sort({ createdAt: -1 })
-    .limit(50);
-  res.json(bookings);
+  try {
+    const bookings = await Booking.find()
+      .populate("experience")
+      .populate({ path: "user", select: "-password -email" })
+      .sort({ createdAt: -1 })
+      .limit(50);
+
+    const out = (bookings || []).map((b) => {
+      const o = (b && typeof b.toObject === "function")
+        ? b.toObject({ virtuals: true })
+        : (b || {});
+      if (o && typeof o === "object") delete o.guestEmail;
+      if (o && o.user && typeof o.user === "object") o.user = adminSafeUser(o.user);
+      return o;
+    });
+
+    return res.json(out);
+  } catch (e) {
+    return res.status(500).json({ message: "Server error" });
+  }
 });
 
 // Recommendations
@@ -1613,10 +1636,10 @@ app.get("/api/recommendations", authMiddleware, async (req, res) => {
 // Admin users
 app.get("/api/admin/users", adminMiddleware, async (req, res) => {
   try {
-    const users = await User.find().select("-password").sort({ createdAt: -1 });
-    res.json(users);
+    const users = await User.find().sort({ createdAt: -1 });
+    return res.json((users || []).map(u => adminSafeUser(u)));
   } catch (err) {
-    res.status(500).json({ message: "Server error" });
+    return res.status(500).json({ message: "Server error" });
   }
 });
 
