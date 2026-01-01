@@ -161,7 +161,16 @@ app.post(
         });
       } catch (e) {
         if (__isDuplicateKeyError(e)) {
-          return res.json({ received: true, duplicate: true });
+          // Duplicate eventId: only ACK if it was already processed.
+          // If previous run crashed before processedAt was set, we must continue processing.
+          try {
+            const existing = await evCol.findOne({ eventId }, { projection: { processedAt: 1 } });
+            if (existing && existing.processedAt) {
+              return res.json({ received: true, duplicate: true, alreadyProcessed: true });
+            }
+          } catch (_) {
+            // If we cannot read the marker doc, fall through and attempt processing (safer than dropping the event).
+          }
         }
         throw e;
       }
