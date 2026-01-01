@@ -20,6 +20,7 @@ const CATEGORY_PILLARS = ["Culture", "Food", "Nature"];
 
 // 1. Initialize App
 const app = express();
+app.set("trust proxy", 1);
 const PORT = process.env.PORT || 4000;
 
 // Security headers (baseline hardening)
