@@ -372,7 +372,8 @@ app.post(
           }
         }
       } catch (_) {}
-      return res.status(500).send("Webhook handler error");
+      console.error("WEBHOOK_ERR", (e && e.stack) ? e.stack : e);
+        return res.status(500).send("Webhook handler error");
     }
   }
 );
