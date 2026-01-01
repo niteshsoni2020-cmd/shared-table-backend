@@ -1738,7 +1738,7 @@ app.post("/api/experiences/:id/book", authMiddleware, async (req, res) => {
     guestNotes: guestNotes || "",
     pricing: { totalPrice: Number((totalCents / 100).toFixed(2)), totalCents, currency: "aud" },
 
-    expiresAt: new Date(Date.now() + (30 * 60 * 1000)),
+    expiresAt: new Date(Date.now() + (15 * 60 * 1000)),
 
 
     policySnapshot: activeSnap || {},
@@ -1839,6 +1839,18 @@ app.post("/api/bookings/verify", authMiddleware, async (req, res) => {
     const stripeStatus = String(session.payment_status || "unknown");
 
     if (stripeStatus === "paid") {
+        // PAID_AFTER_EXPIRY_GUARD_V1
+        const curStatus = String(booking.status || "");
+        if (curStatus === "expired") {
+          booking.paymentStatus = "paid";
+          booking.paymentAnomaly = booking.paymentAnomaly || "paid_after_expiry";
+          booking.paymentAnomalyAt = booking.paymentAnomalyAt || new Date();
+          booking.stripeSessionId = String(session.id || booking.stripeSessionId || "");
+          if (session.payment_intent) booking.stripePaymentIntentId = String(session.payment_intent.id || session.payment_intent);
+          booking.paidAt = booking.paidAt || new Date();
+          await booking.save();
+          return res.json({ status: "paid_after_expiry" });
+        }
       if (isTerminal === false) booking.status = "confirmed";
       booking.paymentStatus = "paid";
       if (isTerminal) {
@@ -2546,7 +2558,7 @@ app.get("/api/users/:userId/profile", async (req, res) => {
 
 
 // UNPAID_BOOKING_EXPIRY_CLEANUP_V1
-// Expires unpaid bookings and releases reserved capacity.
+// Expires unpaid bookings and releases reserved capacity (race-safe).
 setInterval(async () => {
   try {
     const now = new Date();
@@ -2567,23 +2579,26 @@ setInterval(async () => {
     if (Array.isArray(expired) == false) return;
 
     for (const b of expired) {
-      const expId = String(b.experienceId || "");
-      const dateStr = String(b.bookingDate || "");
-      const slot = String(b.timeSlot || "");
-      const g = Number.parseInt(String(b.numGuests || "0"), 10) || 0;
-
-      const ok = Boolean(expId.length > 0 && dateStr.length > 0 && slot.length > 0 && g > 0);
-      if (ok) {
-        await releaseCapacitySlot(expId, dateStr, slot, g);
-      }
-
       const upd = {};
       upd[SET] = { status: "expired", paymentStatus: "unpaid" };
 
-      await Booking.updateOne(
+      const r = await Booking.updateOne(
         { _id: b._id, status: "pending_payment", paymentStatus: "unpaid" },
         upd
       );
+
+      const didExpire = Boolean(r && (Number(r.modifiedCount) > 0 || Number(r.nModified) > 0));
+      if (didExpire) {
+        const expId = String(b.experienceId || "");
+        const dateStr = String(b.bookingDate || "");
+        const slot = String(b.timeSlot || "");
+        const g = Number.parseInt(String(b.numGuests || "0"), 10) || 0;
+
+        const ok = Boolean(expId.length > 0 && dateStr.length > 0 && slot.length > 0 && g > 0);
+        if (ok) {
+          await releaseCapacitySlot(expId, dateStr, slot, g);
+        }
+      }
     }
   } catch (e) {}
 }, 60 * 1000);
