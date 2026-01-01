@@ -793,8 +793,20 @@ async function authMiddleware(req, res, next) {
 function adminSafeUser(u) {
   if (!u || typeof u !== "object") return u;
   const o = (typeof u.toObject === "function") ? u.toObject() : { ...u };
+
+  // Always strip secrets / PII from admin surfaces unless explicitly required
   delete o.password;
   delete o.email;
+  delete o.mobile;
+
+  delete o.passwordResetTokenHash;
+  delete o.passwordResetExpiresAt;
+  delete o.passwordResetRequestedAt;
+
+  delete o.notifications;
+  delete o.payoutDetails;
+  delete o.__v;
+
   return o;
 }
 
@@ -877,17 +889,42 @@ async function isHost(userId) {
 
 // Auth-safe user (for /me) — still includes email/mobile (PRIVATE)
 function sanitizeUser(u) {
-  const obj = u.toObject({ virtuals: true });
-  if (obj.payoutDetails) {
-    obj.payoutDetails = {
-      ...obj.payoutDetails,
-      bsb: "***",
-      accountNumber: "****" + (obj.payoutDetails.accountNumber ? obj.payoutDetails.accountNumber.slice(-4) : "0000"),
-    };
-  }
-  const { password, ...safe } = obj;
-  return { ...safe, isHost: obj.isPremiumHost };
+  const obj = (u && typeof u.toObject === "function") ? u.toObject({ virtuals: true }) : (u || {});
+  const role = String(obj.role || "");
+  const roleIsHost = role.toLowerCase() === "host";
+
+  // SELF DTO ONLY (PRIVATE): allowlist fields; DO NOT leak internal/security fields
+  return {
+    _id: obj._id,
+    id: obj.id || (obj._id ? String(obj._id) : ""),
+
+    name: String(obj.name || ""),
+    email: String(obj.email || ""),     // PRIVATE (self only)
+    mobile: String(obj.mobile || ""),   // PRIVATE (self only)
+
+    role,
+    isHost: roleIsHost,
+    isPremiumHost: !!obj.isPremiumHost,
+    vacationMode: !!obj.vacationMode,
+
+    profilePic: String(obj.profilePic || ""),
+    bio: String(obj.bio || ""),
+    location: String(obj.location || ""),
+
+    handle: String(obj.handle || ""),
+    allowHandleSearch: !!obj.allowHandleSearch,
+    showExperiencesToFriends: !!obj.showExperiencesToFriends,
+    publicProfile: !!obj.publicProfile,
+
+    preferences: Array.isArray(obj.preferences) ? obj.preferences : [],
+    termsAgreedAt: (typeof obj.termsAgreedAt === "undefined" ? null : obj.termsAgreedAt),
+    termsVersion: String(obj.termsVersion || ""),
+
+    guestRating: Number.isFinite(Number(obj.guestRating)) ? Number(obj.guestRating) : 0,
+    guestReviewCount: Number.isFinite(Number(obj.guestReviewCount)) ? Number(obj.guestReviewCount) : 0,
+  };
 }
+
 
 // Public-safe card (NO email/mobile)
 function publicUserCardFromDoc(u) {
