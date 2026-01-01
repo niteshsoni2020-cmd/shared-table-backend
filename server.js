@@ -53,6 +53,13 @@ const loginLimiter = rateLimit({
   legacyHeaders: false,
 });
 
+const adminLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
 // CORS (locked allowlist)
 // Set CORS_ORIGINS as comma-separated list
 // Example: "https://thesharedtablestory.com,https://www.thesharedtablestory.com,http://localhost:3000"
@@ -90,6 +97,7 @@ app.options("*", cors(corsOptions));
 
 app.use("/api", apiLimiter);
 app.use("/api/auth", authLimiter);
+app.use("/api/admin", adminLimiter);
 
 // CORS error handler (clean response)
 app.use((err, req, res, next) => {
