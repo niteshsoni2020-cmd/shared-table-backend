@@ -207,10 +207,12 @@ app.post(
               return res.json({ received: true, duplicate: true, alreadyProcessed: true });
             }
           } catch (_) {
-            // If we cannot read the marker doc, fall through and attempt processing (safer than dropping the event).
+            // If we cannot read the marker doc, fall through and attempt processing.
           }
+          // Continue processing (do NOT throw on duplicate when processedAt is missing)
+        } else {
+          throw e;
         }
-        throw e;
       }
 
 
@@ -289,14 +291,53 @@ app.post(
 
         await booking.save();
 
-        // Mark processed (best-effort; do not fail webhook ACK if this write fails)
-        try {
-          await mongoose.connection
-            .collection("stripe_webhook_events")
-            .updateOne({ eventId }, { $set: { processedAt: new Date() } });
-        } catch (_) {}
 
       }
+
+
+      if (event.type === "refund.updated" || event.type === "refund.created") {
+        const refund = event.data.object || {};
+        const pi = String(refund.payment_intent || "");
+        const refundId = String(refund.id || "");
+        const refundStatus = String(refund.status || "");
+        if (!pi) return res.json({ received: true });
+
+        const BookingModel = mongoose.model("Booking");
+        const booking = await BookingModel.findOne({ stripePaymentIntentId: pi });
+        if (!booking) return res.json({ received: true });
+
+        if (!booking.refundDecision || typeof booking.refundDecision !== "object") booking.refundDecision = {};
+        if (refundId) booking.refundDecision.stripeRefundId = refundId;
+        if (refundStatus) booking.refundDecision.stripeRefundStatus = refundStatus;
+
+        if (refundStatus === "succeeded") {
+          booking.refundDecision.status = "refunded";
+          booking.status = "refunded";
+        }
+        await booking.save();
+      }
+
+      if (event.type === "charge.refunded") {
+        const charge = event.data.object || {};
+        const pi = String(charge.payment_intent || "");
+        if (!pi) return res.json({ received: true });
+
+        const BookingModel = mongoose.model("Booking");
+        const booking = await BookingModel.findOne({ stripePaymentIntentId: pi });
+        if (!booking) return res.json({ received: true });
+
+        if (!booking.refundDecision || typeof booking.refundDecision !== "object") booking.refundDecision = {};
+        booking.refundDecision.stripeRefundStatus = "succeeded";
+        booking.refundDecision.status = "refunded";
+        booking.status = "refunded";
+        await booking.save();
+      }
+      // Mark processed for ALL events (best-effort; do not fail webhook ACK if this write fails)
+      try {
+        await mongoose.connection
+          .collection("stripe_webhook_events")
+          .updateOne({ eventId }, { $set: { processedAt: new Date() } });
+      } catch (_) {}
 
       return res.json({ received: true });
     } catch (e) {
@@ -1608,6 +1649,24 @@ app.post("/api/bookings/:id/cancel", authMiddleware, async (req, res) => {
       stripeRefundId: "",
       stripeRefundStatus: "",
     };
+
+    // If already paid and refund is due, initiate Stripe refund server-side (idempotent)
+    try {
+      const isPaid = (booking.paymentStatus === "paid" || booking.status === "confirmed");
+      const pi = String(booking.stripePaymentIntentId || "");
+      const alreadyHasRefund = booking.refundDecision && booking.refundDecision.stripeRefundId;
+      if (isPaid && refundCents > 0 && pi && !alreadyHasRefund) {
+        const refund = await stripe.refunds.create(
+          { payment_intent: pi, amount: refundCents },
+          { idempotencyKey: `booking_refund_${String(booking._id)}_${refundCents}` }
+        );
+        booking.refundDecision.stripeRefundId = String(refund.id || "");
+        booking.refundDecision.stripeRefundStatus = String(refund.status || "");
+        booking.refundDecision.status = "refund_requested";
+      }
+    } catch (_) {
+      // Do not fail cancellation if refund initiation fails; webhook/retry/admin can reconcile.
+    }
 
     await booking.save();
 
