@@ -173,7 +173,8 @@ app.post(
           STRIPE_WEBHOOK_SECRET
         );
       } catch (err) {
-        return res.status(400).send("Webhook signature verification failed");
+        console.log("WEBHOOK_SIG_FAIL", String((err && err.message) ? err.message : err));
+          return res.status(400).send("Webhook signature verification failed");
       }
 
       // Require DB for idempotency + booking state updates.
