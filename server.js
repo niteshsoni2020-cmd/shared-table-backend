@@ -14,6 +14,7 @@ const bcrypt = require("bcryptjs");
 const rateLimit = require("express-rate-limit");
 const helmet = require("helmet");
 const jwt = require("jsonwebtoken");
+const crypto = require("crypto");
 
 // Single Source of Truth for Categories (3 Pillars)
 const CATEGORY_PILLARS = ["Culture", "Food", "Nature"];
@@ -54,6 +55,20 @@ const loginLimiter = rateLimit({
 });
 
 const registerLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+const forgotPasswordLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+const resetPasswordLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   limit: 10,
   standardHeaders: true,
@@ -316,22 +331,45 @@ const storage = new CloudinaryStorage({
 });
 const upload = multer({ storage: storage });
 
-// 4. EMAIL
-const transporter = nodemailer.createTransport({
-  service: "gmail",
-  auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS },
-});
-async function sendEmail({ to, subject, html }) {
-  if (!process.env.EMAIL_USER) return;
+// 4. EMAIL (single contract: SMTP_* + optional FROM_EMAIL)
+// Env contract:
+//   SMTP_HOST, SMTP_USER, SMTP_PASS are required to send email
+//   SMTP_PORT (default 587), SMTP_SECURE ("true"/"false"), FROM_EMAIL (optional)
+let __mailer = null;
+function getMailer() {
+  const host = String(process.env.SMTP_HOST || "");
+  const user = String(process.env.SMTP_USER || "");
+  const pass = String(process.env.SMTP_PASS || "");
+  if (!host || !user || !pass) return null;
+
+  if (__mailer) return __mailer;
+
+  __mailer = nodemailer.createTransport({
+    host,
+    port: Number(process.env.SMTP_PORT || 587),
+    secure: String(process.env.SMTP_SECURE || "false") === "true",
+    auth: { user, pass },
+  });
+  return __mailer;
+}
+
+async function sendEmail({ to, subject, html, text }) {
+  const mailer = getMailer();
+  if (!mailer) return false;
+
+  const from = String(process.env.FROM_EMAIL || process.env.SMTP_USER || "");
   try {
-    await transporter.sendMail({
-      from: `"The Shared Table Story" <${process.env.EMAIL_USER}>`,
+    await mailer.sendMail({
+      from,
       to,
       subject,
-      html,
+      ...(html ? { html } : {}),
+      ...(text ? { text } : {}),
     });
+    return true;
   } catch (err) {
-    console.error("❌ Email failed:", err.message);
+    console.error("❌ Email failed:", err && err.message ? err.message : String(err));
+    return false;
   }
 }
 
@@ -369,6 +407,11 @@ const userSchema = new mongoose.Schema(
     // Legal / Consent
     termsAgreedAt: { type: Date, default: null },
     termsVersion: { type: String, default: "" },
+
+    // Password reset (email-optional; token stored as hash)
+    passwordResetTokenHash: { type: String, default: "" },
+    passwordResetExpiresAt: { type: Date, default: null },
+    passwordResetRequestedAt: { type: Date, default: null },
 
     // Social foundation (privacy-preserving)
     handle: { type: String, unique: true, sparse: true }, // exact-match lookup only
@@ -987,6 +1030,89 @@ app.post("/api/auth/login", loginLimiter, async (req, res) => {
 });
 
 // Auth: Current user
+
+// Auth: Forgot Password (privacy-safe)
+app.post("/api/auth/forgot-password", forgotPasswordLimiter, async (req, res) => {
+  try {
+    const emailRaw = (req.body && req.body.email) ? String(req.body.email) : "";
+    const email = emailRaw.toLowerCase().trim();
+
+    // Always respond OK (do not leak account existence)
+    if (!email) return res.json({ ok: true, message: "If an account exists, you will receive instructions." });
+
+    const user = await User.findOne({ email });
+    if (user) {
+      const token = crypto.randomBytes(32).toString("hex");
+      const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
+
+      user.passwordResetTokenHash = tokenHash;
+      user.passwordResetRequestedAt = new Date();
+      user.passwordResetExpiresAt = new Date(Date.now() + 30 * 60 * 1000); // 30 min
+      await user.save();
+
+      // Email is optional (backend-ready even before official email is configured)
+      const canEmail = !!process.env.SMTP_HOST && !!process.env.SMTP_USER && !!process.env.SMTP_PASS;
+      const frontendBase = String(process.env.FRONTEND_BASE_URL || "http://localhost:3000").replace(/\/$/, "");
+      const resetUrl = `${frontendBase}/reset-password?email=${encodeURIComponent(email)}&token=${encodeURIComponent(token)}`;
+      if (canEmail) {
+        // Do not fail the endpoint if email fails
+        await sendEmail({
+          to: email,
+          subject: "Reset your password",
+          text: `Reset your password using this link (valid 30 minutes): ${resetUrl}`,
+        });
+      }
+
+      // DEV-only escape hatch (no official email yet)
+      if (String(process.env.RETURN_RESET_TOKEN || "") === "true") {
+        return res.json({ ok: true, message: "If an account exists, you will receive instructions.", dev: { resetUrl } });
+      }
+    }
+
+    return res.json({ ok: true, message: "If an account exists, you will receive instructions." });
+  } catch (e) {
+    return res.json({ ok: true, message: "If an account exists, you will receive instructions." });
+  }
+});
+
+// Auth: Reset Password
+app.post("/api/auth/reset-password", resetPasswordLimiter, async (req, res) => {
+  try {
+    const emailRaw = (req.body && req.body.email) ? String(req.body.email) : "";
+    const tokenRaw = (req.body && req.body.token) ? String(req.body.token) : "";
+    const newPasswordRaw = (req.body && req.body.newPassword) ? String(req.body.newPassword) : "";
+
+    const email = emailRaw.toLowerCase().trim();
+    const token = tokenRaw.trim();
+
+    if (!email || !token || !newPasswordRaw) return res.status(400).json({ message: "Missing fields" });
+    if (newPasswordRaw.length < 8) return res.status(400).json({ message: "Password too short" });
+
+    const user = await User.findOne({ email });
+    if (!user) return res.status(400).json({ message: "Invalid or expired token" });
+
+    const exp = user.passwordResetExpiresAt;
+    if (!user.passwordResetTokenHash || !exp || Date.now() > new Date(exp).getTime()) {
+      return res.status(400).json({ message: "Invalid or expired token" });
+    }
+
+    const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
+    if (String(tokenHash) !== String(user.passwordResetTokenHash)) {
+      return res.status(400).json({ message: "Invalid or expired token" });
+    }
+
+    user.password = await bcrypt.hash(newPasswordRaw, 10);
+    user.passwordResetTokenHash = "";
+    user.passwordResetExpiresAt = null;
+    user.passwordResetRequestedAt = null;
+    await user.save();
+
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(500).json({ message: "Server error" });
+  }
+});
+
 app.get("/api/auth/me", authMiddleware, async (req, res) => {
   try {
     return res.json({ user: sanitizeUser(req.user) });
