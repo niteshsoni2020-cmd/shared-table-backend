@@ -259,8 +259,6 @@ app.post(
         const booking = await BookingModel.findById(bookingId);
         if (!booking) return res.json({ received: true });
 
-        booking.status = "confirmed";
-        booking.paymentStatus = "paid";
         booking.stripeSessionId = String(
           session.id || booking.stripeSessionId || ""
         );
