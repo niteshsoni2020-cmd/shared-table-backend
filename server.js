@@ -275,7 +275,10 @@ function reTest(r, v){ try { return r.test(String(v||"")); } catch(_) { return f
 // 2. CONNECT TO MONGODB
 mongoose
   .connect(process.env.MONGO_URI)
-  .then(() => console.log("✅ Connected to MongoDB Atlas"))
+  .then(async () => {
+  try { await ensureDefaultPolicyExists(); } catch (_) {}
+  console.log("✅ Connected to MongoDB Atlas");
+})
   .catch((err) => console.error("❌ MongoDB Error:", err));
 
 // 3. SETUP CLOUDINARY
@@ -417,6 +420,30 @@ const bookingSchema = new mongoose.Schema(
     // Social visibility (opt-in by guest)
     visibilityToFriends: { type: Boolean, default: false },
 
+
+    // Immutable policy + terms snapshots (write-once per booking)
+    policySnapshot: { type: Object, default: {} },
+    policyVersion: { type: String, default: "" },
+    policyEffectiveFrom: { type: Date, default: null },
+    policyVersionId: { type: String, default: "" },
+    policyPublishedAt: { type: Date, default: null },
+    termsSnapshot: { type: Object, default: null },
+    // Cancellation + refund decision (computed from snapshot; idempotent)
+    cancellation: {
+      by: { type: String, default: "" }, // guest|host|admin
+      at: { type: Date, default: null },
+      reasonCode: { type: String, default: "" },
+      note: { type: String, default: "" },
+    },
+    refundDecision: {
+      status: { type: String, default: "" }, // none|manual|computed|refunded
+      amountCents: { type: Number, default: 0 },
+      currency: { type: String, default: "aud" },
+      percent: { type: Number, default: 0 },
+      computedAt: { type: Date, default: null },
+      stripeRefundId: { type: String, default: "" },
+      stripeRefundStatus: { type: String, default: "" },
+    },
     refundAmount: Number,
     cancellationReason: String,
     dispute: {
@@ -442,6 +469,69 @@ bookingSchema.virtual("user", {
   foreignField: "_id",
   justOne: true,
 });
+
+// --- Policy (AU cancellation/refund rules) ---
+// Draft -> Publish -> Active, with effectiveFrom. Bookings store immutable snapshots.
+const policySchema = new mongoose.Schema(
+  {
+    version: { type: String, required: true },
+    status: { type: String, default: "draft" },     // draft|published
+    active: { type: Boolean, default: false },
+    effectiveFrom: { type: Date, required: true },
+    publishedAt: { type: Date, default: null },
+    createdAt: { type: Date, default: Date.now },
+
+    rules: {
+      currency: { type: String, default: "aud" },
+      guestMaxRefundPercent: { type: Number, default: 0.95 }, // cap at 95%
+      hostRefundPercent: { type: Number, default: 1.0 },      // 100% reversal
+      guestFreeCancelHours: { type: Number, default: 0 },
+      absoluteMaxGuestRefundPercent: { type: Number, default: 0.95 },
+    },
+  },
+  schemaOpts
+);
+policySchema.index({ active: 1, effectiveFrom: -1 });
+
+const Policy = mongoose.models.Policy || mongoose.model("Policy", policySchema);
+
+async function getActivePolicyDoc() {
+  const now = new Date();
+  return await Policy.findOne({ active: true, effectiveFrom: { $lte: now } })
+    .sort({ effectiveFrom: -1 })
+    .lean();
+}
+
+function policySnapshotFromDoc(doc) {
+  if (!doc) return null;
+  return {
+    version: String(doc.version || ""),
+    effectiveFrom: doc.effectiveFrom || null,
+    publishedAt: doc.publishedAt || null,
+    rules: doc.rules || {},
+  };
+}
+
+async function ensureDefaultPolicyExists() {
+  const any = await Policy.findOne({}).select("_id").lean();
+  if (any) return;
+  const now = new Date();
+  const ver = now.toISOString();
+  await Policy.create({
+    version: ver,
+    status: "published",
+    active: true,
+    effectiveFrom: now,
+    publishedAt: now,
+    rules: {
+      currency: "aud",
+      guestMaxRefundPercent: 0.95,
+      hostRefundPercent: 1.0,
+      guestFreeCancelHours: 0,
+      absoluteMaxGuestRefundPercent: 0.95,
+    },
+  });
+}
 
 const reviewSchema = new mongoose.Schema(
   {
@@ -608,6 +698,70 @@ function adminMiddleware(req, res, next) {
   });
 }
 
+// --- POLICY ROUTES ---
+app.get("/api/policy/active", async (req, res) => {
+  try {
+    const doc = await getActivePolicyDoc();
+    if (!doc) return res.status(404).json({ message: "No active policy" });
+    return res.json({ ok: true, policy: policySnapshotFromDoc(doc) });
+  } catch (e) {
+    return res.status(500).json({ message: "Server error" });
+  }
+});
+
+app.post("/api/policy/draft", adminMiddleware, async (req, res) => {
+  try {
+    const body = req.body || {};
+    const rules = (body.rules && typeof body.rules === "object") ? body.rules : {};
+    const effectiveFrom = body.effectiveFrom ? new Date(body.effectiveFrom) : new Date();
+    if (Number.isNaN(effectiveFrom.getTime())) return res.status(400).json({ message: "Invalid effectiveFrom" });
+
+    const ver = new Date().toISOString();
+    const doc = await Policy.create({
+      version: ver,
+      status: "draft",
+      active: false,
+      effectiveFrom,
+      publishedAt: null,
+      rules: {
+        currency: String(rules.currency || "aud").toLowerCase(),
+        guestMaxRefundPercent: Number.isFinite(rules.guestMaxRefundPercent) ? Number(rules.guestMaxRefundPercent) : 0.95,
+        hostRefundPercent: Number.isFinite(rules.hostRefundPercent) ? Number(rules.hostRefundPercent) : 1.0,
+        guestFreeCancelHours: Number.isFinite(rules.guestFreeCancelHours) ? Number(rules.guestFreeCancelHours) : 0,
+        absoluteMaxGuestRefundPercent: Number.isFinite(rules.absoluteMaxGuestRefundPercent) ? Number(rules.absoluteMaxGuestRefundPercent) : 0.95,
+      },
+    });
+
+    const snap = policySnapshotFromDoc(doc.toObject ? doc.toObject() : doc);
+    return res.json({ ok: true, draft: snap, draftId: String(doc._id) });
+  } catch (e) {
+    return res.status(500).json({ message: "Server error" });
+  }
+});
+
+app.post("/api/policy/publish", adminMiddleware, async (req, res) => {
+  try {
+    const draftId = String((req.body && req.body.draftId) || "").trim();
+    if (!draftId) return res.status(400).json({ message: "draftId required" });
+
+    const draft = await Policy.findById(draftId);
+    if (!draft) return res.status(404).json({ message: "Draft not found" });
+    if (String(draft.status || "") !== "draft") return res.status(400).json({ message: "Not a draft" });
+
+    const now = new Date();
+    await Policy.updateMany({ active: true }, { $set: { active: false } });
+
+    draft.status = "published";
+    draft.active = true;
+    draft.publishedAt = now;
+    await draft.save();
+
+    return res.json({ ok: true, active: policySnapshotFromDoc(draft.toObject()) });
+  } catch (e) {
+    return res.status(500).json({ message: "Server error" });
+  }
+});
+
 // Determine if a user has any experiences (host profile allowed)
 async function isHost(userId) {
   const count = await Experience.countDocuments({ hostId: String(userId) });
@@ -701,7 +855,7 @@ async function checkCapacity(experienceId, date, timeSlot, newGuests) {
   const dateStr = String(date || "").trim();
   const slot = String(timeSlot || "").trim();
 
-  const isoOk = /^d{4}-d{2}-d{2}$/.test(dateStr);
+  const isoOk = /^\d{4}-\d{2}-\d{2}$/.test(dateStr);
   if (!isoOk) return { available: false, message: "Invalid bookingDate (YYYY-MM-DD required)." };
   if (!slot) return { available: false, message: "timeSlot is required." };
 
@@ -973,7 +1127,7 @@ app.get("/api/experiences", async (req, res) => {
 
   if (date) {
     const dateStr = String(date).trim();
-    if (!/^d{4}-d{2}-d{2}$/.test(dateStr)) return res.status(400).json({ message: "Invalid date filter (YYYY-MM-DD)." });
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return res.status(400).json({ message: "Invalid date filter (YYYY-MM-DD)." });
 
     query.startDate = { $lte: dateStr };
     query.endDate = { $gte: dateStr };
@@ -1086,13 +1240,12 @@ app.post("/api/experiences/:id/book", authMiddleware, async (req, res) => {
   const bookingDateStr = String(bookingDate || "").trim();
   const timeSlotStr = String(timeSlot || "").trim();
 
-  if (!/^d{4}-d{2}-d{2}$/.test(bookingDateStr)) return res.status(400).json({ message: "bookingDate required (YYYY-MM-DD)." });
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(bookingDateStr)) return res.status(400).json({ message: "bookingDate required (YYYY-MM-DD)." });
   if (!timeSlotStr) return res.status(400).json({ message: "timeSlot is required." });
   if (!Number.isFinite(guests) || guests < 1) return res.status(400).json({ message: "numGuests must be >= 1." });
 
   const cap = await checkCapacity(exp._id, bookingDateStr, timeSlotStr, guests);
   if (!cap.available) return res.status(400).json({ message: cap.message });
-
   const toCents = (n) => Math.round(Number(n) * 100);
 
   const unitCents = toCents(exp.price);
@@ -1190,6 +1343,27 @@ app.post("/api/bookings/verify", authMiddleware, async (req, res) => {
       booking.currency = currency;
       booking.paidAt = booking.paidAt || new Date();
       await booking.save();
+      // SNAPSHOT_ON_PAYMENT_CONFIRM (authoritative policy lock at payment time; write-once)
+      let snapWritten = false;
+      try {
+        const hasSnap = booking.policySnapshot && typeof booking.policySnapshot === "object" && Object.keys(booking.policySnapshot).length > 0;
+        if (!hasSnap) {
+          const activePolicyDoc = await getActivePolicyDoc();
+          const snap = policySnapshotFromDoc(activePolicyDoc);
+          booking.policySnapshot = snap || {};
+          booking.policyVersionId = activePolicyDoc ? String(activePolicyDoc._id) : "";
+          booking.policyVersion = (snap && snap.version) ? String(snap.version) : "";
+          booking.policyEffectiveFrom = (snap && snap.effectiveFrom) ? new Date(snap.effectiveFrom) : null;
+          booking.policyPublishedAt = (snap && snap.publishedAt) ? new Date(snap.publishedAt) : null;
+          snapWritten = true;
+        }
+      } catch (_) {
+        // If policy lookup fails, do not break payment confirmation.
+      }
+      // SNAPSHOT_ON_PAYMENT_CONFIRM_SAVE
+      if (snapWritten) await booking.save();
+
+
       return res.json({ status: "confirmed" });
     }
 
@@ -1243,16 +1417,58 @@ app.post("/api/bookings/:id/cancel", authMiddleware, async (req, res) => {
     const booking = await Booking.findById(req.params.id);
     if (!booking) return res.status(404).json({ message: "Booking not found" });
     if (String(booking.guestId) !== String(req.user._id)) return res.status(403).json({ message: "Unauthorized" });
-    if (booking.status === "cancelled" || booking.status === "cancelled_by_host") return res.status(400).json({ message: "Already cancelled" });
+
+    // Idempotent: if already cancelled, return existing decision
+    if (booking.status === "cancelled" || booking.status === "cancelled_by_host") {
+      return res.json({
+        message: "Already cancelled",
+        refund: booking.refundDecision || { status: "none", amountCents: 0, currency: "aud", percent: 0 },
+      });
+    }
 
     booking.status = "cancelled";
-    booking.refundAmount = 0;
     booking.cancellationReason = "User requested cancellation";
+    booking.cancellation = { by: "guest", at: new Date(), reasonCode: "guest_cancel", note: "" };
+
+    const totalCents =
+      booking.pricing && Number.isFinite(booking.pricing.totalCents) ? Number(booking.pricing.totalCents) : null;
+
+    const snap = booking.policySnapshot || null;
+    const rules = (snap && snap.rules && typeof snap.rules === "object") ? snap.rules : null;
+
+    let refundCents = 0;
+    let refundPercent = 0;
+    let decisionStatus = "manual";
+
+    if (totalCents !== null && rules) {
+      const cap = Number.isFinite(rules.absoluteMaxGuestRefundPercent) ? Number(rules.absoluteMaxGuestRefundPercent) : 0.95;
+      const pRaw = Number.isFinite(rules.guestMaxRefundPercent) ? Number(rules.guestMaxRefundPercent) : 0.95;
+      refundPercent = Math.max(0, Math.min(cap, pRaw));
+      refundCents = Math.round(totalCents * refundPercent);
+      decisionStatus = "computed";
+      booking.refundAmount = Number((refundCents / 100).toFixed(2)); // keep legacy UI field
+    } else {
+      booking.refundAmount = 0;
+    }
+
+    booking.refundDecision = {
+      status: decisionStatus,
+      amountCents: refundCents,
+      currency: String((rules && rules.currency) || booking.currency || "aud").toLowerCase(),
+      percent: refundPercent,
+      computedAt: new Date(),
+      stripeRefundId: "",
+      stripeRefundStatus: "",
+    };
+
     await booking.save();
 
-    res.json({ message: "Booking cancelled.", refund: { amount: 0, reason: "Manual processing" } });
+    return res.json({
+      message: "Booking cancelled.",
+      refund: booking.refundDecision,
+    });
   } catch (err) {
-    res.status(500).json({ message: "Server error" });
+    return res.status(500).json({ message: "Server error" });
   }
 });
 
