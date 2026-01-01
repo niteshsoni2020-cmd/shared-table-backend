@@ -53,6 +53,13 @@ const loginLimiter = rateLimit({
   legacyHeaders: false,
 });
 
+const registerLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
 const adminLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   limit: 60,
@@ -925,7 +932,7 @@ app.post("/api/upload", authMiddleware, upload.array("photos", 3), (req, res) =>
 });
 
 // Auth: Register
-app.post("/api/auth/register", async (req, res) => {
+app.post("/api/auth/register", registerLimiter, async (req, res) => {
   try {
     const body = req.body || {};
     if (typeof body.handle !== "undefined") body.handle = String(body.handle || "").trim().toLowerCase();
