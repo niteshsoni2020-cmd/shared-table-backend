@@ -172,6 +172,7 @@ app.post(
           sig,
           STRIPE_WEBHOOK_SECRET
         );
+        console.log("WEBHOOK_VERIFIED", String(event && event.type || ""), String(event && event.id || ""));
       } catch (err) {
         console.log("WEBHOOK_SIG_FAIL", String((err && err.message) ? err.message : err));
           return res.status(400).send("Webhook signature verification failed");
@@ -203,6 +204,7 @@ app.post(
           error: "",
           data: (event && event.data) ? event.data : null,
         });
+        console.log("WEBHOOK_INSERTED", String(eventId));
         // Force-persist raw Stripe payload (bypass mongoose strict schema)
         try {
           await evCol.updateOne(
