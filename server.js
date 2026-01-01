@@ -242,7 +242,17 @@ app.post(
           session.client_reference_id ||
           (session.metadata && session.metadata.bookingId);
 
-        if (!bookingId) return res.json({ received: true });
+        if (!bookingId) {
+          try {
+            await mongoose.connection
+              .collection("stripe_webhook_events")
+              .updateOne(
+                { eventId },
+                { $set: { processedAt: new Date(), processingAt: null, error: "missing_booking_id" } }
+              );
+          } catch (_) {}
+          return res.json({ received: true });
+        }
 
         // models are registered later during file load, so by runtime this exists
         const BookingModel = mongoose.model("Booking");
@@ -1574,6 +1584,15 @@ app.post("/api/bookings/verify", authMiddleware, async (req, res) => {
   const { bookingId, sessionId } = req.body || {};
   const booking = await Booking.findById(bookingId);
   if (!booking) return res.json({ status: "not_found" });
+  const me = String((req.user && req.user._id) || "");
+  const isOwner = (me != "") && (String(booking.guestId || "") == me);
+  const isHost = (me != "") && (String(booking.hostId || "") == me);
+  const isAdmin = Boolean(req.user && (req.user && req.user.isAdmin));
+  const isAllowed = (isOwner || isHost || isAdmin);
+  if (isAllowed == false) return res.status(403).json({ status: "VERIFY_FORBIDDEN" });
+  const prevStatus = String(booking.status || "");
+  const isTerminal = (prevStatus.indexOf("cancelled") >= 0) || (prevStatus == "refunded");
+
 
   if (booking.paymentStatus === "paid" || booking.status === "confirmed") return res.json({ status: "confirmed" });
 
@@ -1597,8 +1616,12 @@ app.post("/api/bookings/verify", authMiddleware, async (req, res) => {
     const stripeStatus = String(session.payment_status || "unknown");
 
     if (stripeStatus === "paid") {
-      booking.status = "confirmed";
+      if (isTerminal === false) booking.status = "confirmed";
       booking.paymentStatus = "paid";
+      if (isTerminal) {
+        booking.paymentAnomaly = booking.paymentAnomaly || "paid_after_cancel";
+        booking.paymentAnomalyAt = booking.paymentAnomalyAt || new Date();
+      }
       booking.stripeSessionId = String(session.id || booking.stripeSessionId || "");
       if (session.payment_intent) booking.stripePaymentIntentId = String(session.payment_intent.id || session.payment_intent);
       booking.amountCents = expectedCents !== null ? expectedCents : amountTotal;
