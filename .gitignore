@@ -11,3 +11,4 @@ seed.js.pre_*
 .env*
 .tsts_audit/
 server.log
+AUDIT_EVIDENCE_*
