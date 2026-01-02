@@ -2620,4 +2620,10 @@ startUnpaidBookingExpiryCleanupLoop_V1();
 
 
 
+
+// Health check (production-safe)
+app.get("/health", (req, res) => {
+  res.status(200).json({ status: "ok", uptime: process.uptime() });
+});
+
 app.listen(PORT, () => console.log(`Server running on http://localhost:${PORT}`));
