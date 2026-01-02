@@ -486,7 +486,7 @@ app.post(
 
         if (refundStatus === "succeeded") {
           booking.refundDecision.status = "refunded";
-          booking.status = "refunded";
+          await transitionBooking(booking, "refunded");
         }
         await booking.save();
       }
@@ -503,7 +503,7 @@ app.post(
         if (!booking.refundDecision || typeof booking.refundDecision !== "object") booking.refundDecision = {};
         booking.refundDecision.stripeRefundStatus = "succeeded";
         booking.refundDecision.status = "refunded";
-        booking.status = "refunded";
+        await transitionBooking(booking, "refunded");
         await booking.save();
       }
 
@@ -2189,7 +2189,14 @@ app.delete("/api/experiences/:id", authMiddleware, async (req, res) => {
   const exp = await Experience.findById(req.params.id);
   if (!exp || (exp.hostId !== String(req.user._id) && !req.user.isAdmin)) return res.status(403).json({ message: "No" });
 
-  await Booking.updateMany({ experienceId: String(exp._id) }, { status: "cancelled_by_host" });
+  // Cancel all related bookings via canonical transition (timestamps/comms stay consistent)
+  try {
+    const bs = await Booking.find({ experienceId: String(exp._id) });
+    for (const b of bs) {
+      try { await transitionBooking(b, "cancelled_by_host"); } catch (_) {}
+    }
+  } catch (_) {}
+
   await Experience.findByIdAndDelete(req.params.id);
   res.json({ message: "Deleted" });
 });
@@ -3337,10 +3344,20 @@ async function transitionBooking(booking, nextStatus, meta = {}) {
   }
 
   if (nextStatus === "cancelled") {
+
+  if (nextStatus === "cancelled_by_host") {
+    updates.hostCancelledAt = booking.hostCancelledAt || now;
+  }
+
     updates.guestCancelledAt = booking.guestCancelledAt || now;
   }
 
   if (nextStatus === "expired") {
+
+  if (nextStatus === "refunded") {
+    updates.refundedAt = booking.refundedAt || now;
+  }
+
     updates.expiredAt = booking.expiredAt || now;
   }
 
