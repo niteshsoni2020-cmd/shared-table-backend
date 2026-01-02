@@ -1419,6 +1419,58 @@ async function maybeSendBookingCancelledComms(booking) {
 }
 
 
+async function maybeSendBookingExpiredComms(booking) {
+  try {
+    const b = booking || {};
+    const guestEmail = String(b.guestEmail || "").trim();
+    const guestName = String(b.guestName || "").trim();
+
+    const hostId = String(b.hostId || "").trim();
+    let hostDoc = null;
+    try {
+      if (hostId.length > 0) hostDoc = await User.findById(hostId);
+      if ((hostDoc == null) && String(b.experienceId || "").trim().length > 0) {
+        const expDoc = await Experience.findById(String(b.experienceId || "").trim());
+        const expHostId = (expDoc && expDoc.hostId) ? String(expDoc.hostId).trim() : "";
+        if (expHostId.length > 0) hostDoc = await User.findById(expHostId);
+      }
+    } catch (_) {}
+
+    const hostEmail = String((hostDoc && hostDoc.email) || "").trim();
+    const hostName = String((hostDoc && hostDoc.name) || "").trim();
+
+    const exp = String(b.experienceTitle || b.title || "").trim();
+    const date = String(b.bookingDate || "").trim();
+    const time = String(b.timeSlot || "").trim();
+
+    const guestText =
+      "Hi " + (guestName || "there") + ",\n\n" +
+      "Your booking expired because payment wasn’t completed in time.\n\n" +
+      (exp ? ("Experience: " + exp + "\n") : "") +
+      (date ? ("Date: " + date + "\n") : "") +
+      (time ? ("Time: " + time + "\n") : "") +
+      "\nWarmly,\nThe Shared Table Story\n";
+
+    const hostText =
+      "Hi " + (hostName || "there") + ",\n\n" +
+      "A booking expired because payment wasn’t completed in time.\n\n" +
+      (guestName ? ("Guest: " + guestName + "\n") : "") +
+      (exp ? ("Experience: " + exp + "\n") : "") +
+      (date ? ("Date: " + date + "\n") : "") +
+      (time ? ("Time: " + time + "\n") : "") +
+      "\nWarmly,\nThe Shared Table Story\n";
+
+    if (guestEmail.length > 0) await sendEmail({ to: guestEmail, subject: "Booking expired", text: guestText });
+    if (hostEmail.length > 0) await sendEmail({ to: hostEmail, subject: "Booking expired", text: hostText });
+
+    const now = new Date();
+    if (booking && !booking.expiredAt) { booking.expiredAt = now; await booking.save(); }
+  } catch (e) {
+    console.error("COMMS_EXPIRED_ERR", (e && e.message) ? e.message : String(e));
+  }
+}
+
+
 const JWT_SECRET = String(process.env.JWT_SECRET || "");
 
 function signToken(user) {
@@ -2441,7 +2493,7 @@ app.post("/api/bookings/verify", authMiddleware, async (req, res) => {
           await booking.save();
           return res.json({ status: "paid_after_expiry" });
         }
-      if (isTerminal === false) booking.status = "confirmed";
+      if (isTerminal === false) await transitionBooking(booking, "confirmed");
       booking.paymentStatus = "paid";
       if (isTerminal) {
         booking.paymentAnomaly = booking.paymentAnomaly || "paid_after_cancel";
@@ -2553,7 +2605,7 @@ app.post("/api/bookings/:id/cancel", authMiddleware, async (req, res) => {
 
     const wasConfirmed = (String(booking.status || "") == "confirmed");
 
-    booking.status = "cancelled";
+    await transitionBooking(booking, "cancelled");
     booking.cancellationReason = "User requested cancellation";
     booking.cancellation = { by: "guest", at: new Date(), reasonCode: "guest_cancel", note: "" };
 
@@ -3189,7 +3241,7 @@ async function runUnpaidBookingExpiryCleanupOnce_V1() {
 
     for (const b of expired) {
       const upd = {};
-      upd[SET] = { status: "expired", paymentStatus: "unpaid" };
+      upd[SET] = { status: "expired", paymentStatus: "unpaid", expiredAt: now };
 
       const r = await Booking.updateOne(
         { _id: b._id, status: "pending_payment", paymentStatus: "unpaid" },
@@ -3207,6 +3259,11 @@ async function runUnpaidBookingExpiryCleanupOnce_V1() {
           const ok = Boolean(expId.length > 0 && dateStr.length > 0 && slot.length > 0 && g > 0);
           if (ok) {
             await releaseCapacitySlot(expId, dateStr, slot, g);
+            try {
+              const bookingDoc = await Booking.findById(String(b._id || ""));
+              if (bookingDoc) await maybeSendBookingExpiredComms(bookingDoc);
+            } catch (_) {}
+
           }
         } catch (_) {}
       }
@@ -3258,3 +3315,53 @@ app.get("/health", (req, res) => {
 });
 
 app.listen(PORT, () => { __log("info", "server_listen", { rid: undefined, path: undefined }); });
+
+// ===== BOOKING STATE TRANSITIONS =====
+// Single canonical transition handler.
+// Ensures timestamps + comms are always in sync.
+
+async function transitionBooking(booking, nextStatus, meta = {}) {
+  const now = new Date();
+
+  if (!booking || !nextStatus) return booking;
+
+  if (booking.status === nextStatus) return booking;
+
+  const updates = {
+    status: nextStatus,
+    updatedAt: now
+  };
+
+  if (nextStatus === "confirmed") {
+    updates.guestConfirmedAt = booking.guestConfirmedAt || now;
+  }
+
+  if (nextStatus === "cancelled") {
+    updates.guestCancelledAt = booking.guestCancelledAt || now;
+  }
+
+  if (nextStatus === "expired") {
+    updates.expiredAt = booking.expiredAt || now;
+  }
+
+  await booking.updateOne({ $set: updates });
+
+  // fire-and-forget comms (must not block state)
+  try {
+    if (nextStatus === "confirmed") {
+      await maybeSendBookingConfirmedComms(booking);
+    }
+    if (nextStatus === "cancelled") {
+      await maybeSendBookingCancelledComms(booking);
+    }
+    if (nextStatus === "expired") {
+      await maybeSendBookingExpiredComms(booking);
+    }
+  } catch (e) {
+    console.error("BOOKING_COMMS_FAIL", booking._id, nextStatus, e?.message);
+  }
+
+  return booking;
+}
+
+
