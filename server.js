@@ -469,6 +469,72 @@ app.post(
       }
 
 
+      
+      if (event.type === "checkout.session.async_payment_failed" || event.type === "checkout.session.expired") {
+        const session = (event && event.data && event.data.object) ? event.data.object : {};
+        const bookingId = session.client_reference_id || (session.metadata && session.metadata.bookingId);
+        if (!bookingId) {
+          try {
+            await mongoose.connection
+              .collection("stripe_webhook_events")
+              .updateOne(
+                { eventId },
+                { $set: { processedAt: new Date(), processingAt: null, error: "missing_booking_id" } }
+              );
+          } catch (_) {}
+          return res.json({ received: true });
+        }
+
+        const BookingModel = mongoose.model("Booking");
+        const booking = await BookingModel.findById(String(bookingId));
+        if (!booking) return res.json({ received: true });
+
+        // Try to expand session -> payment_intent so we can classify true failures
+        let full = null;
+        try {
+          if (session && session.id) {
+            full = await stripe.checkout.sessions.retrieve(String(session.id), { expand: ["payment_intent"] });
+          }
+        } catch (_) {}
+
+        const stripeStatus = String((session && session.payment_status) ? session.payment_status : "unpaid");
+        const piObj = (full && full.payment_intent) ? full.payment_intent : (session && session.payment_intent ? session.payment_intent : null);
+        const piStatus = String((piObj && piObj.status) ? piObj.status : "");
+
+        booking.paymentLastStripeStatus = stripeStatus;
+        booking.paymentLastPiStatus = piStatus;
+        booking.stripeSessionId = String(session.id || booking.stripeSessionId || "");
+
+        // PAYMENT_ATTEMPT_POLICY_V1 (webhook mirror): count only real failures
+        // Do NOT count requires_action as failure attempt
+        const now = new Date();
+        const lockedUntil = booking.paymentLockedUntil ? new Date(booking.paymentLockedUntil) : null;
+        if (lockedUntil && lockedUntil.getTime() > now.getTime()) {
+          // Already locked: do not keep incrementing attempts from webhook retries.
+          await booking.save();
+          return res.json({ received: true });
+        }
+        const isFail = (piStatus === "requires_payment_method" || piStatus === "canceled" || piStatus === "cancelled");
+        if (stripeStatus !== "paid" && isFail) {
+          booking.paymentAttemptCount = Number.isFinite(Number(booking.paymentAttemptCount)) ? Number(booking.paymentAttemptCount) + 1 : 1;
+          booking.paymentAttemptFirstAt = booking.paymentAttemptFirstAt || now;
+          booking.paymentAttemptLastAt = now;
+
+          const firstAt = booking.paymentAttemptFirstAt ? new Date(booking.paymentAttemptFirstAt) : now;
+          const within30m = (now.getTime() - firstAt.getTime()) <= (30 * 60 * 1000);
+          const attempts = Number(booking.paymentAttemptCount || 0);
+          if (within30m && attempts >= 5) {
+            booking.paymentLockedUntil = new Date(now.getTime() + (30 * 60 * 1000));
+          }
+        }
+
+        // Keep paymentStatus as unpaid unless already paid/confirmed
+        if (String(booking.paymentStatus || "unpaid") !== "paid") booking.paymentStatus = "unpaid";
+
+        await booking.save();
+        return res.json({ received: true });
+      }
+
       if (event.type === "refund.updated" || event.type === "refund.created") {
         const refund = event.data.object || {};
         const pi = String(refund.payment_intent || "");
@@ -487,6 +553,8 @@ app.post(
         if (refundStatus === "succeeded") {
           booking.refundDecision.status = "refunded";
           await transitionBooking(booking, "refunded");
+        } else if (refundStatus === "failed" || refundStatus === "canceled" || refundStatus === "cancelled") {
+          booking.refundDecision.status = "refund_failed";
         }
         await booking.save();
       }
@@ -1050,6 +1118,14 @@ const bookingSchema = new mongoose.Schema(
     pricing: Object,
 
     // Payment reconciliation
+    // Payment attempt governance (anti-abuse / user protection)
+    paymentAttemptCount: { type: Number, default: 0 },
+    paymentAttemptFirstAt: { type: Date, default: null },
+    paymentAttemptLastAt: { type: Date, default: null },
+    paymentLockedUntil: { type: Date, default: null },
+    paymentLastStripeStatus: { type: String, default: "" },
+    paymentLastPiStatus: { type: String, default: "" },
+
     amountCents: Number,
     currency: String,
     stripePaymentIntentId: String,
@@ -1092,6 +1168,9 @@ const bookingSchema = new mongoose.Schema(
       computedAt: { type: Date, default: null },
       stripeRefundId: { type: String, default: "" },
       stripeRefundStatus: { type: String, default: "" },
+      attemptCount: { type: Number, default: 0 },
+      lastAttemptAt: { type: Date, default: null },
+      lastError: { type: String, default: "" },
     },
     refundAmount: Number,
     cancellationReason: String,
@@ -2486,6 +2565,37 @@ app.post("/api/bookings/verify", authMiddleware, async (req, res) => {
     if (expectedCents !== null && amountTotal !== null && amountTotal !== expectedCents) return res.status(400).json({ status: "mismatch", error: "amount mismatch" });
 
     const stripeStatus = String(session.payment_status || "unknown");
+    // PAYMENT_ATTEMPT_POLICY_V1
+    // Count only real failures (requires_payment_method / canceled).
+    // Do NOT count requires_action (3DS) as a failure attempt.
+    const piStatus = String((session && session.payment_intent && session.payment_intent.status) ? session.payment_intent.status : "");
+    booking.paymentLastStripeStatus = stripeStatus;
+    booking.paymentLastPiStatus = piStatus;
+
+    const now = new Date();
+    const lockedUntil = booking.paymentLockedUntil ? new Date(booking.paymentLockedUntil) : null;
+    if (lockedUntil && lockedUntil.getTime() > now.getTime()) {
+      return res.status(429).json({ status: "payment_locked", lockedUntil: lockedUntil.toISOString() });
+    }
+
+    const isFail = (piStatus === "requires_payment_method" || piStatus === "canceled" || piStatus === "cancelled");
+    if (stripeStatus !== "paid" && isFail) {
+      booking.paymentAttemptCount = Number.isFinite(Number(booking.paymentAttemptCount)) ? Number(booking.paymentAttemptCount) + 1 : 1;
+      booking.paymentAttemptFirstAt = booking.paymentAttemptFirstAt || now;
+      booking.paymentAttemptLastAt = now;
+
+      // Policy: 5 failures within 30 minutes => lock for 30 minutes
+      const firstAt = booking.paymentAttemptFirstAt ? new Date(booking.paymentAttemptFirstAt) : now;
+      const within30m = (now.getTime() - firstAt.getTime()) <= (30 * 60 * 1000);
+      const attempts = Number(booking.paymentAttemptCount || 0);
+      if (within30m && attempts >= 5) {
+        booking.paymentLockedUntil = new Date(now.getTime() + (30 * 60 * 1000));
+        await booking.save();
+        return res.status(429).json({ status: "payment_locked", lockedUntil: booking.paymentLockedUntil.toISOString() });
+      }
+      await booking.save();
+    }
+
 
     if (stripeStatus === "paid") {
         // PAID_AFTER_EXPIRY_GUARD_V1
@@ -2661,7 +2771,16 @@ app.post("/api/bookings/:id/cancel", authMiddleware, async (req, res) => {
         booking.refundDecision.stripeRefundStatus = String(refund.status || "");
         booking.refundDecision.status = "refund_requested";
       }
-    } catch (_) {
+    } catch (e) {
+      try {
+        if (!booking.refundDecision || typeof booking.refundDecision !== "object") booking.refundDecision = {};
+        booking.refundDecision.attemptCount = Number.isFinite(Number(booking.refundDecision.attemptCount)) ? Number(booking.refundDecision.attemptCount) + 1 : 1;
+        booking.refundDecision.lastAttemptAt = new Date();
+        booking.refundDecision.lastError = String((e && e.message) ? e.message : "refund_initiation_error").slice(0, 240);
+        booking.refundDecision.stripeRefundStatus = "error";
+        booking.refundDecision.status = "refund_failed";
+      } catch (_) {}
+      __log("error", "refund_initiation_failed", { rid: undefined, path: undefined });
       // Do not fail cancellation if refund initiation fails; webhook/retry/admin can reconcile.
     }
 
