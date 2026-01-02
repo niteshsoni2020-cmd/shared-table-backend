@@ -30,8 +30,21 @@ const express = require("express");
 const cors = require("cors");
 const mongoose = require("mongoose");
 const multer = require("multer");
-const { CloudinaryStorage } = require("multer-storage-cloudinary");
 const cloudinary = require("cloudinary").v2;
+
+// CLOUDINARY_CONFIG_TSTS
+// Cloudinary v2 does NOT auto-configure from CLOUDINARY_CLOUD_NAME/API_KEY/API_SECRET.
+// Configure explicitly (production-safe). If missing, uploads will fail.
+(() => {
+  const name = String(process.env.CLOUDINARY_CLOUD_NAME || "").trim();
+  const key = String(process.env.CLOUDINARY_API_KEY || "").trim();
+  const secret = String(process.env.CLOUDINARY_API_SECRET || "").trim();
+  const ok = (name.length > 0) && (key.length > 0) && (secret.length > 0);
+  if (ok === true) {
+    cloudinary.config({ cloud_name: name, api_key: key, api_secret: secret });
+  }
+})();
+
 const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 const STRIPE_WEBHOOK_SECRET = String(process.env.STRIPE_WEBHOOK_SECRET || "");
 const nodemailer = require("nodemailer");
@@ -670,11 +683,47 @@ cloudinary.config({
   api_key: process.env.CLOUDINARY_API_KEY,
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
-const storage = new CloudinaryStorage({
-  cloudinary: cloudinary,
-  params: { folder: "shared-table-uploads", allowed_formats: ["jpg", "png", "jpeg"] },
+
+function __isAllowedImageMime(t) {
+  try {
+    const mt = String(t || "").toLowerCase().trim();
+    if (mt === "image/jpeg") return true;
+    if (mt === "image/jpg") return true;
+    if (mt === "image/png") return true;
+    return false;
+  } catch (_) {
+    return false;
+  }
+}
+
+function __uploadBufferToCloudinary(buf, originalName) {
+  return new Promise((resolve, reject) => {
+    try {
+      const name = String(originalName || "").trim();
+      const opts = { folder: "shared-table-uploads", resource_type: "image" };
+      if (name.length > 0) opts.context = "filename=" + name;
+      const stream = cloudinary.uploader.upload_stream(opts, (err, result) => {
+        if (err) return reject(err);
+        if (result == null) return reject(new Error("cloudinary_no_result"));
+        return resolve(result);
+      });
+      stream.end(buf);
+    } catch (e) {
+      return reject(e);
+    }
+  });
+}
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 6 * 1024 * 1024, files: 3 },
+  fileFilter: (req, file, cb) => {
+    const ok = __isAllowedImageMime(file && file.mimetype);
+    if (ok === true) return cb(null, true);
+    return cb(new Error("invalid_file_type"), false);
+  }
 });
-const upload = multer({ storage: storage });
+
 
 // 4. EMAIL (single contract: SMTP_* + optional FROM_EMAIL)
 // Env contract:
@@ -1544,10 +1593,67 @@ async function checkCapacity(experienceId, date, timeSlot, newGuests) {
 // --- ROUTES ---
 
 // Upload
-app.post("/api/upload", authMiddleware, upload.array("photos", 3), (req, res) => {
-  if (!req.files) return res.status(400).json({ message: "No files" });
-  res.json({ images: req.files.map((f) => f.path) });
+function __uploadLimits() {
+  return { maxFiles: 3, maxFileSizeMB: 6, formats: ["jpg", "jpeg", "png"] };
+}
+
+function __uploadReject(res, httpCode, code, message, detail) {
+  return res.status(Number(httpCode)).json({
+    code: String(code || "UPLOAD_REJECTED"),
+    message: String(message || "We could not upload that file."),
+    detail: String(detail || "Please try again."),
+    limits: __uploadLimits()
+  });
+}
+
+function __uploadMulterWrap(req, res, next) {
+  upload.array("photos", 3)(req, res, (err) => {
+    if (err) {
+      const msg = String((err && err.message) ? err.message : "upload_error");
+      const isMulter = Boolean(err && (err.name == "MulterError"));
+      const ecode = String((err && err.code) ? err.code : "");
+      const isTooLarge = Boolean(isMulter && (ecode == "LIMIT_FILE_SIZE"));
+      const isTooMany = Boolean(isMulter && (ecode == "LIMIT_FILE_COUNT"));
+      const isBadType = Boolean(msg == "invalid_file_type");
+      if (isTooLarge) {
+        return __uploadReject(res, 413, "UPLOAD_FILE_TOO_LARGE", "This photo is larger than allowed.", "Max 6MB per photo. Please compress to 6MB or less (recommended: 5MB). If exporting, set longest side to 1920px or less and JPEG quality around 80%, then try again.");
+      }
+      if (isTooMany) {
+        return __uploadReject(res, 400, "UPLOAD_TOO_MANY_FILES", "You can upload up to 3 photos per upload.", "Please remove extra photos and upload in batches of 3 or fewer.");
+      }
+      if (isBadType) {
+        return __uploadReject(res, 400, "UPLOAD_UNSUPPORTED_FORMAT", "Unsupported image format.", "Allowed: JPG/JPEG/PNG. Please convert your image to JPG or PNG and try again.");
+      }
+      return __uploadReject(res, 400, "UPLOAD_REJECTED", "Upload could not be processed.", "Please try again.");
+    }
+    return next();
+  });
+}
+
+app.post("/api/upload", authMiddleware, __uploadMulterWrap, async (req, res) => {
+  try {
+    const files = Array.isArray(req.files) ? req.files : [];
+    if (files.length === 0) {
+      return __uploadReject(res, 400, "UPLOAD_NO_FILES", "No photos received.", "Attach up to 3 JPG/PNG photos (max 6MB each) and try again.");
+    }
+    const out = [];
+    for (const f of files) {
+      const buf = (f && f.buffer) ? f.buffer : null;
+      if (buf == null) {
+        return __uploadReject(res, 400, "UPLOAD_INVALID_FILE", "We could not read that photo.", "Please choose a different JPG/PNG photo (max 6MB) and try again.");
+      }
+      const r = await __uploadBufferToCloudinary(buf, (f && f.originalname) ? String(f.originalname) : "");
+      const url = (r && r.secure_url) ? String(r.secure_url) : "";
+      if (url.length > 0) out.push(url);
+    }
+    __log("info", "upload_ok", { rid: __ridFromReq(req), path: (req && req.originalUrl) ? String(req.originalUrl) : undefined });
+    return res.json({ images: out });
+  } catch (e) {
+    __log("error", "upload_error", { rid: __ridFromReq(req), path: (req && req.originalUrl) ? String(req.originalUrl) : undefined });
+    return __uploadReject(res, 500, "UPLOAD_FAILED", "Upload failed.", "Please try again. If it keeps failing, try 1 photo first, then add more (up to 3).");
+  }
 });
+
 
 // Auth: Register
 app.post("/api/auth/register", registerLimiter, async (req, res) => {
