@@ -172,100 +172,6 @@ const corsOptions = {
 app.use(cors(corsOptions));
 app.options("*", cors(corsOptions));
 
-app.use(express.json({ limit: "200kb" }));
-app.use(express.urlencoded({ extended: true, limit: "200kb" }));
-
-// Baseline request validation (no external deps):
-// - Reject non-object JSON bodies for write endpoints.
-// - Parser limits above protect payload size.
-function __isPlainObject(x) {
-  const isObj = (x !== null) && (typeof x === "object");
-  const isArr = Array.isArray(x) === true;
-  return isObj && (isArr === false);
-}
-function __cleanId(x, maxLen) {
-  const v = String((x === null || x === undefined) ? "" : x).trim();
-  if (v.length === 0) return "";
-  if (v.length > (maxLen || 128)) return "";
-  return v;
-}
-app.use("/api", (req, res, next) => {
-  try {
-    const m = String(req.method || "").toUpperCase();
-    const isWrite = (m === "POST" || m === "PUT" || m === "PATCH");
-    if (isWrite === false) return next();
-
-    const ct = String(req.headers["content-type"] || "").toLowerCase();
-    const isJson = ct.indexOf("application/json") >= 0;
-
-    if (isJson) {
-      if (__isPlainObject(req.body) === false) {
-        return res.status(400).json({ error: "invalid_json_body" });
-      }
-    }
-    return next();
-  } catch (_) {
-    return res.status(400).json({ error: "invalid_request" });
-  }
-});
-
-// JSON parse / body size errors (clean response)
-app.use((err, req, res, next) => {
-  const msg = String((err && err.message) ? err.message : "").toLowerCase();
-  const typeStr = String((err && err.type) ? err.type : "");
-  const tooLarge = (typeStr === "entity.too.large") || (msg.indexOf("request entity too large") >= 0);
-
-  if (tooLarge) {
-    return res.status(413).json({ error: "payload_too_large" });
-  }
-
-  const looksJson = (msg.indexOf("unexpected token") >= 0) || (msg.indexOf("json") >= 0);
-  if (looksJson) {
-    return res.status(400).json({ error: "invalid_json" });
-  }
-
-  return next(err);
-});
-
-
-app.use("/api", apiLimiter);
-app.use("/api/auth", authLimiter);
-app.use("/api/admin", adminLimiter);
-
-// CORS error handler (clean response)
-app.use((err, req, res, next) => {
-  if (err && String(err.message || "").startsWith("CORS blocked")) {
-    return res.status(403).json({ error: "CORS blocked" });
-  }
-  return next(err);
-});
-
-// Stripe webhook idempotency: dedupe by Stripe event.id
-let __stripeWebhookIndexPromise = null;
-async function __ensureStripeWebhookIndex() {
-  try {
-    if (__stripeWebhookIndexPromise) return __stripeWebhookIndexPromise;
-    if (mongoose == null) return null;
-    if (mongoose.connection == null) return null;
-    __stripeWebhookIndexPromise = mongoose.connection
-      .collection("stripe_webhook_events")
-      .createIndex({ eventId: 1 }, { unique: true, background: true });
-    return __stripeWebhookIndexPromise;
-  } catch (_) {
-    return null;
-  }
-}
-function __isDuplicateKeyError(e) {
-  try {
-    if (e == null) return false;
-    if (e.code === 11000) return true;
-    return String(e.message || '').includes('E11000');
-  } catch (_) {
-    return false;
-  }
-}
-
-// IMPORTANT: webhook must be registered BEFORE express.json()
 app.post(
   "/api/stripe/webhook",
   express.raw({ type: "application/json" }),
@@ -494,6 +400,102 @@ app.post(
     }
   }
 );
+
+app.use(express.json({ limit: "200kb" }));
+app.use(express.urlencoded({ extended: true, limit: "200kb" }));
+
+// Baseline request validation (no external deps):
+// - Reject non-object JSON bodies for write endpoints.
+// - Parser limits above protect payload size.
+function __isPlainObject(x) {
+  const isObj = (x !== null) && (typeof x === "object");
+  const isArr = Array.isArray(x) === true;
+  return isObj && (isArr === false);
+}
+function __cleanId(x, maxLen) {
+  const v = String((x === null || x === undefined) ? "" : x).trim();
+  if (v.length === 0) return "";
+  if (v.length > (maxLen || 128)) return "";
+  return v;
+}
+app.use("/api", (req, res, next) => {
+  try {
+    const m = String(req.method || "").toUpperCase();
+    const isWrite = (m === "POST" || m === "PUT" || m === "PATCH");
+    if (isWrite === false) return next();
+
+    const ct = String(req.headers["content-type"] || "").toLowerCase();
+    const isJson = ct.indexOf("application/json") >= 0;
+
+    if (isJson) {
+      if (__isPlainObject(req.body) === false) {
+        return res.status(400).json({ error: "invalid_json_body" });
+      }
+    }
+    return next();
+  } catch (_) {
+    return res.status(400).json({ error: "invalid_request" });
+  }
+});
+
+// JSON parse / body size errors (clean response)
+app.use((err, req, res, next) => {
+  const msg = String((err && err.message) ? err.message : "").toLowerCase();
+  const typeStr = String((err && err.type) ? err.type : "");
+  const tooLarge = (typeStr === "entity.too.large") || (msg.indexOf("request entity too large") >= 0);
+
+  if (tooLarge) {
+    return res.status(413).json({ error: "payload_too_large" });
+  }
+
+  const looksJson = (msg.indexOf("unexpected token") >= 0) || (msg.indexOf("json") >= 0);
+  if (looksJson) {
+    return res.status(400).json({ error: "invalid_json" });
+  }
+
+  return next(err);
+});
+
+
+app.use("/api", apiLimiter);
+app.use("/api/auth", authLimiter);
+app.use("/api/admin", adminLimiter);
+
+// CORS error handler (clean response)
+app.use((err, req, res, next) => {
+  if (err && String(err.message || "").startsWith("CORS blocked")) {
+    return res.status(403).json({ error: "CORS blocked" });
+  }
+  return next(err);
+});
+
+// Stripe webhook idempotency: dedupe by Stripe event.id
+let __stripeWebhookIndexPromise = null;
+async function __ensureStripeWebhookIndex() {
+  try {
+    if (__stripeWebhookIndexPromise) return __stripeWebhookIndexPromise;
+    if (mongoose == null) return null;
+    if (mongoose.connection == null) return null;
+    __stripeWebhookIndexPromise = mongoose.connection
+      .collection("stripe_webhook_events")
+      .createIndex({ eventId: 1 }, { unique: true, background: true });
+    return __stripeWebhookIndexPromise;
+  } catch (_) {
+    return null;
+  }
+}
+function __isDuplicateKeyError(e) {
+  try {
+    if (e == null) return false;
+    if (e.code === 11000) return true;
+    return String(e.message || '').includes('E11000');
+  } catch (_) {
+    return false;
+  }
+}
+
+// IMPORTANT: webhook must be registered BEFORE express.json()
+
 
 
 
