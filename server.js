@@ -3159,7 +3159,18 @@ app.put("/api/bookings/:id/visibility", authMiddleware, async (req, res) => {
     if (!booking) return res.status(404).json({ message: "Booking not found" });
     if (String(booking.guestId) !== String(req.user._id)) return res.status(403).json({ message: "Unauthorized" });
 
-    const toFriends = !!(req.body && req.body.toFriends);
+    const __toBoolStrict = (v) => {
+      if (typeof v === "boolean") return v;
+      const x = String(v || "").toLowerCase().trim();
+      if (x === "true" || x === "1" || x === "yes" || x === "y") return true;
+      if (x === "false" || x === "0" || x === "no" || x === "n") return false;
+      return null;
+    };
+
+    const raw = (req.body && Object.prototype.hasOwnProperty.call(req.body, "toFriends")) ? req.body.toFriends : undefined;
+    const parsed = __toBoolStrict(raw);
+    if (parsed === null) return res.status(400).json({ message: "toFriends must be a boolean." });
+    const toFriends = parsed;
     booking.visibilityToFriends = toFriends;
     await booking.save();
     return res.json({ ok: true, visibilityToFriends: booking.visibilityToFriends });
