@@ -46,6 +46,13 @@ const CATEGORY_PILLARS = ["Culture", "Food", "Nature"];
 
 // 1. Initialize App
 const app = express();
+
+
+// ROOT_SERVICE_MARKER_TSTS
+app.get("/", (req, res) => {
+  res.status(200).json({ service: "shared-table-api", status: "ok" });
+});
+
 app.set("trust proxy", 1);
 const PORT = process.env.PORT || 4000;
 
