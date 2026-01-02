@@ -2506,7 +2506,7 @@ app.post("/api/experiences/:id/book", authMiddleware, async (req, res) => {
 });
 
 // Booking verify
-app.post("/api/bookings/verify", authMiddleware, async (req, res) => {
+app.post("/api/bookings/verify", async (req, res) => {
   const bid = __cleanId(((req.body || {}).bookingId), 80);
   const sid = __cleanId(((req.body || {}).sessionId), 120);
   if (bid.length === 0) return res.status(400).json({ status: "invalid_booking_id" });
