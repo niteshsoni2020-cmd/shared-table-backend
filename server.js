@@ -2242,14 +2242,39 @@ app.put("/api/experiences/:id", authMiddleware, async (req, res) => {
     if (!exp || exp.hostId !== String(req.user._id)) return res.status(403).json({ message: "No" });
 
     const body = req.body || {};
-    const { images, tags, ...updates } = body;
-    delete updates.hostId;
-    delete updates.hostName;
-    delete updates.hostPic;
-    delete updates.isPaused;
-    delete updates.averageRating;
-    delete updates.reviewCount;
-    delete updates.createdAt;
+    const { images, tags } = body;
+
+    const allowed = [
+      "title",
+      "description",
+      "city",
+      "state",
+      "country",
+      "suburb",
+      "postcode",
+      "addressLine",
+      "addressNotes",
+      "price",
+      "capacity",
+      "duration",
+      "language",
+      "inclusions",
+      "exclusions",
+      "meetingPoint",
+      "startDate",
+      "endDate",
+      "startTime",
+      "endTime",
+      "availableDays",
+      "itinerary",
+      "requirements",
+      "cancellationPolicy",
+    ];
+
+    const updates = {};
+    for (const k of allowed) {
+      if (Object.prototype.hasOwnProperty.call(body, k)) updates[k] = body[k];
+    }
 
     if (typeof tags !== "undefined") {
       let newTags = [];
