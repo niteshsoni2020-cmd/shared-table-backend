@@ -2325,6 +2325,99 @@ app.put("/api/experiences/:id", authMiddleware, async (req, res) => {
       if (Object.prototype.hasOwnProperty.call(body, k)) updates[k] = body[k];
     }
 
+    const __toStr = (v) => String(v || "").trim();
+    const __toNum = (v) => {
+      const n = Number(v);
+      return Number.isFinite(n) ? n : null;
+    };
+    const __toInt = (v) => {
+      const n = Number.parseInt(String(v), 10);
+      return Number.isFinite(n) ? n : null;
+    };
+    const __toArrStr = (v) => {
+      let a = [];
+      if (Array.isArray(v)) a = v;
+      else if (typeof v !== "undefined" && v !== null) a = [v];
+      return a.map((x) => __toStr(x)).filter((x) => x);
+    };
+    const __scrubMongoKeys = (val, depth) => {
+      const d = typeof depth === "number" ? depth : 0;
+      if (d > 6) return null;
+      if (!val || typeof val !== "object") return val;
+      if (Array.isArray(val)) return val.map((x) => __scrubMongoKeys(x, d + 1));
+      const out = {};
+      for (const k of Object.keys(val)) {
+        if (!k) continue;
+        if (k[0] === "$") continue;
+        if (k.indexOf(".") !== -1) continue;
+        out[k] = __scrubMongoKeys(val[k], d + 1);
+      }
+      return out;
+    };
+
+    if (typeof updates.title !== "undefined") updates.title = __toStr(updates.title);
+    if (typeof updates.description !== "undefined") updates.description = __toStr(updates.description);
+    if (typeof updates.city !== "undefined") updates.city = __toStr(updates.city);
+    if (typeof updates.state !== "undefined") updates.state = __toStr(updates.state);
+    if (typeof updates.country !== "undefined") updates.country = __toStr(updates.country);
+    if (typeof updates.suburb !== "undefined") updates.suburb = __toStr(updates.suburb);
+    if (typeof updates.postcode !== "undefined") updates.postcode = __toStr(updates.postcode);
+    if (typeof updates.addressLine !== "undefined") updates.addressLine = __toStr(updates.addressLine);
+    if (typeof updates.addressNotes !== "undefined") updates.addressNotes = __toStr(updates.addressNotes);
+
+    if (typeof updates.language !== "undefined") updates.language = __toStr(updates.language);
+    if (typeof updates.meetingPoint !== "undefined") updates.meetingPoint = __toStr(updates.meetingPoint);
+    if (typeof updates.cancellationPolicy !== "undefined") updates.cancellationPolicy = __toStr(updates.cancellationPolicy);
+
+    if (typeof updates.inclusions !== "undefined") updates.inclusions = __toArrStr(updates.inclusions);
+    if (typeof updates.exclusions !== "undefined") updates.exclusions = __toArrStr(updates.exclusions);
+    if (typeof updates.availableDays !== "undefined") {
+      const allowedDays = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
+      const days = __toArrStr(updates.availableDays);
+      updates.availableDays = days.filter((d) => allowedDays.includes(d));
+    }
+
+    if (typeof updates.itinerary !== "undefined") updates.itinerary = __toStr(updates.itinerary);
+    if (typeof updates.requirements !== "undefined") updates.requirements = __toStr(updates.requirements);
+
+    if (typeof updates.price !== "undefined") {
+      const n = __toNum(updates.price);
+      if (n === null || n < 0) delete updates.price;
+      else updates.price = n;
+    }
+    if (typeof updates.capacity !== "undefined") {
+      const n = __toInt(updates.capacity);
+      if (n === null || n < 1) delete updates.capacity;
+      else updates.capacity = n;
+    }
+
+    if (typeof updates.duration !== "undefined") updates.duration = __toStr(updates.duration);
+
+    if (typeof updates.startDate !== "undefined") {
+      const d = __toStr(updates.startDate);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) delete updates.startDate;
+      else updates.startDate = d;
+    }
+    if (typeof updates.endDate !== "undefined") {
+      const d = __toStr(updates.endDate);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) delete updates.endDate;
+      else updates.endDate = d;
+    }
+    if (typeof updates.startTime !== "undefined") {
+      const t = __toStr(updates.startTime);
+      if (t && !/^\d{2}:\d{2}$/.test(t)) delete updates.startTime;
+      else updates.startTime = t;
+    }
+    if (typeof updates.endTime !== "undefined") {
+      const t = __toStr(updates.endTime);
+      if (t && !/^\d{2}:\d{2}$/.test(t)) delete updates.endTime;
+      else updates.endTime = t;
+    }
+
+    if (typeof updates.preferences !== "undefined") {
+      updates.preferences = __scrubMongoKeys(updates.preferences, 0);
+    }
+
     if (typeof tags !== "undefined") {
       let newTags = [];
       if (Array.isArray(tags)) newTags = tags;
