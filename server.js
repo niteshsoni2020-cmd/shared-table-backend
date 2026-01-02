@@ -1483,14 +1483,7 @@ async function maybeSendBookingCancelledComms(booking) {
       });
     }
 
-    const now = new Date();
-    const guestOk = (guestEmail.length > 0);
-    const hostOk = (hostDoc != null) && (hostDoc.email);
-    if (booking) {
-      if (guestOk) booking.guestCancelledAt = booking.guestCancelledAt || now;
-      if (hostOk) booking.hostCancelledAt = booking.hostCancelledAt || now;
-      await booking.save();
-    }
+    // DB updates handled by transitionBooking (idempotent)
   } catch (e) {
     const msg = e && e.message ? e.message : String(e);
     console.error("COMMS_CANCEL_ERR", msg);
