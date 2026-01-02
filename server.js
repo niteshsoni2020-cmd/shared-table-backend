@@ -2558,10 +2558,9 @@ app.get("/api/users/:userId/profile", async (req, res) => {
   }
 });
 
-
 // UNPAID_BOOKING_EXPIRY_CLEANUP_V1
-// Expires unpaid bookings and releases reserved capacity (race-safe).
-setInterval(async () => {
+// Expires unpaid bookings and releases reserved capacity (idempotent + race-safe).
+async function runUnpaidBookingExpiryCleanupOnce_V1() {
   try {
     const now = new Date();
 
@@ -2591,19 +2590,34 @@ setInterval(async () => {
 
       const didExpire = Boolean(r && (Number(r.modifiedCount) > 0 || Number(r.nModified) > 0));
       if (didExpire) {
-        const expId = String(b.experienceId || "");
-        const dateStr = String(b.bookingDate || "");
-        const slot = String(b.timeSlot || "");
-        const g = Number.parseInt(String(b.numGuests || "0"), 10) || 0;
+        try {
+          const expId = String(b.experienceId || "");
+          const dateStr = String(b.bookingDate || "");
+          const slot = String(b.timeSlot || "");
+          const g = Number.parseInt(String(b.numGuests || "0"), 10) || 0;
 
-        const ok = Boolean(expId.length > 0 && dateStr.length > 0 && slot.length > 0 && g > 0);
-        if (ok) {
-          await releaseCapacitySlot(expId, dateStr, slot, g);
-        }
+          const ok = Boolean(expId.length > 0 && dateStr.length > 0 && slot.length > 0 && g > 0);
+          if (ok) {
+            await releaseCapacitySlot(expId, dateStr, slot, g);
+          }
+        } catch (_) {}
       }
     }
-  } catch (e) {}
-}, 60 * 1000);
+  } catch (_) {}
+}
+
+function startUnpaidBookingExpiryCleanupLoop_V1() {
+  try {
+    setTimeout(() => { runUnpaidBookingExpiryCleanupOnce_V1().catch(() => {}); }, 10 * 1000);
+    setInterval(() => { runUnpaidBookingExpiryCleanupOnce_V1().catch(() => {}); }, 60 * 1000);
+  } catch (_) {}
+}
+
+// Start unpaid expiry cleanup loop (safe + idempotent)
+startUnpaidBookingExpiryCleanupLoop_V1();
+
+
+
 
 
 app.listen(PORT, () => console.log(`Server running on http://localhost:${PORT}`));
