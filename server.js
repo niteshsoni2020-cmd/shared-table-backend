@@ -1153,7 +1153,7 @@ async function reserveCapacitySlot(experienceId, dateStr, timeSlot, guests) {
   if (maxGuests <= 0) return { ok: true, maxGuests: 0 };
 
 
-    // HARD GUARD: cannot reserve more guests than maxGuests
+  // HARD GUARD: cannot reserve more guests than maxGuests
   if (g > maxGuests) {
     return { ok: false, remaining: maxGuests, message: "Only " + String(maxGuests) + " spots left." };
   }
