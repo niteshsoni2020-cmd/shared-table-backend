@@ -172,6 +172,9 @@ const corsOptions = {
 app.use(cors(corsOptions));
 app.options("*", cors(corsOptions));
 
+app.use(express.json({ limit: "200kb" }));
+app.use(express.urlencoded({ extended: true, limit: "200kb" }));
+
 // Baseline request validation (no external deps):
 // - Reject non-object JSON bodies for write endpoints.
 // - Parser limits above protect payload size.
@@ -492,8 +495,7 @@ app.post(
   }
 );
 
-app.use(express.json({ limit: "200kb" }));
-app.use(express.urlencoded({ extended: true, limit: "200kb" }));
+
 
 function reTest(r, v){ try { return r.test(String(v||"")); } catch(_) { return false; } }
 
