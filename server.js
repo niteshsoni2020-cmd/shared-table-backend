@@ -1152,6 +1152,12 @@ async function reserveCapacitySlot(experienceId, dateStr, timeSlot, guests) {
   const maxGuests = Number(exp.maxGuests) || 0;
   if (maxGuests <= 0) return { ok: true, maxGuests: 0 };
 
+
+    // HARD GUARD: cannot reserve more guests than maxGuests
+  if (g > maxGuests) {
+    return { ok: false, remaining: maxGuests, message: "Only " + String(maxGuests) + " spots left." };
+  }
+
   const limit = maxGuests - g;
 
   const OR = String.fromCharCode(36) + "or";
@@ -1687,13 +1693,6 @@ app.post("/api/experiences/:id/book", authMiddleware, async (req, res) => {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(bookingDateStr)) return res.status(400).json({ message: "bookingDate required (YYYY-MM-DD)." });
   if (!timeSlotStr) return res.status(400).json({ message: "timeSlot is required." });
   if (!Number.isFinite(guests) || guests < 1) return res.status(400).json({ message: "numGuests must be >= 1." });
-
-  const cap = await checkCapacity(exp._id, bookingDateStr, timeSlotStr, guests);
-  const capOk = Boolean(cap && cap.available);
-
-  const hold = await reserveCapacitySlot(String(exp._id), bookingDateStr, timeSlotStr, guests);
-  const holdOk = Boolean(hold && hold.ok);
-  if (holdOk == false) return res.status(400).json({ message: String(hold.message || "Fully booked.") });
   const policyVersionAccepted = String(((req.body || {}).policyVersionAccepted) || ((req.body || {}).policyVersion) || "").trim();
   const termsVersionAccepted = String(((req.body || {}).termsVersionAccepted) || ((req.body || {}).termsVersion) || "").trim();
 
@@ -1720,6 +1719,11 @@ app.post("/api/experiences/:id/book", authMiddleware, async (req, res) => {
     totalCents = toCents(exp.privatePrice);
     description = "Private Booking";
   }
+  // Capacity hold must happen AFTER policy/terms acceptance, and BEFORE booking save (race-safe)
+  const hold = await reserveCapacitySlot(String(exp._id), bookingDateStr, timeSlotStr, guests);
+  const holdOk = Boolean(hold && hold.ok);
+  if (holdOk == false) return res.status(400).json({ message: String(hold.message || "Fully booked.") });
+
 
   const booking = new Booking({
     experienceId: String(exp._id),
@@ -1745,9 +1749,12 @@ app.post("/api/experiences/:id/book", authMiddleware, async (req, res) => {
     termsVersionAccepted: termsVersionAccepted,
     termsAcceptedAt: new Date(),
   });
-
-  await booking.save();
-
+  try {
+    await booking.save();
+  } catch (e) {
+    try { await releaseCapacitySlot(String(exp._id), bookingDateStr, timeSlotStr, guests); } catch (_) {}
+    throw e;
+  }
   try {
     const baseUrl = String(process.env.PUBLIC_URL || `http://localhost:${process.env.PORT || 4000}`);
     const session = await stripe.checkout.sessions.create({
