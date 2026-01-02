@@ -48,6 +48,100 @@ const CATEGORY_PILLARS = ["Culture", "Food", "Nature"];
 const app = express();
 
 
+// REQUEST_ID_MIDDLEWARE_TSTS
+// Structured logging + request correlation + redaction (audit-grade)
+function __rid() {
+  try {
+    return crypto.randomBytes(12).toString("hex");
+  } catch (_) {
+    return String(Date.now());
+  }
+}
+
+function __isPlainObj(x) {
+  const isObj = (x === null) ? false : (typeof x === "object");
+  const isArr = Array.isArray(x) === true;
+  return (isObj === true) && (isArr === false);
+}
+
+function __redact(x, depth) {
+  const d = Number.isFinite(depth) ? Number(depth) : 0;
+  if (d > 3) return "[redacted]";
+  if (__isPlainObj(x) === false) return x;
+
+  const out = {};
+  const keys = Object.keys(x || {});
+  for (const k of keys) {
+    const ks = String(k || "").toLowerCase();
+    const v = x[k];
+
+    const isSensitive =
+      (ks.indexOf("pass") >= 0) ||
+      (ks.indexOf("password") >= 0) ||
+      (ks.indexOf("secret") >= 0) ||
+      (ks.indexOf("token") >= 0) ||
+      (ks.indexOf("authorization") >= 0) ||
+      (ks.indexOf("email") >= 0) ||
+      (ks.indexOf("phone") >= 0) ||
+      (ks.indexOf("mobile") >= 0);
+
+    if (isSensitive) {
+      out[k] = "[redacted]";
+    } else {
+      if (__isPlainObj(v) === true) out[k] = __redact(v, d + 1);
+      else out[k] = v;
+    }
+  }
+  return out;
+}
+
+function __log(level, event, meta) {
+  try {
+    const rec = {
+      t: new Date().toISOString(),
+      level: String(level || "info"),
+      event: String(event || "event"),
+      rid: (meta && meta.rid) ? String(meta.rid) : undefined,
+      path: (meta && meta.path) ? String(meta.path) : undefined,
+      method: (meta && meta.method) ? String(meta.method) : undefined,
+      status: (meta && Number.isFinite(meta.status)) ? Number(meta.status) : undefined,
+      durationMs: (meta && Number.isFinite(meta.durationMs)) ? Number(meta.durationMs) : undefined,
+      ip: (meta && meta.ip) ? String(meta.ip) : undefined
+    };
+
+    const line = JSON.stringify(rec);
+    if (String(level || "").toLowerCase() === "error") console.error(line);
+    else console.log(line);
+  } catch (e) {
+    try { console.error("LOG_FAIL", String(e && e.message ? e.message : e)); } catch (_) {}
+  }
+}
+
+// attach requestId + access logs
+app.use((req, res, next) => {
+  const rid = __rid();
+  req.requestId = rid;
+  try { res.set("X-Request-Id", rid); } catch (_) {}
+
+  const start = Date.now();
+  res.on("finish", () => {
+    __log("info", "http_access", {
+      rid: rid,
+      method: req.method,
+      path: req.originalUrl,
+      status: res.statusCode,
+      durationMs: Date.now() - start,
+      ip: req.ip
+    });
+  });
+
+  return next();
+});
+
+
+
+
+
 // ROOT_SERVICE_MARKER_TSTS
 app.get("/", (req, res) => {
   res.status(200).json({ service: "shared-table-api", status: "ok" });
