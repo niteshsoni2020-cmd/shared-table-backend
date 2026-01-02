@@ -41,6 +41,23 @@ const helmet = require("helmet");
 const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
 
+
+// WINSTON_LOGGER_TSTS
+const winston = require("winston");
+const __winstonLogger = (() => {
+  try {
+    const isProd = String(process.env.NODE_ENV || "").toLowerCase() === "production";
+    return winston.createLogger({
+      level: isProd ? "info" : "debug",
+      format: winston.format.json(),
+      defaultMeta: { service: "tsts-backend" },
+      transports: [new winston.transports.Console()]
+    });
+  } catch (_) {
+    return null;
+  }
+})();
+
 // Single Source of Truth for Categories (3 Pillars)
 const CATEGORY_PILLARS = ["Culture", "Food", "Nature"];
 
@@ -97,23 +114,33 @@ function __redact(x, depth) {
 
 function __log(level, event, meta) {
   try {
-    const rec = {
-      t: new Date().toISOString(),
-      level: String(level || "info"),
-      event: String(event || "event"),
-      rid: (meta && meta.rid) ? String(meta.rid) : undefined,
-      path: (meta && meta.path) ? String(meta.path) : undefined,
-      method: (meta && meta.method) ? String(meta.method) : undefined,
-      status: (meta && Number.isFinite(meta.status)) ? Number(meta.status) : undefined,
-      durationMs: (meta && Number.isFinite(meta.durationMs)) ? Number(meta.durationMs) : undefined,
-      ip: (meta && meta.ip) ? String(meta.ip) : undefined
-    };
+    const lvl = String(level || "info").toLowerCase();
+    const ev = String(event || "event");
+    const m = (meta && typeof meta === "object") ? meta : {};
+    const payload = { ts: new Date().toISOString(), level: lvl, event: ev, meta: m };
+    if (__winstonLogger) {
+      const fn = (__winstonLogger[lvl] && typeof __winstonLogger[lvl] === "function") ? __winstonLogger[lvl] : __winstonLogger.info;
+      fn.call(__winstonLogger, payload);
+      return;
+    }
+    const line = JSON.stringify(payload);
+    if (lvl === "error") {
+      try { console.error(line); } catch (_) {}
+      return;
+    }
+    try { console.log(line); } catch (_) {}
+  } catch (_) {
+    try { console.error("LOG_FAIL"); } catch (_) {}
+  }
+}
 
-    const line = JSON.stringify(rec);
-    if (String(level || "").toLowerCase() === "error") console.error(line);
-    else console.log(line);
-  } catch (e) {
-    try { console.error("LOG_FAIL", String(e && e.message ? e.message : e)); } catch (_) {}
+function __ridFromReq(req) {
+  try {
+    const r = (req && req.requestId) ? String(req.requestId) : "";
+    if (r.length > 0) return r;
+    return undefined;
+  } catch (_) {
+    return undefined;
   }
 }
 
@@ -271,7 +298,7 @@ app.post(
   express.raw({ type: "application/json" }),
   async (req, res) => {
     try {
-      console.log("WEBHOOK_HIT", new Date().toISOString());
+      __log("info", "stripe_webhook_hit", { rid: __ridFromReq(req), path: (req && req.originalUrl) ? String(req.originalUrl) : undefined });
       if (!STRIPE_WEBHOOK_SECRET)
         return res.status(500).send("Missing STRIPE_WEBHOOK_SECRET");
 
@@ -283,9 +310,9 @@ app.post(
           sig,
           STRIPE_WEBHOOK_SECRET
         );
-        console.log("WEBHOOK_VERIFIED", String(event && event.type || ""), String(event && event.id || ""));
+        __log("info", "stripe_webhook_verified", { rid: __ridFromReq(req), path: (req && req.originalUrl) ? String(req.originalUrl) : undefined });
       } catch (err) {
-        console.log("WEBHOOK_SIG_FAIL", String((err && err.message) ? err.message : err));
+        __log("error", "stripe_webhook_sig_fail", { rid: __ridFromReq(req), path: (req && req.originalUrl) ? String(req.originalUrl) : undefined });
           return res.status(400).send("Webhook signature verification failed");
       }
 
@@ -315,7 +342,7 @@ app.post(
           error: "",
           data: (event && event.data) ? event.data : null,
         });
-        console.log("WEBHOOK_INSERTED", String(eventId));
+        __log("info", "stripe_webhook_event_inserted", { rid: __ridFromReq(req), path: (req && req.originalUrl) ? String(req.originalUrl) : undefined });
         // Force-persist raw Stripe payload (bypass mongoose strict schema)
         try {
           await evCol.updateOne(
@@ -489,7 +516,7 @@ app.post(
           }
         }
       } catch (_) {}
-      console.error("WEBHOOK_ERR", (e && e.stack) ? e.stack : e);
+      __log("error", "stripe_webhook_error", { rid: __ridFromReq(req), path: (req && req.originalUrl) ? req.originalUrl : undefined });
         return res.status(500).send("Webhook handler error");
     }
   }
@@ -563,6 +590,38 @@ app.use((err, req, res, next) => {
   return next(err);
 });
 
+// HTTP_ERROR_MIDDLEWARE_TSTS
+app.use((err, req, res, next) => {
+  try {
+    const sent = Boolean(res && (res.headersSent === true));
+    if (sent) {
+      return next(err);
+    }
+
+    const rid = __ridFromReq(req);
+    const isProd = String(process.env.NODE_ENV || "").toLowerCase() === "production";
+    const msg = (err && err.message) ? String(err.message) : "server_error";
+    const name = (err && err.name) ? String(err.name) : undefined;
+    const stack = (isProd === true) ? undefined : ((err && err.stack) ? String(err.stack) : undefined);
+
+    __log("error", "http_error", {
+      rid: rid,
+      path: (req && req.originalUrl) ? String(req.originalUrl) : undefined,
+      method: (req && req.method) ? String(req.method) : undefined,
+      status: 500,
+      errorName: name,
+      errorMessage: msg,
+      errorStack: stack
+    });
+
+    return res.status(500).json({ error: "server_error", rid: rid });
+  } catch (_) {
+    return res.status(500).json({ error: "server_error" });
+  }
+});
+
+
+
 // Stripe webhook idempotency: dedupe by Stripe event.id
 let __stripeWebhookIndexPromise = null;
 async function __ensureStripeWebhookIndex() {
@@ -601,9 +660,9 @@ mongoose
   .connect(process.env.MONGO_URI)
   .then(async () => {
   try { await ensureDefaultPolicyExists(); } catch (_) {}
-  console.log("✅ Connected to MongoDB Atlas");
+  __log("info", "db_connected", { rid: undefined, path: undefined });
 })
-  .catch((err) => console.error("❌ MongoDB Error:", err));
+  .catch((err) => { __log("error", "db_connect_error", { rid: undefined, path: undefined }); });
 
 // 3. SETUP CLOUDINARY
 cloudinary.config({
@@ -654,7 +713,7 @@ async function sendEmail({ to, subject, html, text }) {
     });
     return true;
   } catch (err) {
-    console.error("❌ Email failed:", err && err.message ? err.message : String(err));
+    __log("error", "email_send_failed", { rid: undefined, path: undefined });
     return false;
   }
 }
@@ -1517,7 +1576,7 @@ app.post("/api/auth/register", registerLimiter, async (req, res) => {
 
     res.status(201).json({ token: signToken(user), user: sanitizeUser(user) });
   } catch (e) {
-    console.error("Register error:", e);
+    __log("error", "auth_register_error", { rid: __ridFromReq(req), path: (req && req.originalUrl) ? req.originalUrl : undefined });
     res.status(500).json({ message: "Error" });
   }
 });
@@ -1536,7 +1595,7 @@ app.post("/api/auth/login", loginLimiter, async (req, res) => {
 
     return res.json({ token: signToken(user), user: sanitizeUser(user) });
   } catch (e) {
-    console.error("Login error:", e);
+    __log("error", "auth_login_error", { rid: __ridFromReq(req), path: (req && req.originalUrl) ? req.originalUrl : undefined });
     return res.status(500).json({ message: "Login failed" });
   }
 });
@@ -1666,7 +1725,7 @@ app.put("/api/auth/update", authMiddleware, async (req, res) => {
     const user = await User.findByIdAndUpdate(req.user._id, { $set: updates }, { new: true });
     return res.json({ user: sanitizeUser(user) });
   } catch (e) {
-    console.error("Update profile error:", e);
+    __log("error", "auth_update_error", { rid: __ridFromReq(req), path: (req && req.originalUrl) ? req.originalUrl : undefined });
     return res.status(500).json({ message: "Update failed" });
   }
 });
@@ -1710,7 +1769,7 @@ app.post("/api/experiences", authMiddleware, async (req, res) => {
     await exp.save();
     res.status(201).json(exp);
   } catch (err) {
-    console.error("Create experience error:", err);
+    __log("error", "experience_create_error", { rid: __ridFromReq(req), path: (req && req.originalUrl) ? req.originalUrl : undefined });
     res.status(500).json({ message: "Failed to create experience" });
   }
 });
@@ -1751,7 +1810,7 @@ app.put("/api/experiences/:id", authMiddleware, async (req, res) => {
     await exp.save();
     return res.json(exp);
   } catch (err) {
-    console.error("Update experience error:", err);
+    __log("error", "experience_update_error", { rid: __ridFromReq(req), path: (req && req.originalUrl) ? req.originalUrl : undefined });
     res.status(500).json({ message: "Failed to update experience" });
   }
 });
@@ -1990,7 +2049,7 @@ app.post("/api/experiences/:id/book", authMiddleware, async (req, res) => {
     try {
       await releaseCapacitySlot(String(exp._id), bookingDateStr, timeSlotStr, guests);
     } catch (_) {}
-    console.error("Stripe Error:", e);
+    __log("error", "stripe_checkout_error", { rid: __ridFromReq(req), path: (req && req.originalUrl) ? req.originalUrl : undefined });
     res.status(500).json({ message: "Payment initialization failed" });
   }
 });
@@ -2858,4 +2917,4 @@ app.get("/health", (req, res) => {
   res.status(200).json({ status: "ok", uptime: process.uptime() });
 });
 
-app.listen(PORT, () => console.log(`Server running on http://localhost:${PORT}`));
+app.listen(PORT, () => { __log("info", "server_listen", { rid: undefined, path: undefined }); });
