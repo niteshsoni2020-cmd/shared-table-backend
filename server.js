@@ -1,6 +1,31 @@
 // server.js - FULL VERSION (Privacy-first attendee discovery + Like/Comment + Public profile hardening)
 
 require("dotenv").config();
+
+// ENV_ALIAS_SMTP_FROM_EMAIL_KEYS
+// Accept legacy EMAIL_USER/EMAIL_PASS while code expects SMTP_USER/SMTP_PASS.
+// Provide safe defaults for SMTP_* if not set.
+(() => {
+  const env = process.env;
+  const norm = (v) => String(v || "").trim();
+
+  const smtpUser = norm(env.SMTP_USER);
+  const emailUser = norm(env.EMAIL_USER);
+  if (smtpUser.length === 0) {
+    if (emailUser.length > 0) env.SMTP_USER = env.EMAIL_USER;
+  }
+
+  const smtpPass = norm(env.SMTP_PASS);
+  const emailPass = norm(env.EMAIL_PASS);
+  if (smtpPass.length === 0) {
+    if (emailPass.length > 0) env.SMTP_PASS = env.EMAIL_PASS;
+  }
+
+  if (norm(env.SMTP_HOST).length === 0) env.SMTP_HOST = "smtp.gmail.com";
+  if (norm(env.SMTP_PORT).length === 0) env.SMTP_PORT = "587";
+  if (norm(env.SMTP_SECURE).length === 0) env.SMTP_SECURE = "false";
+})();
+
 const express = require("express");
 const cors = require("cors");
 const mongoose = require("mongoose");
