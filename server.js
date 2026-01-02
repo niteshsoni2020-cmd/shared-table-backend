@@ -56,6 +56,29 @@ app.get("/", (req, res) => {
 app.set("trust proxy", 1);
 const PORT = process.env.PORT || 4000;
 
+function __isProdEnv() {
+  return String(process.env.NODE_ENV || "").toLowerCase() === "production";
+}
+
+// PUBLIC_URL is required in production so redirects never default to localhost.
+// In dev/test we allow fallback to localhost:<PORT>.
+function __requirePublicUrl() {
+  const raw = String(process.env.PUBLIC_URL || "").trim().replace(/\/$/, "");
+  const isProd = __isProdEnv();
+  const hasRaw = raw.length > 0;
+
+  if (isProd) {
+    if (hasRaw === false) throw new Error("PUBLIC_URL_REQUIRED_IN_PROD");
+    if (/^https:\/\//i.test(raw) === false) throw new Error("PUBLIC_URL_MUST_BE_HTTPS_IN_PROD");
+  }
+
+  if (hasRaw) return raw;
+
+  const p = String(process.env.PORT || 4000);
+  return "http://localhost:" + p;
+}
+
+
 // Security headers (baseline hardening)
 app.disable("x-powered-by");
 app.use(
@@ -148,6 +171,59 @@ const corsOptions = {
 
 app.use(cors(corsOptions));
 app.options("*", cors(corsOptions));
+
+// Baseline request validation (no external deps):
+// - Reject non-object JSON bodies for write endpoints.
+// - Parser limits above protect payload size.
+function __isPlainObject(x) {
+  const isObj = (x !== null) && (typeof x === "object");
+  const isArr = Array.isArray(x) === true;
+  return isObj && (isArr === false);
+}
+function __cleanId(x, maxLen) {
+  const v = String((x === null || x === undefined) ? "" : x).trim();
+  if (v.length === 0) return "";
+  if (v.length > (maxLen || 128)) return "";
+  return v;
+}
+app.use("/api", (req, res, next) => {
+  try {
+    const m = String(req.method || "").toUpperCase();
+    const isWrite = (m === "POST" || m === "PUT" || m === "PATCH");
+    if (isWrite === false) return next();
+
+    const ct = String(req.headers["content-type"] || "").toLowerCase();
+    const isJson = ct.indexOf("application/json") >= 0;
+
+    if (isJson) {
+      if (__isPlainObject(req.body) === false) {
+        return res.status(400).json({ error: "invalid_json_body" });
+      }
+    }
+    return next();
+  } catch (_) {
+    return res.status(400).json({ error: "invalid_request" });
+  }
+});
+
+// JSON parse / body size errors (clean response)
+app.use((err, req, res, next) => {
+  const msg = String((err && err.message) ? err.message : "").toLowerCase();
+  const typeStr = String((err && err.type) ? err.type : "");
+  const tooLarge = (typeStr === "entity.too.large") || (msg.indexOf("request entity too large") >= 0);
+
+  if (tooLarge) {
+    return res.status(413).json({ error: "payload_too_large" });
+  }
+
+  const looksJson = (msg.indexOf("unexpected token") >= 0) || (msg.indexOf("json") >= 0);
+  if (looksJson) {
+    return res.status(400).json({ error: "invalid_json" });
+  }
+
+  return next(err);
+});
+
 
 app.use("/api", apiLimiter);
 app.use("/api/auth", authLimiter);
@@ -416,7 +492,8 @@ app.post(
   }
 );
 
-app.use(express.json());
+app.use(express.json({ limit: "200kb" }));
+app.use(express.urlencoded({ extended: true, limit: "200kb" }));
 
 function reTest(r, v){ try { return r.test(String(v||"")); } catch(_) { return false; } }
 
@@ -1788,7 +1865,7 @@ app.post("/api/experiences/:id/book", authMiddleware, async (req, res) => {
     throw e;
   }
   try {
-    const baseUrl = String(process.env.PUBLIC_URL || `http://localhost:${process.env.PORT || 4000}`);
+    const baseUrl = __requirePublicUrl();
     const session = await stripe.checkout.sessions.create({
       client_reference_id: String(booking._id),
       metadata: { bookingId: String(booking._id), experienceId: String(exp._id), guestId: String(req.user._id) },
@@ -1822,6 +1899,10 @@ app.post("/api/experiences/:id/book", authMiddleware, async (req, res) => {
 
 // Booking verify
 app.post("/api/bookings/verify", authMiddleware, async (req, res) => {
+  const bid = __cleanId(((req.body || {}).bookingId), 80);
+  const sid = __cleanId(((req.body || {}).sessionId), 120);
+  if (bid.length === 0) return res.status(400).json({ status: "invalid_booking_id" });
+  if (sid.length === 0) return res.status(400).json({ status: "invalid_session_id" });
   const { bookingId, sessionId } = req.body || {};
   const booking = await Booking.findById(bookingId);
   if (!booking) return res.json({ status: "not_found" });
@@ -1970,7 +2051,14 @@ async function getMyBookings(req, res) {
 }
 
 app.get("/api/bookings/my-bookings", authMiddleware, async (req, res) => getMyBookings(req, res));
-app.get("/api/my/bookings", authMiddleware, async (req, res) => getMyBookings(req, res));
+app.get("/api/my/bookings", authMiddleware, async (req, res) => {
+  try {
+    res.set("Deprecation", "true");
+    res.set("Sunset", "Sat, 01 Feb 2026 00:00:00 GMT");
+    res.set("Link", "</api/bookings/my-bookings>; rel=\"canonical\"");
+  } catch (_) {}
+  return getMyBookings(req, res);
+});
 
 // Cancel booking
 app.post("/api/bookings/:id/cancel", authMiddleware, async (req, res) => {
