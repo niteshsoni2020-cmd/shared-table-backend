@@ -2192,40 +2192,53 @@ app.post("/api/experiences", authMiddleware, async (req, res) => {
     const images = Array.isArray(body.images) ? body.images : [];
     const imageUrl = images[0] || body.imageUrl || "";
 
-    const exp = new Experience({
-      suburb: String((req.body && req.body.suburb) || '').trim(),
-      postcode: String((req.body && req.body.postcode) || '').trim(),
-      addressLine: String((req.body && req.body.addressLine) || '').trim(),
-      addressNotes: String((req.body && req.body.addressNotes) || '').trim(),
+    const allowed = [
+      "title",
+      "description",
+      "city",
+      "state",
+      "country",
+      "suburb",
+      "postcode",
+      "addressLine",
+      "addressNotes",
+      "price",
+      "capacity",
+      "duration",
+      "language",
+      "inclusions",
+      "exclusions",
+      "meetingPoint",
+      "startDate",
+      "endDate",
+      "startTime",
+      "endTime",
+      "availableDays",
+      "itinerary",
+      "requirements",
+      "cancellationPolicy",
+    ];
 
-      title: body.title,
-      description: body.description,
-      city: body.city,
-      state: body.state,
-      country: body.country,
-      price: body.price,
-      capacity: body.capacity,
-      duration: body.duration,
-      language: body.language,
-      inclusions: body.inclusions,
-      exclusions: body.exclusions,
-      meetingPoint: body.meetingPoint,
-      startDate: body.startDate,
-      endDate: body.endDate,
-      startTime: body.startTime,
-      endTime: body.endTime,
-      availableDays: body.availableDays,
-      itinerary: body.itinerary,
-      requirements: body.requirements,
-      cancellationPolicy: body.cancellationPolicy,
-      images: images,
-      hostId: String(req.user._id),
-      hostName: req.user.name,
-      hostPic: req.user.profilePic || "",
-      isPaused: !!req.user.vacationMode,
-      tags,
-      imageUrl,
-    });
+    const expData = {};
+    for (const k of allowed) {
+      if (Object.prototype.hasOwnProperty.call(body, k)) expData[k] = body[k];
+    }
+
+    expData.suburb = String((body.suburb) || "").trim();
+    expData.postcode = String((body.postcode) || "").trim();
+    expData.addressLine = String((body.addressLine) || "").trim();
+    expData.addressNotes = String((body.addressNotes) || "").trim();
+
+    expData.images = images;
+    expData.imageUrl = imageUrl;
+    expData.tags = tags;
+
+    expData.hostId = String(req.user._id);
+    expData.hostName = req.user.name;
+    expData.hostPic = req.user.profilePic || "";
+    expData.isPaused = !!req.user.vacationMode;
+
+    const exp = new Experience(expData);
 
     await exp.save();
     res.status(201).json(exp);
