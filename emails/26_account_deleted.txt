@@ -1,0 +1,10 @@
+Subject: Your account has been deleted
+
+Hi {{Name}},
+
+This confirms that your account has been deleted.
+
+If this wasn’t intended, please contact us.
+
+Warmly,  
+The Shared Table Story

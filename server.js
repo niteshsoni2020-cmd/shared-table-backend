@@ -31,6 +31,7 @@ const cors = require("cors");
 const mongoose = require("mongoose");
 const multer = require("multer");
 const cloudinary = require("cloudinary").v2;
+const { start: startJobs, registerInterval } = require("./src/jobs");
 
 // CLOUDINARY_CONFIG_TSTS
 // Cloudinary v2 does NOT auto-configure from CLOUDINARY_CLOUD_NAME/API_KEY/API_SECRET.
@@ -674,6 +675,9 @@ mongoose
   .then(async () => {
   try { await ensureDefaultPolicyExists(); } catch (_) {}
   __log("info", "db_connected", { rid: undefined, path: undefined });
+
+  // Start unpaid booking expiry cleanup scheduler only after DB is connected
+  try { startUnpaidBookingExpiryCleanupLoop_V1(); } catch (_) {}
 })
   .catch((err) => { __log("error", "db_connect_error", { rid: undefined, path: undefined }); });
 
@@ -842,6 +846,102 @@ function resetPasswordEmailHtml(resetUrl) {
 }
 
 
+function bookingConfirmedGuestEmailHtml(booking, guest, host) {
+  const g = guest || {};
+  const b = booking || {};
+  const h = host || {};
+  const title = "Booking confirmed";
+
+  const name = escapeHtml(String(g.name || "").trim());
+  const exp = escapeHtml(String(b.experienceTitle || b.title || "").trim());
+  const date = escapeHtml(String(b.bookingDate || "").trim());
+  const time = escapeHtml(String(b.timeSlot || "").trim());
+  const hostName = escapeHtml(String(h.name || b.hostName || "").trim());
+
+  const body =
+    "<p style=\"margin:0 0 12px 0\">Hi " + name + ",</p>" +
+    "<p style=\"margin:0 0 12px 0\">Your booking is confirmed.</p>" +
+    "<p style=\"margin:0 0 8px 0\"><b>Experience</b>: " + exp + "</p>" +
+    "<p style=\"margin:0 0 8px 0\"><b>Date</b>: " + date + "</p>" +
+    "<p style=\"margin:0 0 8px 0\"><b>Time</b>: " + time + "</p>" +
+    "<p style=\"margin:0\"><b>Host</b>: " + hostName + "</p>";
+
+  return emailLayout(title, body, null);
+}
+
+function bookingConfirmedHostEmailHtml(booking, guest, host) {
+  const g = guest || {};
+  const b = booking || {};
+  const h = host || {};
+  const title = "New booking received";
+
+  const hostName = escapeHtml(String(h.name || b.hostName || "").trim());
+  const guestName = escapeHtml(String(g.name || b.guestName || "").trim());
+  const exp = escapeHtml(String(b.experienceTitle || b.title || "").trim());
+  const date = escapeHtml(String(b.bookingDate || "").trim());
+  const time = escapeHtml(String(b.timeSlot || "").trim());
+
+  const body =
+    "<p style=\"margin:0 0 12px 0\">Hi " + hostName + ",</p>" +
+    "<p style=\"margin:0 0 12px 0\">A guest has a confirmed booking.</p>" +
+    "<p style=\"margin:0 0 8px 0\"><b>Guest</b>: " + guestName + "</p>" +
+    "<p style=\"margin:0 0 8px 0\"><b>Experience</b>: " + exp + "</p>" +
+    "<p style=\"margin:0 0 8px 0\"><b>Date</b>: " + date + "</p>" +
+    "<p style=\"margin:0\"><b>Time</b>: " + time + "</p>";
+
+  return emailLayout(title, body, null);
+}
+
+function bookingCancelledGuestEmailHtml(booking, guest, host) {
+  const g = guest || {};
+  const b = booking || {};
+  const h = host || {};
+  const title = "Booking cancelled";
+
+  const name = escapeHtml(String(g.name || "").trim());
+  const exp = escapeHtml(String(b.experienceTitle || b.title || "").trim());
+  const date = escapeHtml(String(b.bookingDate || "").trim());
+  const time = escapeHtml(String(b.timeSlot || "").trim());
+  const hostName = escapeHtml(String(h.name || b.hostName || "").trim());
+
+  const body =
+    "<p style=\"margin:0 0 12px 0\">Hi " + name + ",</p>" +
+    "<p style=\"margin:0 0 12px 0\">This booking was cancelled.</p>" +
+    "<p style=\"margin:0 0 8px 0\"><b>Experience</b>: " + exp + "</p>" +
+    "<p style=\"margin:0 0 8px 0\"><b>Date</b>: " + date + "</p>" +
+    "<p style=\"margin:0 0 8px 0\"><b>Time</b>: " + time + "</p>" +
+    "<p style=\"margin:0\"><b>Host</b>: " + hostName + "</p>";
+
+  return emailLayout(title, body, null);
+}
+
+function bookingCancelledHostEmailHtml(booking, guest, host) {
+  const g = guest || {};
+  const b = booking || {};
+  const h = host || {};
+  const title = "Booking cancelled";
+
+  const hostName = escapeHtml(String(h.name || b.hostName || "").trim());
+  const guestName = escapeHtml(String(g.name || b.guestName || "").trim());
+  const exp = escapeHtml(String(b.experienceTitle || b.title || "").trim());
+  const date = escapeHtml(String(b.bookingDate || "").trim());
+  const time = escapeHtml(String(b.timeSlot || "").trim());
+
+  const body =
+    "<p style=\"margin:0 0 12px 0\">Hi " + hostName + ",</p>" +
+    "<p style=\"margin:0 0 12px 0\">A booking was cancelled.</p>" +
+    "<p style=\"margin:0 0 8px 0\"><b>Guest</b>: " + guestName + "</p>" +
+    "<p style=\"margin:0 0 8px 0\"><b>Experience</b>: " + exp + "</p>" +
+    "<p style=\"margin:0 0 8px 0\"><b>Date</b>: " + date + "</p>" +
+    "<p style=\"margin:0\"><b>Time</b>: " + time + "</p>";
+
+  return emailLayout(title, body, null);
+}
+
+
+
+
+
 
 // 5. SCHEMAS
 const schemaOpts = { toJSON: { virtuals: true }, toObject: { virtuals: true } };
@@ -954,6 +1054,13 @@ const bookingSchema = new mongoose.Schema(
     currency: String,
     stripePaymentIntentId: String,
     paidAt: Date,
+
+    // Booking comms idempotency markers
+    guestConfirmedAt: { type: Date, default: null },
+    hostConfirmedAt: { type: Date, default: null },
+    guestCancelledAt: { type: Date, default: null },
+    hostCancelledAt: { type: Date, default: null },
+
 
     // Social visibility (opt-in by guest)
     visibilityToFriends: { type: Boolean, default: false },
@@ -1208,6 +1315,110 @@ connectionSchema.index({ requesterId: 1, addresseeId: 1 }, { unique: true });
 const Connection = mongoose.models.Connection || mongoose.model("Connection", connectionSchema);
 
 // --- MIDDLEWARE ---
+
+async function maybeSendBookingConfirmedComms(booking) {
+  try {
+    if (booking && booking.guestConfirmedAt) return;
+
+    const b = booking || {};
+    const guestEmail = String(b.guestEmail || "").trim();
+    const guestName = String(b.guestName || "").trim();
+
+    const hostId = String(b.hostId || "").trim();
+    let hostDoc = null;
+    if (hostId.length > 0) {
+      hostDoc = await User.findById(hostId);
+    }
+    if ((hostDoc == null) && String(b.experienceId || "").trim().length > 0) {
+      const expDoc = await Experience.findById(String(b.experienceId || "").trim());
+      const expHostId = (expDoc && expDoc.hostId) ? String(expDoc.hostId).trim() : "";
+      if (expHostId.length > 0) {
+        hostDoc = await User.findById(expHostId);
+      }
+    }
+
+    if (guestEmail.length > 0) {
+      await sendEmail({
+        to: guestEmail,
+        subject: "Booking confirmed: " + String(b.experienceTitle || b.title || "").trim(),
+        html: bookingConfirmedGuestEmailHtml(b, { name: guestName }, hostDoc),
+      });
+    }
+
+    if (hostDoc && hostDoc.email) {
+      await sendEmail({
+        to: hostDoc.email,
+        subject: "New booking: " + String(b.experienceTitle || b.title || "").trim(),
+        html: bookingConfirmedHostEmailHtml(b, { name: guestName }, hostDoc),
+      });
+    }
+
+    const now = new Date();
+    const guestOk = (guestEmail.length > 0);
+    const hostOk = (hostDoc != null) && (hostDoc.email);
+    if (booking) {
+      if (guestOk) booking.guestConfirmedAt = booking.guestConfirmedAt || now;
+      if (hostOk) booking.hostConfirmedAt = booking.hostConfirmedAt || now;
+      await booking.save();
+    }
+  } catch (e) {
+    const msg = e && e.message ? e.message : String(e);
+    console.error("COMMS_CONFIRM_ERR", msg);
+  }
+}
+
+async function maybeSendBookingCancelledComms(booking) {
+  try {
+    if (booking && booking.guestCancelledAt) return;
+
+    const b = booking || {};
+    const guestEmail = String(b.guestEmail || "").trim();
+    const guestName = String(b.guestName || "").trim();
+
+    const hostId = String(b.hostId || "").trim();
+    let hostDoc = null;
+    if (hostId.length > 0) {
+      hostDoc = await User.findById(hostId);
+    }
+    if ((hostDoc == null) && String(b.experienceId || "").trim().length > 0) {
+      const expDoc = await Experience.findById(String(b.experienceId || "").trim());
+      const expHostId = (expDoc && expDoc.hostId) ? String(expDoc.hostId).trim() : "";
+      if (expHostId.length > 0) {
+        hostDoc = await User.findById(expHostId);
+      }
+    }
+
+    if (guestEmail.length > 0) {
+      await sendEmail({
+        to: guestEmail,
+        subject: "Booking cancelled: " + String(b.experienceTitle || b.title || "").trim(),
+        html: bookingCancelledGuestEmailHtml(b, { name: guestName }, hostDoc),
+      });
+    }
+
+    if (hostDoc && hostDoc.email) {
+      await sendEmail({
+        to: hostDoc.email,
+        subject: "Booking cancelled: " + String(b.experienceTitle || b.title || "").trim(),
+        html: bookingCancelledHostEmailHtml(b, { name: guestName }, hostDoc),
+      });
+    }
+
+    const now = new Date();
+    const guestOk = (guestEmail.length > 0);
+    const hostOk = (hostDoc != null) && (hostDoc.email);
+    if (booking) {
+      if (guestOk) booking.guestCancelledAt = booking.guestCancelledAt || now;
+      if (hostOk) booking.hostCancelledAt = booking.hostCancelledAt || now;
+      await booking.save();
+    }
+  } catch (e) {
+    const msg = e && e.message ? e.message : String(e);
+    console.error("COMMS_CANCEL_ERR", msg);
+  }
+}
+
+
 const JWT_SECRET = String(process.env.JWT_SECRET || "");
 
 function signToken(user) {
@@ -2193,6 +2404,7 @@ app.post("/api/bookings/verify", authMiddleware, async (req, res) => {
         await booking.save();
       }
     } catch (_) {}
+    await maybeSendBookingConfirmedComms(booking);
     return res.json({ status: "confirmed" });
   }
 
@@ -2262,6 +2474,7 @@ app.post("/api/bookings/verify", authMiddleware, async (req, res) => {
       if (snapWritten) await booking.save();
 
 
+      await maybeSendBookingConfirmedComms(booking);
       return res.json({ status: "confirmed" });
     }
 
@@ -2338,6 +2551,8 @@ app.post("/api/bookings/:id/cancel", authMiddleware, async (req, res) => {
       });
     }
 
+    const wasConfirmed = (String(booking.status || "") == "confirmed");
+
     booking.status = "cancelled";
     booking.cancellationReason = "User requested cancellation";
     booking.cancellation = { by: "guest", at: new Date(), reasonCode: "guest_cancel", note: "" };
@@ -2375,7 +2590,7 @@ app.post("/api/bookings/:id/cancel", authMiddleware, async (req, res) => {
 
     // If already paid and refund is due, initiate Stripe refund server-side (idempotent)
     try {
-      const isPaid = (booking.paymentStatus === "paid" || booking.status === "confirmed");
+      const isPaid = (booking.paymentStatus === "paid" || wasConfirmed);
       const pi = String(booking.stripePaymentIntentId || "");
       const alreadyHasRefund = booking.refundDecision && booking.refundDecision.stripeRefundId;
       if (isPaid && refundCents > 0 && pi && !alreadyHasRefund) {
@@ -2392,6 +2607,8 @@ app.post("/api/bookings/:id/cancel", authMiddleware, async (req, res) => {
     }
 
     await booking.save();
+
+    await maybeSendBookingCancelledComms(booking);
 
     return res.json({
       message: "Booking cancelled.",
@@ -2998,14 +3215,31 @@ async function runUnpaidBookingExpiryCleanupOnce_V1() {
 }
 
 function startUnpaidBookingExpiryCleanupLoop_V1() {
+  if (global.__tsts_unpaid_cleanup_started_v1 === true) return;
+  global.__tsts_unpaid_cleanup_started_v1 = true;
+
   try {
+    startJobs((level, msg, meta) => {
+      try { __log(level, msg, meta || {}); } catch (_) {}
+    });
+
+    setTimeout(() => {
+      runUnpaidBookingExpiryCleanupOnce_V1().catch(() => {});
+    }, 10 * 1000);
+
+    registerInterval(
+      "unpaid_booking_expiry_cleanup_v1",
+      () => runUnpaidBookingExpiryCleanupOnce_V1(),
+      60 * 1000
+    );
+  } catch (e) {
     setTimeout(() => { runUnpaidBookingExpiryCleanupOnce_V1().catch(() => {}); }, 10 * 1000);
     setInterval(() => { runUnpaidBookingExpiryCleanupOnce_V1().catch(() => {}); }, 60 * 1000);
-  } catch (_) {}
+  }
 }
 
 // Start unpaid expiry cleanup loop (safe + idempotent)
-startUnpaidBookingExpiryCleanupLoop_V1();
+// startUnpaidBookingExpiryCleanupLoop_V1(); // moved to db_connected
 
 
 

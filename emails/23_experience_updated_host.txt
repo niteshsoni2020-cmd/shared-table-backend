@@ -1,0 +1,11 @@
+Subject: Your experience was updated
+
+Hi {{HOST_NAME}},
+
+Your experience details were successfully updated.
+
+You can review the listing from your dashboard:
+{{DASHBOARD_URL}}
+
+Warmly,  
+The Shared Table Story

@@ -1,0 +1,17 @@
+Subject: Your booking request was sent
+
+Hi {{Name}},
+
+Your request to join the following experience has been sent to the host:
+
+Experience: {{EXPERIENCE_TITLE}}  
+Date: {{DATE}}  
+Time: {{TIME}}
+
+You’ll hear back once the host confirms.
+
+You can track the status from your dashboard:
+{{DASHBOARD_URL}}
+
+Warmly,  
+The Shared Table Story

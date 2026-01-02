@@ -1,0 +1,14 @@
+Subject: Your refund has been processed
+
+Hi {{Name}},
+
+Your refund has been processed.
+
+Amount: {{AMOUNT}}  
+Settlement time: 5–7 working days
+
+You can view details from your dashboard:
+{{DASHBOARD_URL}}
+
+Warmly,  
+The Shared Table Story

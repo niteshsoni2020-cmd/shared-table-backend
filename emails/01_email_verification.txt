@@ -1,0 +1,15 @@
+Subject: Verify your email
+
+Hi {{Name}},
+
+Welcome to The Shared Table Story.
+
+This is a place for experiences shared with intention — meals, walks, skills, and stories hosted by real people in small groups.
+
+Before you continue, please verify your email address:
+{{VERIFY_EMAIL_URL}}
+
+If you didn’t create this account, you can safely ignore this email.
+
+Warmly,  
+The Shared Table Story

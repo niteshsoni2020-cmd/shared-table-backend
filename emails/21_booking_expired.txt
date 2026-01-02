@@ -1,0 +1,11 @@
+Subject: Your booking request expired
+
+Hi {{Name}},
+
+Your booking request has expired due to incomplete payment.
+
+You can explore or request another experience anytime:
+{{DASHBOARD_URL}}
+
+Warmly,  
+The Shared Table Story

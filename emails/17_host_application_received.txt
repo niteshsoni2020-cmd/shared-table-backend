@@ -1,0 +1,13 @@
+Subject: We’ve received your host application
+
+Hi {{Name}},
+
+Thank you for applying to host on The Shared Table Story.
+
+We’re reviewing your submission and will be in touch soon.
+You can track updates from your dashboard.
+
+{{DASHBOARD_URL}}
+
+Warmly,  
+The Shared Table Story

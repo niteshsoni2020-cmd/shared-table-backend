@@ -1,0 +1,15 @@
+Subject: Your experience is coming up
+
+Hi {{HOST_NAME}},
+
+A reminder that your experience is scheduled soon.
+
+Experience: {{EXPERIENCE_TITLE}}  
+Date: {{DATE}}  
+Time: {{TIME}}
+
+You can review guest details from your dashboard:
+{{DASHBOARD_URL}}
+
+Warmly,  
+The Shared Table Story

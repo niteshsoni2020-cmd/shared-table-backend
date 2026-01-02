@@ -1,0 +1,15 @@
+Subject: Your booking receipt
+
+Hi {{Name}},
+
+Here’s a summary of your booking:
+
+Experience: {{EXPERIENCE_TITLE}}  
+Amount paid: {{AMOUNT}}  
+Date: {{DATE}}
+
+Your receipt is available from your dashboard:
+{{DASHBOARD_URL}}
+
+Warmly,  
+The Shared Table Story

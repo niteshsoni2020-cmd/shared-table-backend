@@ -1,0 +1,14 @@
+Subject: You’re all set
+
+Hi {{Name}},
+
+Your email is verified and your account is ready.
+
+From here, you can explore experiences, manage bookings, and keep track of upcoming plans — all from your dashboard.
+
+{{DASHBOARD_URL}}
+
+We’re glad you’re here.
+
+Warmly,  
+The Shared Table Story

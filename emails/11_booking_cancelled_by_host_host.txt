@@ -1,0 +1,17 @@
+Subject: Your experience has been cancelled
+
+Hi {{HOST_NAME}},
+
+This confirms the cancellation of your experience.
+
+Experience: {{EXPERIENCE_TITLE}}  
+Date: {{DATE}}  
+Time: {{TIME}}
+
+Guests have been notified and any required payment reversals will be handled.
+
+You can manage future listings from your dashboard:
+{{DASHBOARD_URL}}
+
+Warmly,  
+The Shared Table Story

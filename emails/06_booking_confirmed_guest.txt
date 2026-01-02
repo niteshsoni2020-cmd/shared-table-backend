@@ -1,0 +1,18 @@
+Subject: Your booking is confirmed
+
+Hi {{Name}},
+
+Your booking is confirmed.
+
+Experience: {{EXPERIENCE_TITLE}}  
+Date: {{DATE}}  
+Time: {{TIME}}  
+Host: {{HOST_NAME}}
+
+You can view details or make changes from your dashboard:
+{{DASHBOARD_URL}}
+
+We look forward to this experience being shared.
+
+Warmly,  
+The Shared Table Story

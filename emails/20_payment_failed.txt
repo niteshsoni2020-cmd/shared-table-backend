@@ -1,0 +1,13 @@
+Subject: Payment issue with your booking
+
+Hi {{Name}},
+
+We weren’t able to process the payment for your booking.
+
+You can update your payment method from your dashboard:
+{{DASHBOARD_URL}}
+
+If no action is taken, the booking may expire.
+
+Warmly,  
+The Shared Table Story

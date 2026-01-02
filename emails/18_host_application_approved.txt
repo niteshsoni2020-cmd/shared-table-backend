@@ -1,0 +1,13 @@
+Subject: You’re approved to host
+
+Hi {{Name}},
+
+Your host application has been approved.
+
+You can now create and manage experiences from your dashboard:
+{{DASHBOARD_URL}}
+
+We’re glad to have you hosting.
+
+Warmly,  
+The Shared Table Story

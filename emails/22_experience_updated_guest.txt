@@ -1,0 +1,11 @@
+Subject: An experience you booked was updated
+
+Hi {{Name}},
+
+Details for an experience you booked have been updated.
+
+You can review the changes from your dashboard:
+{{DASHBOARD_URL}}
+
+Warmly,  
+The Shared Table Story

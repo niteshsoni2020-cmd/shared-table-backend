@@ -1,0 +1,11 @@
+Subject: Your payout has been processed
+
+Hi {{HOST_NAME}},
+
+Your payout for a completed experience has been processed.
+
+You can view payout details from your dashboard:
+{{DASHBOARD_URL}}
+
+Warmly,  
+The Shared Table Story

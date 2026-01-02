@@ -1,0 +1,13 @@
+Subject: You received new feedback
+
+Hi {{HOST_NAME}},
+
+A guest has shared feedback for your experience.
+
+You can view it from your dashboard:
+{{DASHBOARD_URL}}
+
+Thank you for hosting with care.
+
+Warmly,  
+The Shared Table Story

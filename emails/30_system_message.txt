@@ -1,0 +1,11 @@
+Subject: Update from The Shared Table Story
+
+Hi {{Name}},
+
+We’ve shared an update regarding your recent request.
+
+You can view details from your dashboard:
+{{DASHBOARD_URL}}
+
+Warmly,  
+The Shared Table Story

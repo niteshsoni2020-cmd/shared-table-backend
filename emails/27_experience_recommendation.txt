@@ -1,0 +1,13 @@
+Subject: An experience you might enjoy
+
+Hi {{Name}},
+
+We thought you might be interested in this experience:
+
+{{EXPERIENCE_TITLE}}
+
+You can view details from your dashboard:
+{{DASHBOARD_URL}}
+
+Warmly,  
+The Shared Table Story

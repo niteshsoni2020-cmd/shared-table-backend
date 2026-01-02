@@ -1,0 +1,16 @@
+Subject: How was your experience?
+
+Hi {{Name}},
+
+We hope you enjoyed your experience.
+
+When you’re ready, we’d love to hear how it felt for you.
+Your feedback helps hosts and future guests.
+
+{{REVIEW_URL}}
+
+You can also view your past experiences from your dashboard:
+{{DASHBOARD_URL}}
+
+Warmly,  
+The Shared Table Story

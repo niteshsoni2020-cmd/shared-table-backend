@@ -1,0 +1,11 @@
+Subject: Your account is active again
+
+Hi {{Name}},
+
+Your account has been reactivated.
+
+You can continue using the platform as usual:
+{{DASHBOARD_URL}}
+
+Warmly,  
+The Shared Table Story

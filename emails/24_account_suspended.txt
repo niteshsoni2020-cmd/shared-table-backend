@@ -1,0 +1,11 @@
+Subject: Account notice
+
+Hi {{Name}},
+
+Your account has been temporarily restricted.
+
+For details and next steps, please check your dashboard:
+{{DASHBOARD_URL}}
+
+Warmly,  
+The Shared Table Story

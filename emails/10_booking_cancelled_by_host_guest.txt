@@ -1,0 +1,18 @@
+Subject: Your experience was cancelled by the host
+
+Hi {{Name}},
+
+The host has cancelled the following experience:
+
+Experience: {{EXPERIENCE_TITLE}}  
+Date: {{DATE}}  
+Time: {{TIME}}
+
+If payment was collected, it will be reversed to your original payment method.
+Refunds typically settle within 5–7 working days.
+
+You can explore other experiences anytime:
+{{DASHBOARD_URL}}
+
+Warmly,  
+The Shared Table Story

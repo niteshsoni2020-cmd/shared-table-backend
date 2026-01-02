@@ -1,0 +1,14 @@
+Subject: Regarding your host application
+
+Hi {{Name}},
+
+Thank you for applying to host on The Shared Table Story.
+
+At this time, we’re unable to move forward with your application.
+You’re welcome to apply again in the future.
+
+You can continue exploring experiences as a guest:
+{{DASHBOARD_URL}}
+
+Warmly,  
+The Shared Table Story

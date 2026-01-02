@@ -1,0 +1,18 @@
+Subject: Your booking was cancelled
+
+Hi {{Name}},
+
+Your booking has been cancelled.
+
+Experience: {{EXPERIENCE_TITLE}}  
+Date: {{DATE}}  
+Time: {{TIME}}
+
+Any applicable refund will be processed according to the experience policy.
+If a refund applies, it will be settled to your original payment method within 5–7 working days.
+
+You can review details from your dashboard:
+{{DASHBOARD_URL}}
+
+Warmly,  
+The Shared Table Story

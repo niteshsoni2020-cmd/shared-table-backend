@@ -1,0 +1,15 @@
+Subject: Your experience is coming up
+
+Hi {{Name}},
+
+This is a reminder for your upcoming experience.
+
+Experience: {{EXPERIENCE_TITLE}}  
+Date: {{DATE}}  
+Time: {{TIME}}
+
+You can review details anytime:
+{{DASHBOARD_URL}}
+
+Warmly,  
+The Shared Table Story
