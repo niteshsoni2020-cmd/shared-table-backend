@@ -2489,7 +2489,7 @@ app.post("/api/experiences/:id/book", authMiddleware, async (req, res) => {
         },
       ],
       mode: "payment",
-      success_url: `${baseUrl}/success.html?session_id={CHECKOUT_SESSION_ID}&booking_id=${booking._id}`,
+      success_url: `${baseUrl}/success.html?sessionId={CHECKOUT_SESSION_ID}&bookingId=${booking._id}`,
       cancel_url: `${baseUrl}/experience.html?id=${exp._id}`,
     });
 
