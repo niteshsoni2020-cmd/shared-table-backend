@@ -1946,10 +1946,18 @@ app.get("/api/host/bookings/:experienceId", authMiddleware, async (req, res) => 
     const hostId = String(req.user._id);
     const experienceId = req.params.experienceId;
     const bookings = await Booking.find({ hostId, experienceId })
+      .select("-guestEmail")
       .populate("experience", "title images price imageUrl city")
       .populate("guestId", "name profilePic handle publicProfile") // mobile NOT included
       .sort({ bookingDate: 1 });
-    res.json(bookings);
+
+    const out = bookings.map((b) => {
+      const o = (b && typeof b.toObject === "function") ? b.toObject() : b;
+      if (o && typeof o === "object") delete o.guestEmail;
+      return o;
+    });
+
+    res.json(out);
   } catch (err) {
     res.status(500).json({ message: "Server error" });
   }
