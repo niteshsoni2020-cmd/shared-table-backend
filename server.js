@@ -3344,21 +3344,17 @@ async function transitionBooking(booking, nextStatus, meta = {}) {
   }
 
   if (nextStatus === "cancelled") {
-
+    updates.guestCancelledAt = booking.guestCancelledAt || now;
+  }
   if (nextStatus === "cancelled_by_host") {
     updates.hostCancelledAt = booking.hostCancelledAt || now;
   }
 
-    updates.guestCancelledAt = booking.guestCancelledAt || now;
-  }
-
   if (nextStatus === "expired") {
-
+    updates.expiredAt = booking.expiredAt || now;
+  }
   if (nextStatus === "refunded") {
     updates.refundedAt = booking.refundedAt || now;
-  }
-
-    updates.expiredAt = booking.expiredAt || now;
   }
 
   await booking.updateOne({ $set: updates });
