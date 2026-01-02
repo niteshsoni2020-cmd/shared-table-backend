@@ -3315,10 +3315,41 @@ function startUnpaidBookingExpiryCleanupLoop_V1() {
 
 // TSTS_VERSION_ENDPOINT
 app.get("/version", (req, res) => {
-  res.status(200).json({ service: "shared-table-api", sha: String(process.env.RENDER_GIT_COMMIT || process.env.GIT_SHA || "unknown") });
+  const sha =
+    String(process.env.RENDER_GIT_COMMIT || "") ||
+    String(process.env.GIT_SHA || "") ||
+    String(process.env.COMMIT_SHA || "") ||
+    "unknown";
+  return res.json({ service: "shared-table-api", sha });
 });
 app.get("/health", (req, res) => {
-  res.status(200).json({ status: "ok", uptime: process.uptime() });
+  try {
+    const uptime = process.uptime();
+
+    let dbReady = false;
+    try {
+      dbReady = !!(mongoose && mongoose.connection && mongoose.connection.readyState === 1);
+    } catch (e) {
+      dbReady = false;
+    }
+
+    const stripeReady = !!process.env.STRIPE_SECRET_KEY && !!process.env.STRIPE_WEBHOOK_SECRET;
+    const mailReady = !!process.env.SMTP_HOST && !!process.env.SMTP_USER && !!process.env.SMTP_PASS;
+
+    const ok = dbReady && stripeReady && mailReady;
+
+    return res.status(ok ? 200 : 503).json({
+      status: ok ? "ok" : "degraded",
+      uptime,
+      deps: {
+        db: dbReady ? "ok" : "down",
+        stripe: stripeReady ? "ok" : "missing_env",
+        mail: mailReady ? "ok" : "missing_env"
+      }
+    });
+  } catch (e) {
+    return res.status(500).json({ status: "error" });
+  }
 });
 
 app.listen(PORT, () => { __log("info", "server_listen", { rid: undefined, path: undefined }); });
