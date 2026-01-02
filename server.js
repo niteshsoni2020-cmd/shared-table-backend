@@ -3182,8 +3182,24 @@ app.put("/api/bookings/:id/visibility", authMiddleware, async (req, res) => {
 // Social: connect
 app.post("/api/social/connect", authMiddleware, async (req, res) => {
   try {
-    const targetUserId = String((req.body && req.body.targetUserId) || "").trim();
-    const handle = normalizeHandle((req.body && req.body.handle) || "");
+    const __toStr = (v) => String(v || "").trim();
+
+    let targetUserId = __toStr((req.body && req.body.targetUserId) || "");
+    let handle = normalizeHandle((req.body && req.body.handle) || "");
+
+    if (targetUserId) {
+      const okId = (mongoose && mongoose.Types && mongoose.Types.ObjectId && mongoose.Types.ObjectId.isValid)
+        ? mongoose.Types.ObjectId.isValid(targetUserId)
+        : false;
+      if (!okId) return res.status(400).json({ message: "Invalid targetUserId." });
+    }
+
+    if (handle) {
+      handle = __toStr(handle);
+      if (handle.length > 32) handle = handle.slice(0, 32);
+    }
+
+    if (!targetUserId && !handle) return res.status(400).json({ message: "targetUserId or handle required." });
 
     let target = null;
     if (targetUserId) target = await User.findById(targetUserId);
