@@ -2394,9 +2394,12 @@ app.get("/api/experiences/:id/attendees", authMiddleware, async (req, res) => {
 // Booking: Create + Stripe checkout
 app.post("/api/experiences/:id/book", authMiddleware, async (req, res) => {
   const exp = await Experience.findById(req.params.id);
-    if (!exp) return res.status(404).json({ message: "Experience not found" });
-
-  if (exp.hostId === String(req.user._id)) return res.status(400).json({ message: "No self-booking." });
+  if (!exp) return res.status(404).json({ message: "Experience not found" });
+  const meId = String(((req.user && (req.user._id || req.user.id)) || (req.user && req.user.userId) || ""));
+  const hostId = String(exp.hostId || "");
+  if (meId && hostId && meId === hostId) {
+    return res.status(403).json({ message: "Hosts cannot book their own experience." });
+  }
 
   const { numGuests, isPrivate, bookingDate, timeSlot, guestNotes } = req.body || {};
   const guests = Number.parseInt(numGuests, 10) || 1;
