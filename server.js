@@ -2654,6 +2654,12 @@ startUnpaidBookingExpiryCleanupLoop_V1();
 
 
 // Health check (production-safe)
+
+
+// TSTS_VERSION_ENDPOINT
+app.get("/version", (req, res) => {
+  res.status(200).json({ service: "shared-table-api", sha: String(process.env.RENDER_GIT_COMMIT || process.env.GIT_SHA || "unknown") });
+});
 app.get("/health", (req, res) => {
   res.status(200).json({ status: "ok", uptime: process.uptime() });
 });
