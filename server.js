@@ -2149,6 +2149,42 @@ app.put("/api/auth/update", authMiddleware, async (req, res) => {
     const updates = {};
     for (const k of allowed) if (Object.prototype.hasOwnProperty.call(body, k)) updates[k] = body[k];
 
+    const __toBool = (v) => {
+      if (typeof v === "boolean") return v;
+      const x = String(v || "").toLowerCase().trim();
+      if (x === "true" || x === "1" || x === "yes" || x === "y") return true;
+      if (x === "false" || x === "0" || x === "no" || x === "n") return false;
+      return !!v;
+    };
+
+    const __scrubMongoKeys = (val, depth) => {
+      const d = typeof depth === "number" ? depth : 0;
+      if (d > 6) return null;
+      if (!val || typeof val !== "object") return val;
+      if (Array.isArray(val)) return val.map((x) => __scrubMongoKeys(x, d + 1));
+      const out = {};
+      for (const k of Object.keys(val)) {
+        if (!k) continue;
+        if (k[0] === "$") continue;
+        if (k.indexOf(".") !== -1) continue;
+        out[k] = __scrubMongoKeys(val[k], d + 1);
+      }
+      return out;
+    };
+
+    if (typeof updates.name !== "undefined") updates.name = String(updates.name || "").trim();
+    if (typeof updates.bio !== "undefined") updates.bio = String(updates.bio || "").trim();
+    if (typeof updates.location !== "undefined") updates.location = String(updates.location || "").trim();
+    if (typeof updates.mobile !== "undefined") updates.mobile = String(updates.mobile || "").trim();
+
+    if (typeof updates.allowHandleSearch !== "undefined") updates.allowHandleSearch = __toBool(updates.allowHandleSearch);
+    if (typeof updates.showExperiencesToFriends !== "undefined") updates.showExperiencesToFriends = __toBool(updates.showExperiencesToFriends);
+    if (typeof updates.publicProfile !== "undefined") updates.publicProfile = __toBool(updates.publicProfile);
+
+    if (typeof updates.preferences !== "undefined") {
+      updates.preferences = __scrubMongoKeys(updates.preferences, 0);
+    }
+
     if (typeof updates.handle !== "undefined") {
       updates.handle = normalizeHandle(updates.handle);
       if (!updates.handle) delete updates.handle;
