@@ -2413,7 +2413,11 @@ app.put("/api/experiences/:id", authMiddleware, async (req, res) => {
     if (typeof updates.state !== "undefined") updates.state = __toStr(updates.state);
     if (typeof updates.country !== "undefined") updates.country = __toStr(updates.country);
     if (typeof updates.suburb !== "undefined") updates.suburb = __toStr(updates.suburb);
-    if (typeof updates.postcode !== "undefined") updates.postcode = __toStr(updates.postcode);
+    if (typeof updates.postcode !== "undefined") {
+      const pc = __toStr(updates.postcode);
+      if (!/^[0-9]{4}$/.test(pc)) delete updates.postcode;
+      else updates.postcode = pc;
+    }
     if (typeof updates.addressLine !== "undefined") updates.addressLine = __toStr(updates.addressLine);
     if (typeof updates.addressNotes !== "undefined") updates.addressNotes = __toStr(updates.addressNotes);
 
@@ -2475,6 +2479,7 @@ app.put("/api/experiences/:id", authMiddleware, async (req, res) => {
       let newTags = [];
       if (Array.isArray(tags)) newTags = tags;
       else if (tags) newTags = [tags];
+      newTags = newTags.map((t) => __toStr(t)).filter((t) => t);
       newTags = [...new Set(newTags.filter((t) => CATEGORY_PILLARS.includes(t)))];
       exp.tags = newTags;
     }
@@ -2482,10 +2487,12 @@ app.put("/api/experiences/:id", authMiddleware, async (req, res) => {
     Object.assign(exp, updates);
 
     if (typeof images !== "undefined") {
-      if (Array.isArray(images)) {
-        exp.images = images;
-        exp.imageUrl = images[0] || "";
-      }
+      let newImages = [];
+      if (Array.isArray(images)) newImages = images;
+      else if (images) newImages = [images];
+      newImages = newImages.map((u) => __toStr(u)).filter((u) => u);
+      exp.images = newImages;
+      exp.imageUrl = newImages[0] || "";
     }
 
     await exp.save();
