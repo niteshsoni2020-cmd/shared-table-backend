@@ -2256,6 +2256,32 @@ app.post("/api/experiences", authMiddleware, async (req, res) => {
   try {
     const body = req.body || {};
 
+    // Business rules (mirror UPDATE route hardening)
+    const __toNum = (v) => { const n = Number(v); return Number.isFinite(n) ? n : NaN; };
+    const __toInt = (v) => { const n = parseInt(String(v), 10); return Number.isFinite(n) ? n : NaN; };
+    const __dateRe = /^[0-9]{4}-[0-9]{2}-[0-9]{2}$/;
+    
+    if (Object.prototype.hasOwnProperty.call(body, "price")) {
+      const n = __toNum(body.price);
+      if (!Number.isFinite(n) || n <= 0) return res.status(400).json({ message: "Invalid price" });
+      body.price = n;
+    }
+    if (Object.prototype.hasOwnProperty.call(body, "capacity")) {
+      const n = __toInt(body.capacity);
+      if (!Number.isFinite(n) || n < 1) return res.status(400).json({ message: "Invalid capacity" });
+      body.capacity = n;
+    }
+    if (Object.prototype.hasOwnProperty.call(body, "startDate")) {
+      const sd = String(body.startDate || "").trim();
+      if (!__dateRe.test(sd)) return res.status(400).json({ message: "Invalid startDate" });
+      body.startDate = sd;
+    }
+    if (Object.prototype.hasOwnProperty.call(body, "endDate")) {
+      const ed = String(body.endDate || "").trim();
+      if (!__dateRe.test(ed)) return res.status(400).json({ message: "Invalid endDate" });
+      body.endDate = ed;
+    }
+    
     if (__isPlainObject(body) === false) return res.status(400).json({ message: "Invalid payload" });
     const protoKeys = ["__proto__", "constructor", "prototype"];
     for (const k of Object.keys(body)) {
