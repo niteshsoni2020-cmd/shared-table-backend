@@ -1680,7 +1680,7 @@ app.post("/api/policy/publish", adminMiddleware, async (req, res) => {
 
     const activeDoc = shouldActivate ? (draft.toObject ? draft.toObject() : draft) : await getActivePolicyDoc();
 
-    return res.json({ ok: true, active: policySnapshotFromDoc(activeDoc), published: policySnapshotFromDoc(draft.toObject()), activated: shouldActivate });
+    return res.json({ ok: true, active: policySnapshotFromDoc(activeDoc) });
   } catch (e) {
     return res.status(500).json({ message: "Server error" });
   }
