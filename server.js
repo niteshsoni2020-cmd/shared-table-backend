@@ -611,9 +611,10 @@ app.use(express.urlencoded({ extended: true, limit: "200kb" }));
 // - Reject non-object JSON bodies for write endpoints.
 // - Parser limits above protect payload size.
 function __isPlainObject(x) {
-  const isObj = (x !== null) && (typeof x === "object");
-  const isArr = Array.isArray(x) === true;
-  return isObj && (isArr === false);
+  if (x === null || typeof x !== "object") return false;
+  if (Array.isArray(x)) return false;
+  const proto = Object.getPrototypeOf(x);
+  return proto === Object.prototype || proto === null;
 }
 function __cleanId(x, maxLen) {
   const v = String((x === null || x === undefined) ? "" : x).trim();
