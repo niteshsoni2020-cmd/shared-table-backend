@@ -1998,13 +1998,36 @@ app.post("/api/auth/register", registerLimiter, async (req, res) => {
     if (typeof body.handle !== "undefined") body.handle = String(body.handle || "").trim().toLowerCase();
     if (typeof body.email !== "undefined") body.email = String(body.email).toLowerCase().trim();
 
-    if (!body.email || !body.password) return res.status(400).json({ message: "Email and password required" });
-    if (await User.findOne({ email: body.email })) return res.status(400).json({ message: "Taken" });
+
+
+    const __isPlainObject = (v) => {
+      if (!v || typeof v !== "object") return false;
+      const proto = Object.getPrototypeOf(v);
+      return proto === Object.prototype || proto === null;
+    };
+
+    if (!__isPlainObject(body)) return res.status(400).json({ message: "Invalid payload" });
+    const protoKeys = ["__proto__", "constructor", "prototype"]; 
+    for (const k of Object.keys(body)) {
+      if (protoKeys.includes(String(k))) return res.status(400).json({ message: "Invalid payload" });
+    }
+
+    const allowedFields = ["name", "email", "handle", "mobile", "profilePic"]; 
+    const clean = {};
+    for (const k of allowedFields) {
+      if (Object.prototype.hasOwnProperty.call(body, k) && typeof body[k] !== "undefined") clean[k] = body[k];
+    }
+    if (typeof clean.handle !== "undefined") clean.handle = String(clean.handle || "").trim().toLowerCase();
+    if (typeof clean.email !== "undefined") clean.email = String(clean.email).toLowerCase().trim();
+    const emailNorm = String(body.email || "").toLowerCase().trim();
+    if (!emailNorm || !body.password) return res.status(400).json({ message: "Email and password required" });
+    if (await User.findOne({ email: emailNorm })) return res.status(400).json({ message: "Taken" });
 
     const hashedPassword = await bcrypt.hash(String(body.password), 10);
+    clean.email = emailNorm;
 
     const user = new User({
-      ...body,
+      ...clean,
       password: hashedPassword,
       role: "Guest",
       notifications: [{ message: "Welcome", type: "success" }],
