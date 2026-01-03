@@ -2451,8 +2451,24 @@ app.post("/api/auth/forgot-password", forgotPasswordLimiter, async (req, res) =>
       }
 
       // DEV-only escape hatch (no official email yet)
-      if (String(process.env.RETURN_RESET_TOKEN || "") === "true") {
-        return res.json({ ok: true, message: "If an account exists, you will receive instructions.", dev: { resetUrl } });
+      // Controlled debug escape hatch (operators only)
+      // Enable by setting RESET_DEBUG_SECRET (>=24 chars) and sending header X-Reset-Debug-Secret
+      // Normal clients never receive tokens/links.
+      const __dbgSecret = String(process.env.RESET_DEBUG_SECRET || "").trim();
+      const __dbgHeader = String((req.headers && (req.headers["x-reset-debug-secret"] || req.headers["X-Reset-Debug-Secret"])) || "").trim();
+      if (__dbgSecret.length >= 24 && __dbgHeader) {
+        const a = __dbgSecret;
+        const b = __dbgHeader;
+        const n = (a.length > b.length) ? a.length : b.length;
+        let acc = 0;
+        for (let idx = 0; idx < n; idx++) {
+          const ca = (idx < a.length) ? a.charCodeAt(idx) : 0;
+          const cb = (idx < b.length) ? b.charCodeAt(idx) : 0;
+          acc = acc | (ca ^ cb);
+        }
+        if (a.length === b.length && acc === 0) {
+          return res.json({ ok: true, message: "If an account exists, you will receive instructions.", dev: { resetUrl } });
+        }
       }
     }
 
