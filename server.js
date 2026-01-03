@@ -2472,6 +2472,28 @@ app.post("/api/auth/forgot-password", forgotPasswordLimiter, async (req, res) =>
       }
     }
 
+      // Operator diagnostics (non-sensitive): only emitted if X-Reset-Debug-Secret header is present
+      // Helps verify Render env + header wiring without leaking secrets.
+      try {
+        const __hdrPresent = !!(req.headers && (req.headers["x-reset-debug-secret"] || req.headers["X-Reset-Debug-Secret"]));
+        if (__hdrPresent) {
+          const __s0 = String(process.env.RESET_DEBUG_SECRET || "").trim();
+          const __h0 = String((req.headers && (req.headers["x-reset-debug-secret"] || req.headers["X-Reset-Debug-Secret"])) || "").trim();
+          const __minLenOk = (__s0.length >= 24);
+          const a = __s0;
+          const b = __h0;
+          const n = (a.length > b.length) ? a.length : b.length;
+          let acc = 0;
+          for (let idx = 0; idx < n; idx++) {
+            const ca = (idx < a.length) ? a.charCodeAt(idx) : 0;
+            const cb = (idx < b.length) ? b.charCodeAt(idx) : 0;
+            acc = acc | (ca ^ cb);
+          }
+          const __match = (a.length === b.length && acc === 0);
+          return res.json({ ok: true, message: "If an account exists, you will receive instructions.", dbg: { hdrPresent: true, envPresent: (__s0.length > 0), minLenOk: __minLenOk, match: __match } });
+        }
+      } catch (e) {}
+
     return res.json({ ok: true, message: "If an account exists, you will receive instructions." });
   } catch (e) {
     return res.json({ ok: true, message: "If an account exists, you will receive instructions." });
