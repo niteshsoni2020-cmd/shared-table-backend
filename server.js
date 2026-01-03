@@ -3087,7 +3087,11 @@ app.post("/api/bookings/verify", async (req, res) => {
   const sid = __cleanId(((req.body || {}).sessionId), 120);
   if (bid.length === 0) return res.status(400).json({ status: "invalid_booking_id" });
   if (sid.length === 0) return res.status(400).json({ status: "invalid_session_id" });
-  const { bookingId, sessionId } = req.body || {};
+  const bookingId = bid;
+  const sessionId = sid;
+  if (!(mongoose && mongoose.Types && mongoose.Types.ObjectId && mongoose.Types.ObjectId.isValid && mongoose.Types.ObjectId.isValid(bookingId))) {
+    return res.status(400).json({ status: "invalid_booking_id" });
+  }
   const booking = await Booking.findById(bookingId);
   if (!booking) return res.json({ status: "not_found" });
   const me = String(((req.user && (req.user._id || req.user.id)) || (req.user && req.user.userId) || ""));
