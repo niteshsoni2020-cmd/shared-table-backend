@@ -2126,8 +2126,13 @@ app.post("/api/auth/forgot-password", forgotPasswordLimiter, async (req, res) =>
       const frontendBase = String(process.env.FRONTEND_BASE_URL || "http://localhost:3000").replace(/\/$/, "");
       const resetUrl = `${frontendBase}/reset-password?email=${encodeURIComponent(email)}&token=${encodeURIComponent(token)}`;
       if (canEmail) {
-        // Do not fail the endpoint if email fails
-        await sendEmail({ to: email, subject: "Reset your password", html: resetPasswordEmailHtml(resetUrl), text: "Reset your password link (valid 30 minutes): " + String(resetUrl || "") });
+        // Do not block the HTTP response on email delivery (email can hang on misconfig)
+        try {
+          const __p = sendEmail({ to: email, subject: "Reset your password", html: resetPasswordEmailHtml(resetUrl), text: "Reset your password link (valid 30 minutes): " + String(resetUrl || "") });
+          const __t = new Promise((_, rej) => setTimeout(() => rej(new Error("email_timeout")), 6000));
+          Promise.race([__p, __t]).catch(() => {});
+        } catch (e) {
+        }
       }
 
       // DEV-only escape hatch (no official email yet)
