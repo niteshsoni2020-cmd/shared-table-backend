@@ -2304,6 +2304,7 @@ app.put("/api/experiences/:id", authMiddleware, async (req, res) => {
     if (!exp || exp.hostId !== String(req.user._id)) return res.status(403).json({ message: "No" });
 
     const body = req.body || {};
+    if (__isPlainObject(body) === false) return res.status(400).json({ message: "Invalid payload" });
     const { images, tags } = body;
 
     const allowed = [
@@ -2356,13 +2357,16 @@ app.put("/api/experiences/:id", authMiddleware, async (req, res) => {
     const __scrubMongoKeys = (val, depth) => {
       const d = typeof depth === "number" ? depth : 0;
       if (d > 6) return null;
-      if (!val || typeof val !== "object") return val;
+      if (val === null || typeof val === "undefined") return val;
+      if (typeof val !== "object") return val;
       if (Array.isArray(val)) return val.map((x) => __scrubMongoKeys(x, d + 1));
+      if (__isPlainObject(val) === false) return null;
       const out = {};
       for (const k of Object.keys(val)) {
         if (!k) continue;
         if (k[0] === "$") continue;
         if (k.indexOf(".") !== -1) continue;
+        if (k === "__proto__" || k === "constructor" || k === "prototype") continue;
         out[k] = __scrubMongoKeys(val[k], d + 1);
       }
       return out;
@@ -2429,6 +2433,7 @@ app.put("/api/experiences/:id", authMiddleware, async (req, res) => {
 
     if (typeof updates.preferences !== "undefined") {
       updates.preferences = __scrubMongoKeys(updates.preferences, 0);
+      if (__isPlainObject(updates.preferences) === false) delete updates.preferences;
     }
 
     if (typeof tags !== "undefined") {
