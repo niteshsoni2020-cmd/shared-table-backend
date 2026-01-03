@@ -3047,7 +3047,8 @@ app.get("/api/experiences/:id/reviews", async (req, res) => {
 // --- Likes --- (toggle + count)
 app.post("/api/experiences/:id/like", authMiddleware, async (req, res) => {
   try {
-    const expId = String(req.params.id);
+    const expId = __cleanId(req.params.id, 64);
+    if (!expId) return res.status(400).json({ message: "Invalid experienceId" });
     const existing = await ExperienceLike.findOne({ experienceId: expId, userId: req.user._id });
     if (existing) {
       await ExperienceLike.findByIdAndDelete(existing._id);
@@ -3064,7 +3065,8 @@ app.post("/api/experiences/:id/like", authMiddleware, async (req, res) => {
 
 app.get("/api/experiences/:id/like", authMiddleware, async (req, res) => {
   try {
-    const expId = String(req.params.id);
+    const expId = __cleanId(req.params.id, 64);
+    if (!expId) return res.status(400).json({ message: "Invalid experienceId" });
     const liked = !!(await ExperienceLike.findOne({ experienceId: expId, userId: req.user._id }));
     const count = await ExperienceLike.countDocuments({ experienceId: expId });
     return res.json({ liked, count });
