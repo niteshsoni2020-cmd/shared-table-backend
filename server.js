@@ -1546,6 +1546,15 @@ async function maybeSendBookingExpiredComms(booking) {
 
 
 const JWT_SECRET = String(process.env.JWT_SECRET || "");
+function __passwordPolicyOk(pw) {
+  const p = String(pw || "");
+  if (p.length < 12) return { ok: false, reason: "Password must be at least 12 characters." };
+  if (!/[a-z]/.test(p)) return { ok: false, reason: "Password must include a lowercase letter." };
+  if (!/[A-Z]/.test(p)) return { ok: false, reason: "Password must include an uppercase letter." };
+  if (!/[0-9]/.test(p)) return { ok: false, reason: "Password must include a number." };
+  return { ok: true };
+}
+
 
 function signToken(user) {
   if (!JWT_SECRET) throw new Error("Missing JWT_SECRET");
@@ -2159,6 +2168,8 @@ app.post("/api/auth/reset-password", resetPasswordLimiter, async (req, res) => {
       return res.status(400).json({ message: "Invalid or expired token" });
     }
 
+    const __pp2 = __passwordPolicyOk(((req.body && (req.body.password || req.body.newPassword)) || ""));
+    if (!__pp2.ok) return res.status(400).json({ message: __pp2.reason, code: "password_policy_reset" });
     user.password = await bcrypt.hash(newPasswordRaw, 10);
     user.passwordResetTokenHash = "";
     user.passwordResetExpiresAt = null;
