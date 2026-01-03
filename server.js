@@ -3000,7 +3000,13 @@ app.post("/api/bookings/:id/cancel", authMiddleware, async (req, res) => {
 
 // Reviews
 app.post("/api/reviews", authMiddleware, async (req, res) => {
-  const { experienceId, bookingId, rating, comment, type, targetId } = req.body || {};
+  const body = req.body || {};
+  if (__isPlainObject(body) === false) return res.status(400).json({ message: "Invalid payload" });
+  if (Object.prototype.hasOwnProperty.call(body, "__proto__") || Object.prototype.hasOwnProperty.call(body, "constructor") || Object.prototype.hasOwnProperty.call(body, "prototype")) {
+    return res.status(400).json({ message: "Invalid payload" });
+  }
+
+  const { experienceId, bookingId, rating, comment, type, targetId } = body;
   const reviewType = type || "guest_to_host";
 
   if (await Review.findOne({ bookingId, authorId: req.user._id })) return res.status(400).json({ message: "Duplicate" });
