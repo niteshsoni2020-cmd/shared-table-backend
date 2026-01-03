@@ -3038,7 +3038,9 @@ app.post("/api/reviews", authMiddleware, async (req, res) => {
 });
 
 app.get("/api/experiences/:id/reviews", async (req, res) => {
-  const reviews = await Review.find({ experienceId: req.params.id, type: "guest_to_host" }).sort({ date: -1 });
+  const expId = __cleanId(req.params.id, 64);
+  if (!expId) return res.status(400).json({ message: "Invalid experienceId" });
+  const reviews = await Review.find({ experienceId: expId, type: "guest_to_host" }).sort({ date: -1 });
   res.json(reviews);
 });
 
