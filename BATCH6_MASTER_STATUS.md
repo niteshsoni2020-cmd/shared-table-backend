@@ -1,7 +1,7 @@
 # TSTS Backend — Batch-6 Master Launch Gate Status Ledger
 
-- Generated: 2026-01-03T22:23:17
-- Git SHA: 16293fe
+- Generated: 2026-01-03T22:34:38
+- Git SHA: adb9b5764ea2d983281ad9910805c9f531a87487
 - Truth plane: server.js, seed.js, package.json (no assumptions)
 
 ## Checklist rows (machine-generated evidence)
@@ -13,7 +13,7 @@
 | A3 | Password policy | NO | - | YES requires min-length plus confirm enforcement |
 | A4 | Session revocation | NO | - | YES requires server-side revocation mechanism |
 | A5 | Token governance | PARTIAL | L1553 | PARTIAL if expiry exists but no versioning |
-| A6 | Role safety | PARTIAL | L1033,1761,1769,2058,3484 | NO if role or admin flags can be client-provided |
+| A6 | Role safety | YES | L1033,1551,1607,2058,2261 | YES only if privilege fields cannot be client-provided and token claims are not trusted |
 | B1 | Confirm authority | YES | L50,311,315,316,317,3099 | YES requires webhook stores-only plus verify confirms plus idempotency guard |
 | B2 | Payment states | PARTIAL | L473,531,532,1115,1117 | YES requires failed plus abandoned plus succeeded or confirmed modeling |
 | B3 | Refund safety | PARTIAL | L541,550,557,1171,3360 | YES requires explicit refund states |
