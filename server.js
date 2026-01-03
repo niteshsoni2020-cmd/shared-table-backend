@@ -1574,7 +1574,7 @@ async function authMiddleware(req, res, next) {
     if (!user) return res.status(401).json({ message: "User not found" });
 
     req.user = user;
-    req.auth = { userId, isAdmin: !!payload.isAdmin };
+    req.auth = { userId };
     next();
   } catch (err) {
     return res.status(401).json({ message: "Invalid Token" });
