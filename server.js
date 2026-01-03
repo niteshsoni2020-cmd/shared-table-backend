@@ -1660,14 +1660,27 @@ app.post("/api/policy/publish", adminMiddleware, async (req, res) => {
     if (String(draft.status || "") !== "draft") return res.status(400).json({ message: "Not a draft" });
 
     const now = new Date();
-    await Policy.updateMany({ active: true }, { $set: { active: false } });
 
+    // Publish is allowed even for future-effective policies, but MUST NOT create an active-policy gap.
     draft.status = "published";
-    draft.active = true;
     draft.publishedAt = now;
+
+    const eff = draft.effectiveFrom ? new Date(draft.effectiveFrom) : null;
+    const effOk = (eff && !Number.isNaN(eff.getTime()));
+    const shouldActivate = Boolean(effOk && (eff.getTime() <= now.getTime()));
+
+    if (shouldActivate) {
+      await Policy.updateMany({ active: true }, { $set: { active: false } });
+      draft.active = true;
+    } else {
+      draft.active = false;
+    }
+
     await draft.save();
 
-    return res.json({ ok: true, active: policySnapshotFromDoc(draft.toObject()) });
+    const activeDoc = shouldActivate ? (draft.toObject ? draft.toObject() : draft) : await getActivePolicyDoc();
+
+    return res.json({ ok: true, active: policySnapshotFromDoc(activeDoc), published: policySnapshotFromDoc(draft.toObject()), activated: shouldActivate });
   } catch (e) {
     return res.status(500).json({ message: "Server error" });
   }
