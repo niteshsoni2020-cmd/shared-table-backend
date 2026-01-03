@@ -743,6 +743,7 @@ mongoose
   .connect(process.env.MONGO_URI)
   .then(async () => {
   try { await ensureDefaultPolicyExists(); } catch (_) {}
+  try { await __ensureStripeWebhookIndex(); } catch (_) {}
   __log("info", "db_connected", { rid: undefined, path: undefined });
 
   // Start unpaid booking expiry cleanup scheduler only after DB is connected
