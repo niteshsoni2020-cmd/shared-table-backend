@@ -3093,7 +3093,8 @@ async function canComment(expId, userId) {
 
 app.post("/api/experiences/:id/comments", authMiddleware, async (req, res) => {
   try {
-    const expId = String(req.params.id);
+    const expId = __cleanId(req.params.id, 64);
+    if (!expId) return res.status(400).json({ message: "Invalid experienceId" });
     const gate = await canComment(expId, req.user._id);
     if (!gate.ok) return res.status(403).json({ message: "Not allowed" });
 
@@ -3124,7 +3125,8 @@ app.post("/api/experiences/:id/comments", authMiddleware, async (req, res) => {
 
 app.get("/api/experiences/:id/comments", authMiddleware, async (req, res) => {
   try {
-    const expId = String(req.params.id);
+    const expId = __cleanId(req.params.id, 64);
+    if (!expId) return res.status(400).json({ message: "Invalid experienceId" });
     const gate = await canComment(expId, req.user._id);
     if (!gate.ok) return res.status(403).json({ message: "Not allowed" });
 
@@ -3399,7 +3401,8 @@ app.get("/api/social/feed", authMiddleware, async (req, res) => {
 app.get("/api/social/user/:userId/visible-bookings", authMiddleware, async (req, res) => {
   try {
     const me = String(req.user._id);
-    const other = String(req.params.userId || "");
+    const other = __cleanId(req.params.userId, 64);
+    if (!other) return res.status(400).json({ message: "Invalid userId" });
     if (!other) return res.status(400).json({ message: "userId required" });
     if (me === other) return res.status(400).json({ message: "Use your bookings endpoint" });
 
