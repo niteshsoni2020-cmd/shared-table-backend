@@ -290,7 +290,21 @@ const ENV_CORS_ORIGINS = String(process.env.CORS_ORIGINS || "")
   .map((v) => v.trim())
   .filter(Boolean);
 
-const CORS_ORIGINS = Array.from(new Set([...DEFAULT_CORS_ORIGINS, ...ENV_CORS_ORIGINS]));
+const __urlToOrigin = (u) => {
+  try {
+    const x = new URL(String(u || "").trim());
+    if (!x.protocol || !x.host) return "";
+    return x.protocol + "//" + x.host;
+  } catch (_) {
+    return "";
+  }
+};
+
+// Auto-allow the frontend origin used for reset links (keeps CORS + reset URL in sync)
+const FRONTEND_ORIGIN_FOR_CORS = __urlToOrigin(process.env.FRONTEND_BASE_URL || "");
+const ENV_EXTRA_ORIGINS = [FRONTEND_ORIGIN_FOR_CORS].filter(Boolean);
+
+const CORS_ORIGINS = Array.from(new Set([...DEFAULT_CORS_ORIGINS, ...ENV_CORS_ORIGINS, ...ENV_EXTRA_ORIGINS]));
 
 const corsOptions = {
   origin: function (origin, cb) {
