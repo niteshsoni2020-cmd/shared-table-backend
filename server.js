@@ -1548,7 +1548,7 @@ async function maybeSendBookingExpiredComms(booking) {
 const JWT_SECRET = String(process.env.JWT_SECRET || "");
 function __passwordPolicyOk(pw) {
   const p = String(pw || "");
-  if (p.length < 12) return { ok: false, reason: "Password must be at least 12 characters." };
+  if (p.length < 8) return { ok: false, reason: "Password must be at least 8 characters." };
   if (!/[a-z]/.test(p)) return { ok: false, reason: "Password must include a lowercase letter." };
   if (!/[A-Z]/.test(p)) return { ok: false, reason: "Password must include an uppercase letter." };
   if (!/[0-9]/.test(p)) return { ok: false, reason: "Password must include a number." };
