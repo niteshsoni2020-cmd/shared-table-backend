@@ -20,6 +20,7 @@ const EVENTS = {
   HOST_APPLICATION_DECLINED: "19_host_application_declined.txt",
   PAYMENT_FAILED: "20_payment_failed.txt",
   BOOKING_EXPIRED_GUEST: "21_booking_expired.txt",
+  BOOKING_EXPIRED_HOST: "21_booking_expired_host.txt",
   EXPERIENCE_UPDATED_GUEST: "22_experience_updated_guest.txt",
   EXPERIENCE_UPDATED_HOST: "23_experience_updated_host.txt",
   ACCOUNT_SUSPENDED: "24_account_suspended.txt",

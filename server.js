@@ -1412,7 +1412,8 @@ const Connection = mongoose.models.Connection || mongoose.model("Connection", co
 
 async function maybeSendBookingConfirmedComms(booking) {
   try {
-    if (booking && booking.guestConfirmedAt) return;
+    if (!booking) return;
+    if (booking.guestConfirmedAt) return;
 
     const b = booking || {};
     const guestEmail = String(b.guestEmail || "").trim();
@@ -1420,50 +1421,78 @@ async function maybeSendBookingConfirmedComms(booking) {
 
     const hostId = String(b.hostId || "").trim();
     let hostDoc = null;
-    if (hostId.length > 0) {
-      hostDoc = await User.findById(hostId);
-    }
+    if (hostId.length > 0) hostDoc = await User.findById(hostId);
     if ((hostDoc == null) && String(b.experienceId || "").trim().length > 0) {
       const expDoc = await Experience.findById(String(b.experienceId || "").trim());
       const expHostId = (expDoc && expDoc.hostId) ? String(expDoc.hostId).trim() : "";
-      if (expHostId.length > 0) {
-        hostDoc = await User.findById(expHostId);
-      }
+      if (expHostId.length > 0) hostDoc = await User.findById(expHostId);
     }
 
+    const hostEmail = String((hostDoc && hostDoc.email) || "").trim();
+    const hostName = String((hostDoc && hostDoc.name) || "").trim();
+
+    const expTitle = String(b.experienceTitle || b.title || "").trim();
+    const bookingDate = String(b.bookingDate || "").trim();
+    const timeSlot = String(b.timeSlot || "").trim();
+    const guestNameSafe = (guestName.length > 0 ? guestName : "there");
+    const hostNameSafe = (hostName.length > 0 ? hostName : "there");
+    const __ctx = {
+      Name: guestNameSafe,
+      GUEST_NAME: guestNameSafe,
+      HOST_NAME: hostNameSafe,
+      EXPERIENCE_TITLE: expTitle,
+      BOOKING_DATE: bookingDate,
+      TIME_SLOT: timeSlot,
+      DASHBOARD_URL: __dashboardUrl()
+    };
+
+    var __need = ['DASHBOARD_URL', 'DATE', 'EXPERIENCE_TITLE', 'HOST_NAME', 'Name', 'TIME'];
+    var __vars = {};
+    for (const k of __need) {
+      if (Object.prototype.hasOwnProperty.call(__ctx, k) && String(__ctx[k] || "").trim().length > 0) __vars[k] = String(__ctx[k]).trim();
+      else __vars[k] = "—";
+    }
     if (guestEmail.length > 0) {
-      await sendEmail({
+      await sendEventEmail({
+        eventName: "BOOKING_CONFIRMED_GUEST",
+        category: "NOTIFICATIONS",
         to: guestEmail,
-        subject: "Booking confirmed: " + String(b.experienceTitle || b.title || "").trim(),
-        html: bookingConfirmedGuestEmailHtml(b, { name: guestName }, hostDoc),
+        vars: __vars
       });
     }
 
-    if (hostDoc && hostDoc.email) {
-      await sendEmail({
-        to: hostDoc.email,
-        subject: "New booking: " + String(b.experienceTitle || b.title || "").trim(),
-        html: bookingConfirmedHostEmailHtml(b, { name: guestName }, hostDoc),
+    const __ctx2 = Object.assign({}, __ctx);
+    __ctx2.Name = (hostName.length > 0 ? hostName : "there");
+    var __need = ['DASHBOARD_URL', 'DATE', 'EXPERIENCE_TITLE', 'GUEST_NAME', 'HOST_NAME', 'TIME'];
+    var __vars = {};
+    for (const k of __need) {
+      if (Object.prototype.hasOwnProperty.call(__ctx2, k) && String(__ctx2[k] || "").trim().length > 0) __vars[k] = String(__ctx2[k]).trim();
+      else __vars[k] = "—";
+    }
+    if (hostEmail.length > 0) {
+      await sendEventEmail({
+        eventName: "BOOKING_CONFIRMED_HOST",
+        category: "NOTIFICATIONS",
+        to: hostEmail,
+        vars: __vars
       });
     }
 
     const now = new Date();
-    const guestOk = (guestEmail.length > 0);
-    const hostOk = (hostDoc != null) && (hostDoc.email);
-    if (booking) {
-      if (guestOk) booking.guestConfirmedAt = booking.guestConfirmedAt || now;
-      if (hostOk) booking.hostConfirmedAt = booking.hostConfirmedAt || now;
-      await booking.save();
-    }
+    if (guestEmail.length > 0) booking.guestConfirmedAt = booking.guestConfirmedAt || now;
+    if (hostEmail.length > 0) booking.hostConfirmedAt = booking.hostConfirmedAt || now;
+    await booking.save();
   } catch (e) {
     const msg = e && e.message ? e.message : String(e);
     console.error("COMMS_CONFIRM_ERR", msg);
   }
 }
 
+
 async function maybeSendBookingCancelledComms(booking) {
   try {
-    if (booking && booking.guestCancelledAt) return;
+    if (!booking) return;
+    if (booking.guestCancelledAt) return;
 
     const b = booking || {};
     const guestEmail = String(b.guestEmail || "").trim();
@@ -1471,42 +1500,73 @@ async function maybeSendBookingCancelledComms(booking) {
 
     const hostId = String(b.hostId || "").trim();
     let hostDoc = null;
-    if (hostId.length > 0) {
-      hostDoc = await User.findById(hostId);
-    }
+    if (hostId.length > 0) hostDoc = await User.findById(hostId);
     if ((hostDoc == null) && String(b.experienceId || "").trim().length > 0) {
       const expDoc = await Experience.findById(String(b.experienceId || "").trim());
       const expHostId = (expDoc && expDoc.hostId) ? String(expDoc.hostId).trim() : "";
-      if (expHostId.length > 0) {
-        hostDoc = await User.findById(expHostId);
-      }
+      if (expHostId.length > 0) hostDoc = await User.findById(expHostId);
     }
 
+    const hostEmail = String((hostDoc && hostDoc.email) || "").trim();
+    const hostName = String((hostDoc && hostDoc.name) || "").trim();
+
+    const expTitle = String(b.experienceTitle || b.title || "").trim();
+    const bookingDate = String(b.bookingDate || "").trim();
+    const timeSlot = String(b.timeSlot || "").trim();
+    const guestNameSafe = (guestName.length > 0 ? guestName : "there");
+    const hostNameSafe = (hostName.length > 0 ? hostName : "there");
+    const __ctx = {
+      Name: guestNameSafe,
+      GUEST_NAME: guestNameSafe,
+      HOST_NAME: hostNameSafe,
+      EXPERIENCE_TITLE: expTitle,
+      BOOKING_DATE: bookingDate,
+      TIME_SLOT: timeSlot,
+      DASHBOARD_URL: __dashboardUrl()
+    };
+
+    var __need = ['DASHBOARD_URL', 'DATE', 'EXPERIENCE_TITLE', 'Name', 'TIME'];
+    var __vars = {};
+    for (const k of __need) {
+      if (Object.prototype.hasOwnProperty.call(__ctx, k) && String(__ctx[k] || "").trim().length > 0) __vars[k] = String(__ctx[k]).trim();
+      else __vars[k] = "—";
+    }
     if (guestEmail.length > 0) {
-      await sendEmail({
+      await sendEventEmail({
+        eventName: "BOOKING_CANCELLED_BY_GUEST_GUEST",
+        category: "NOTIFICATIONS",
         to: guestEmail,
-        subject: "Booking cancelled: " + String(b.experienceTitle || b.title || "").trim(),
-        html: bookingCancelledGuestEmailHtml(b, { name: guestName }, hostDoc),
+        vars: __vars
       });
     }
 
-    if (hostDoc && hostDoc.email) {
-      await sendEmail({
-        to: hostDoc.email,
-        subject: "Booking cancelled: " + String(b.experienceTitle || b.title || "").trim(),
-        html: bookingCancelledHostEmailHtml(b, { name: guestName }, hostDoc),
+    const __ctx2 = Object.assign({}, __ctx);
+    __ctx2.Name = (hostName.length > 0 ? hostName : "there");
+    var __need = ['DASHBOARD_URL', 'DATE', 'EXPERIENCE_TITLE', 'HOST_NAME', 'TIME'];
+    var __vars = {};
+    for (const k of __need) {
+      if (Object.prototype.hasOwnProperty.call(__ctx2, k) && String(__ctx2[k] || "").trim().length > 0) __vars[k] = String(__ctx2[k]).trim();
+      else __vars[k] = "—";
+    }
+    if (hostEmail.length > 0) {
+      await sendEventEmail({
+        eventName: "BOOKING_CANCELLED_BY_GUEST_HOST",
+        category: "NOTIFICATIONS",
+        to: hostEmail,
+        vars: __vars
       });
     }
-
-    // DB updates handled by transitionBooking (idempotent)
   } catch (e) {
     const msg = e && e.message ? e.message : String(e);
     console.error("COMMS_CANCEL_ERR", msg);
   }
 }
 
+
 async function maybeSendBookingExpiredComms(booking) {
   try {
+    if (!booking) return;
+
     const b = booking || {};
     const guestEmail = String(b.guestEmail || "").trim();
     const guestName = String(b.guestName || "").trim();
@@ -1525,50 +1585,191 @@ async function maybeSendBookingExpiredComms(booking) {
     const hostEmail = String((hostDoc && hostDoc.email) || "").trim();
     const hostName = String((hostDoc && hostDoc.name) || "").trim();
 
-    const exp = String(b.experienceTitle || b.title || "").trim();
-    const date = String(b.bookingDate || "").trim();
-    const time = String(b.timeSlot || "").trim();
+    const expTitle = String(b.experienceTitle || b.title || "").trim();
+    const bookingDate = String(b.bookingDate || "").trim();
+    const timeSlot = String(b.timeSlot || "").trim();
+    const guestNameSafe = (guestName.length > 0 ? guestName : "there");
+    const hostNameSafe = (hostName.length > 0 ? hostName : "there");
+    const __ctx = {
+      Name: guestNameSafe,
+      GUEST_NAME: guestNameSafe,
+      HOST_NAME: hostNameSafe,
+      EXPERIENCE_TITLE: expTitle,
+      BOOKING_DATE: bookingDate,
+      TIME_SLOT: timeSlot,
+      DASHBOARD_URL: __dashboardUrl()
+    };
 
-    const guestText =
-      "Hi " + (guestName || "there") + ",\n\n" +
-      "Your booking expired because payment wasn’t completed in time.\n\n" +
-      (exp ? ("Experience: " + exp + "\n") : "") +
-      (date ? ("Date: " + date + "\n") : "") +
-      (time ? ("Time: " + time + "\n") : "") +
-      "\nWarmly,\nThe Shared Table Story\n";
-
-    const hostText =
-      "Hi " + (hostName || "there") + ",\n\n" +
-      "A booking expired because payment wasn’t completed in time.\n\n" +
-      (guestName ? ("Guest: " + guestName + "\n") : "") +
-      (exp ? ("Experience: " + exp + "\n") : "") +
-      (date ? ("Date: " + date + "\n") : "") +
-      (time ? ("Time: " + time + "\n") : "") +
-      "\nWarmly,\nThe Shared Table Story\n";
-
-    if (guestEmail.length > 0) {
-      try {
-        await sendEventEmail({
-          eventName: "BOOKING_EXPIRED_GUEST",
-          category: "NOTIFICATIONS",
-          to: guestEmail,
-          vars: {
-            Name: (guestName.length > 0 ? guestName : "there"),
-            DASHBOARD_URL: __dashboardUrl()
-          }
-        });
-      } catch (_) {
-        await sendEmail({ to: guestEmail, subject: "Booking expired", text: guestText });
-      }
+    var __need = ['DASHBOARD_URL', 'Name'];
+    var __vars = {};
+    for (const k of __need) {
+      if (Object.prototype.hasOwnProperty.call(__ctx, k) && String(__ctx[k] || "").trim().length > 0) __vars[k] = String(__ctx[k]).trim();
+      else __vars[k] = "—";
     }
-    if (hostEmail.length > 0) await sendEmail({ to: hostEmail, subject: "Booking expired", text: hostText });
+    if (guestEmail.length > 0) {
+      await sendEventEmail({
+        eventName: "BOOKING_EXPIRED_GUEST",
+        category: "NOTIFICATIONS",
+        to: guestEmail,
+        vars: __vars
+      });
+    }
 
-    const now = new Date();
-    if (booking && !booking.expiredAt) { booking.expiredAt = now; await booking.save(); }
+    const __ctx2 = Object.assign({}, __ctx);
+    __ctx2.Name = (hostName.length > 0 ? hostName : "there");
+    var __need = ['BOOKING_DATE', 'DASHBOARD_URL', 'EXPERIENCE_TITLE', 'GUEST_NAME', 'HOST_NAME', 'TIME_SLOT'];
+    var __vars = {};
+    for (const k of __need) {
+      if (Object.prototype.hasOwnProperty.call(__ctx2, k) && String(__ctx2[k] || "").trim().length > 0) __vars[k] = String(__ctx2[k]).trim();
+      else __vars[k] = "—";
+    }
+    if (hostEmail.length > 0) {
+      await sendEventEmail({
+        eventName: "BOOKING_EXPIRED_HOST",
+        category: "NOTIFICATIONS",
+        to: hostEmail,
+        vars: __vars
+      });
+    }
   } catch (e) {
     console.error("COMMS_EXPIRED_ERR", (e && e.message) ? e.message : String(e));
   }
 }
+
+async function maybeSendRefundProcessedComms(booking) {
+  try {
+    if (!booking) return;
+    if (booking.refundedAt) return;
+
+    const b = booking || {};
+    const guestEmail = String(b.guestEmail || "").trim();
+    const guestName = String(b.guestName || "").trim();
+
+    const hostId = String(b.hostId || "").trim();
+    let hostDoc = null;
+    if (hostId.length > 0) hostDoc = await User.findById(hostId);
+    if ((hostDoc == null) && String(b.experienceId || "").trim().length > 0) {
+      const expDoc = await Experience.findById(String(b.experienceId || "").trim());
+      const expHostId = (expDoc && expDoc.hostId) ? String(expDoc.hostId).trim() : "";
+      if (expHostId.length > 0) hostDoc = await User.findById(expHostId);
+    }
+
+    const hostEmail = String((hostDoc && hostDoc.email) || "").trim();
+    const hostName = String((hostDoc && hostDoc.name) || "").trim();
+
+    const expTitle = String(b.experienceTitle || b.title || "").trim();
+    const bookingDate = String(b.bookingDate || "").trim();
+    const timeSlot = String(b.timeSlot || "").trim();
+    const guestNameSafe = (guestName.length > 0 ? guestName : "there");
+    const hostNameSafe = (hostName.length > 0 ? hostName : "there");
+    const __ctx = {
+      Name: guestNameSafe,
+      GUEST_NAME: guestNameSafe,
+      HOST_NAME: hostNameSafe,
+      EXPERIENCE_TITLE: expTitle,
+      BOOKING_DATE: bookingDate,
+      TIME_SLOT: timeSlot,
+      DASHBOARD_URL: __dashboardUrl()
+    };
+
+    const __need = ['AMOUNT', 'DASHBOARD_URL', 'Name'];
+    const __vars = {};
+    for (const k of __need) {
+      if (Object.prototype.hasOwnProperty.call(__ctx, k) && String(__ctx[k] || "").trim().length > 0) __vars[k] = String(__ctx[k]).trim();
+      else __vars[k] = "—";
+    }
+    if (guestEmail.length > 0) {
+      await sendEventEmail({
+        eventName: "REFUND_PROCESSED",
+        category: "PAYMENTS",
+        to: guestEmail,
+        vars: __vars
+      });
+    }
+
+    void hostEmail;
+    void hostName;
+  } catch (e) {
+    const msg = e && e.message ? e.message : String(e);
+    console.error("COMMS_REFUND_ERR", msg);
+  }
+}
+
+
+async function maybeSendBookingCancelledByHostComms(booking) {
+  try {
+    if (!booking) return;
+    if (booking.hostCancelledAt) return;
+
+    const b = booking || {};
+    const guestEmail = String(b.guestEmail || "").trim();
+    const guestName = String(b.guestName || "").trim();
+
+    const hostId = String(b.hostId || "").trim();
+    let hostDoc = null;
+    if (hostId.length > 0) hostDoc = await User.findById(hostId);
+    if ((hostDoc == null) && String(b.experienceId || "").trim().length > 0) {
+      const expDoc = await Experience.findById(String(b.experienceId || "").trim());
+      const expHostId = (expDoc && expDoc.hostId) ? String(expDoc.hostId).trim() : "";
+      if (expHostId.length > 0) hostDoc = await User.findById(expHostId);
+    }
+
+    const hostEmail = String((hostDoc && hostDoc.email) || "").trim();
+    const hostName = String((hostDoc && hostDoc.name) || "").trim();
+
+    const expTitle = String(b.experienceTitle || b.title || "").trim();
+    const bookingDate = String(b.bookingDate || "").trim();
+    const timeSlot = String(b.timeSlot || "").trim();
+    const guestNameSafe = (guestName.length > 0 ? guestName : "there");
+    const hostNameSafe = (hostName.length > 0 ? hostName : "there");
+    const __ctx = {
+      Name: guestNameSafe,
+      GUEST_NAME: guestNameSafe,
+      HOST_NAME: hostNameSafe,
+      EXPERIENCE_TITLE: expTitle,
+      BOOKING_DATE: bookingDate,
+      TIME_SLOT: timeSlot,
+      DASHBOARD_URL: __dashboardUrl()
+    };
+
+    var __need = ['DASHBOARD_URL', 'DATE', 'EXPERIENCE_TITLE', 'Name', 'TIME'];
+    var __vars = {};
+    for (const k of __need) {
+      if (Object.prototype.hasOwnProperty.call(__ctx, k) && String(__ctx[k] || "").trim().length > 0) __vars[k] = String(__ctx[k]).trim();
+      else __vars[k] = "—";
+    }
+    if (guestEmail.length > 0) {
+      await sendEventEmail({
+        eventName: "BOOKING_CANCELLED_BY_HOST_GUEST",
+        category: "NOTIFICATIONS",
+        to: guestEmail,
+        vars: __vars
+      });
+    }
+
+    const __ctx2 = Object.assign({}, __ctx);
+    __ctx2.Name = (hostName.length > 0 ? hostName : "there");
+    var __need = ['DASHBOARD_URL', 'DATE', 'EXPERIENCE_TITLE', 'HOST_NAME', 'TIME'];
+    var __vars = {};
+    for (const k of __need) {
+      if (Object.prototype.hasOwnProperty.call(__ctx2, k) && String(__ctx2[k] || "").trim().length > 0) __vars[k] = String(__ctx2[k]).trim();
+      else __vars[k] = "—";
+    }
+    if (hostEmail.length > 0) {
+      await sendEventEmail({
+        eventName: "BOOKING_CANCELLED_BY_HOST_HOST",
+        category: "NOTIFICATIONS",
+        to: hostEmail,
+        vars: __vars
+      });
+    }
+  } catch (e) {
+    const msg = e && e.message ? e.message : String(e);
+    console.error("COMMS_CANCEL_HOST_ERR", msg);
+  }
+}
+
+
 
 
 const JWT_SECRET = String(process.env.JWT_SECRET || "");
@@ -4296,6 +4497,12 @@ async function transitionBooking(booking, nextStatus, meta = {}) {
     }
     if (nextStatus === "expired") {
       await maybeSendBookingExpiredComms(booking);
+    }
+    if (nextStatus === "cancelled_by_host") {
+      await maybeSendBookingCancelledByHostComms(booking);
+    }
+    if (nextStatus === "refunded") {
+      await maybeSendRefundProcessedComms(booking);
     }
   } catch (e) {
     console.error("BOOKING_COMMS_FAIL", booking._id, nextStatus, e?.message);

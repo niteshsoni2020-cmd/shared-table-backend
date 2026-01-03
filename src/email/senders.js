@@ -1,5 +1,6 @@
 const SENDERS = {
   AUTH: "auth@thesharedtablestory.com",
+  SECURITY: "auth@thesharedtablestory.com",
   NOTIFICATIONS: "notifications@thesharedtablestory.com",
   PAYMENTS: "payments@thesharedtablestory.com"
 };
