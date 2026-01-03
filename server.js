@@ -2896,10 +2896,20 @@ app.post("/api/experiences/:id/book", authMiddleware, async (req, res) => {
     upd[SET] = { reservedGuests: guests, maxGuests: guests, updatedAt: now };
     upd[SET_ON_INSERT] = { experienceId: String(exp._id), bookingDate: bookingDateStr, timeSlot: timeSlotStr, createdAt: now };
 
-    const r = await CapacitySlot.updateOne(q, upd, { upsert: true });
-    const matched = Number(r && r.matchedCount) || 0;
-    const upserted = Number(r && r.upsertedCount) || 0;
-    const did = Boolean(matched > 0 || upserted > 0);
+    let did = false;
+    try {
+      const r = await CapacitySlot.updateOne(q, upd, { upsert: true });
+      const matched = Number(r && r.matchedCount) || 0;
+      const upserted = Number(r && r.upsertedCount) || 0;
+      did = Boolean(matched > 0 || upserted > 0);
+    } catch (e) {
+      const msg = String(e && e.message ? e.message : "");
+      if (e && (e.code === 11000 || msg.indexOf("E11000") >= 0)) {
+        did = false;
+      } else {
+        throw e;
+      }
+    }
 
     if (!did) {
       // Suggest the next available private slot to reduce booking friction.
