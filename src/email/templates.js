@@ -25,7 +25,7 @@ function parseTemplate(raw) {
 
 function extractVars(str) {
   const out = new Set();
-  const re = /\{\{([A-Z0-9_]+)\}\}/g;
+  const re = /\{\{([A-Za-z0-9_]+)\}\}/g;
   let m;
   while ((m = re.exec(str)) !== null) {
     out.add(m[1]);
@@ -43,7 +43,7 @@ function renderVars(str, vars) {
       throw new Error("TEMPLATE_VAR_EMPTY_" + key);
     }
   }
-  return str.replace(/\{\{([A-Z0-9_]+)\}\}/g, (_, k) => String(vars[k]));
+  return str.replace(/\{\{([A-Za-z0-9_]+)\}\}/g, (_, k) => String(vars[k]));
 }
 
 function loadTemplateById(id) {

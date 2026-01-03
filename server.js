@@ -49,6 +49,7 @@ const { start: startJobs, registerInterval } = require("./src/jobs");
 const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 const STRIPE_WEBHOOK_SECRET = String(process.env.STRIPE_WEBHOOK_SECRET || "");
 const nodemailer = require("nodemailer");
+const { sendEventEmail } = require("./src/email");
 const bcrypt = require("bcryptjs");
 const rateLimit = require("express-rate-limit");
 const helmet = require("helmet");
@@ -841,6 +842,14 @@ async function sendEmail({ to, subject, html, text }) {
   }
 }
 
+function __frontendBaseUrl() {
+  const raw = String(process.env.FRONTEND_BASE_URL || "http://localhost:3000");
+  return raw.replace(/\/$/, "");
+}
+function __dashboardUrl() {
+  return __frontendBaseUrl() + "/dashboard";
+}
+
 function escapeHtml(s) {
   return String(s || "")
     .replace(/&/g, "&amp;")
@@ -1050,6 +1059,10 @@ const userSchema = new mongoose.Schema(
 
     // Password reset (email-optional; token stored as hash)
     passwordResetTokenHash: { type: String, default: "" },
+    emailVerified: { type: Boolean, default: false },
+    emailVerificationTokenHash: { type: String, default: "" },
+    emailVerificationRequestedAt: { type: Date, default: null },
+    emailVerificationExpiresAt: { type: Date, default: null },
     passwordResetExpiresAt: { type: Date, default: null },
     passwordResetRequestedAt: { type: Date, default: null },
 
@@ -1492,7 +1505,6 @@ async function maybeSendBookingCancelledComms(booking) {
   }
 }
 
-
 async function maybeSendBookingExpiredComms(booking) {
   try {
     const b = booking || {};
@@ -1534,7 +1546,21 @@ async function maybeSendBookingExpiredComms(booking) {
       (time ? ("Time: " + time + "\n") : "") +
       "\nWarmly,\nThe Shared Table Story\n";
 
-    if (guestEmail.length > 0) await sendEmail({ to: guestEmail, subject: "Booking expired", text: guestText });
+    if (guestEmail.length > 0) {
+      try {
+        await sendEventEmail({
+          eventName: "BOOKING_EXPIRED_GUEST",
+          category: "NOTIFICATIONS",
+          to: guestEmail,
+          vars: {
+            Name: (guestName.length > 0 ? guestName : "there"),
+            DASHBOARD_URL: __dashboardUrl()
+          }
+        });
+      } catch (_) {
+        await sendEmail({ to: guestEmail, subject: "Booking expired", text: guestText });
+      }
+    }
     if (hostEmail.length > 0) await sendEmail({ to: hostEmail, subject: "Booking expired", text: hostText });
 
     const now = new Date();
@@ -2070,9 +2096,28 @@ app.post("/api/auth/register", registerLimiter, async (req, res) => {
       termsVersion: "1.0",
     });
 
+    // Email verification (required before welcome/login)
+    const vtoken = crypto.randomBytes(32).toString("hex");
+    const vhash = crypto.createHash("sha256").update(vtoken).digest("hex");
+    user.emailVerified = false;
+    user.emailVerificationTokenHash = vhash;
+    user.emailVerificationRequestedAt = new Date();
+    user.emailVerificationExpiresAt = new Date(Date.now() + 30 * 60 * 1000);
+
     await user.save();
 
-    sendEmail({ to: user.email, subject: "Welcome to The Shared Table Story 🌏", html: welcomeEmailHtml(user.name), text: "Welcome " + String(user.name || "").trim() });
+    // Send verification email via templates (non-blocking)
+    try {
+      const verifyUrl = __frontendBaseUrl() + "/verify-email?email=" + encodeURIComponent(String(user.email || "")) + "&token=" + encodeURIComponent(String(vtoken || ""));
+      const __p = sendEventEmail({
+        eventName: "EMAIL_VERIFICATION",
+        category: "SECURITY",
+        to: String(user.email || ""),
+        vars: { Name: String(user.name || "there"), VERIFY_EMAIL_URL: String(verifyUrl || "") }
+      });
+      const __t = new Promise((_, rej) => setTimeout(() => rej(new Error("email_timeout")), 6000));
+      Promise.race([__p, __t]).catch(() => {});
+    } catch (_) {}
 
     res.status(201).json({ token: signToken(user), user: sanitizeUser(user) });
   } catch (e) {
@@ -2082,6 +2127,48 @@ app.post("/api/auth/register", registerLimiter, async (req, res) => {
 });
 
 // Auth: Login
+
+// Auth: Verify Email
+app.get("/api/auth/verify-email", async (req, res) => {
+  try {
+    const emailRaw = (req.query && req.query.email) ? String(req.query.email) : "";
+    const tokenRaw = (req.query && req.query.token) ? String(req.query.token) : "";
+    const email = emailRaw.toLowerCase().trim();
+    const token = tokenRaw.trim();
+    if (!email || !token) return res.status(400).json({ message: "Invalid or expired token" });
+
+    const user = await User.findOne({ email });
+    if (!user) return res.status(400).json({ message: "Invalid or expired token" });
+    const exp = user.emailVerificationExpiresAt;
+    if (!user.emailVerificationTokenHash || !exp || Date.now() > new Date(exp).getTime()) {
+      return res.status(400).json({ message: "Invalid or expired token" });
+    }
+    const th = crypto.createHash("sha256").update(token).digest("hex");
+    if (String(th) !== String(user.emailVerificationTokenHash)) {
+      return res.status(400).json({ message: "Invalid or expired token" });
+    }
+
+    user.emailVerified = true;
+    user.emailVerificationTokenHash = "";
+    user.emailVerificationRequestedAt = null;
+    user.emailVerificationExpiresAt = null;
+    await user.save();
+
+    try {
+      await sendEventEmail({
+        eventName: "WELCOME_POST_VERIFICATION",
+        category: "NOTIFICATIONS",
+        to: String(user.email || ""),
+        vars: { Name: String(user.name || "there"), DASHBOARD_URL: __dashboardUrl() }
+      });
+    } catch (_) {}
+
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(500).json({ message: "Server error" });
+  }
+});
+
 app.post("/api/auth/login", loginLimiter, async (req, res) => {
   try {
     const { email, password } = req.body || {};
@@ -2089,6 +2176,10 @@ app.post("/api/auth/login", loginLimiter, async (req, res) => {
 
     const user = await User.findOne({ email: String(email).toLowerCase().trim() });
     if (!user) return res.status(401).json({ message: "Invalid credentials" });
+
+    if (user && user.emailVerified === false) {
+      return res.status(403).json({ message: "Please verify your email.", code: "email_not_verified" });
+    }
 
     const ok = await bcrypt.compare(String(password), String(user.password || ""));
     if (!ok) return res.status(401).json({ message: "Invalid credentials" });
@@ -2128,7 +2219,15 @@ app.post("/api/auth/forgot-password", forgotPasswordLimiter, async (req, res) =>
       if (canEmail) {
         // Do not block the HTTP response on email delivery (email can hang on misconfig)
         try {
-          const __p = sendEmail({ to: email, subject: "Reset your password", html: resetPasswordEmailHtml(resetUrl), text: "Reset your password link (valid 30 minutes): " + String(resetUrl || "") });
+          const __p = sendEventEmail({
+            eventName: "PASSWORD_RESET_REQUEST",
+            category: "SECURITY",
+            to: email,
+            vars: {
+              Name: String((user && user.name) || "there"),
+              RESET_PASSWORD_URL: String(resetUrl || "")
+            }
+          });
           const __t = new Promise((_, rej) => setTimeout(() => rej(new Error("email_timeout")), 6000));
           Promise.race([__p, __t]).catch(() => {});
         } catch (e) {
