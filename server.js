@@ -3134,7 +3134,16 @@ app.post("/api/bookings/verify", async (req, res) => {
       (session && session.metadata && session.metadata.bookingId) ||
       "";
 
-    if (String(metaBookingId) !== String(booking._id)) return res.status(400).json({ status: "mismatch", error: "session does not match booking" });
+    const metaOk = (String(metaBookingId) === String(booking._id));
+    const metaMissing = (String(metaBookingId || "") === "");
+    const sessionOk = (String(booking.stripeSessionId || "") === String((session && session.id) ? session.id : sessionId));
+    if (!metaOk) {
+      // Legacy sessions may not carry client_reference_id/metadata.bookingId.
+      // Safe fallback: allow only if booking already stores the same Stripe session id.
+      if (!(metaMissing && sessionOk)) {
+        return res.status(400).json({ status: "mismatch", error: "session does not match booking" });
+      }
+    }
 
     const currency = String(session.currency || "aud").toLowerCase();
     const amountTotal = Number.isFinite(session.amount_total) ? Number(session.amount_total) : null;
