@@ -3476,7 +3476,7 @@ app.post("/api/bookings/verify", async (req, res) => {
     return res.status(400).json({ status: "invalid_booking_id" });
   }
   const booking = await Booking.findById(bookingId);
-  if (!booking) return res.json({ status: "not_found" });
+  if (!booking) return res.status(404).json({ status: "not_found" });
   const me = String(((req.user && (req.user._id || req.user.id)) || (req.user && req.user.userId) || ""));
   const hasUser = Boolean(req.user && (me !== "" || req.user.isAdmin || req.user.admin === true));
   if (hasUser) {
