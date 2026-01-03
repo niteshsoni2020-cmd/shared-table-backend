@@ -2216,6 +2216,11 @@ app.put("/api/auth/update", authMiddleware, async (req, res) => {
     if (typeof updates.showExperiencesToFriends !== "undefined") updates.showExperiencesToFriends = __toBool(updates.showExperiencesToFriends);
     if (typeof updates.publicProfile !== "undefined") updates.publicProfile = __toBool(updates.publicProfile);
 
+
+    if (typeof updates.dynamicDiscounts !== "undefined") {
+      updates.dynamicDiscounts = __scrubMongoKeys(updates.dynamicDiscounts, 0);
+      if (__isPlainObject(updates.dynamicDiscounts) === false) delete updates.dynamicDiscounts;
+    }
     if (typeof updates.preferences !== "undefined") {
       updates.preferences = __scrubMongoKeys(updates.preferences, 0);
       if (__isPlainObject(updates.preferences) === false) delete updates.preferences;
@@ -2288,6 +2293,29 @@ app.post("/api/experiences", authMiddleware, async (req, res) => {
       if (protoKeys.includes(String(k))) return res.status(400).json({ message: "Invalid payload" });
     }
 
+
+    const __scrubMongoKeys = (val, depth) => {
+      const d = typeof depth === "number" ? depth : 0;
+      if (d > 6) return null;
+      if (val === null || typeof val === "undefined") return val;
+      if (typeof val !== "object") return val;
+      if (Array.isArray(val)) return val.map((x) => __scrubMongoKeys(x, d + 1));
+      if (__isPlainObject(val) === false) return null;
+      const out = {};
+      for (const kk of Object.keys(val)) {
+        if (!kk) continue;
+        if (kk[0] === "$" ) continue;
+        if (kk.indexOf(".") !== -1) continue;
+        if (kk === "__proto__" || kk === "constructor" || kk === "prototype") continue;
+        out[kk] = __scrubMongoKeys(val[kk], d + 1);
+      }
+      return out;
+    };
+
+    if (Object.prototype.hasOwnProperty.call(body, "dynamicDiscounts")) {
+      body.dynamicDiscounts = __scrubMongoKeys(body.dynamicDiscounts, 0);
+      if (__isPlainObject(body.dynamicDiscounts) === false) return res.status(400).json({ message: "Invalid dynamicDiscounts" });
+    }
     const __toStr = (v) => String(v || "").trim();
 
     let tags = [];
@@ -2346,6 +2374,15 @@ app.post("/api/experiences", authMiddleware, async (req, res) => {
     expData.hostPic = req.user.profilePic || "";
     expData.isPaused = !!req.user.vacationMode;
 
+
+    // Capacity mapping: booking enforcement uses maxGuests
+    if (typeof expData.capacity !== "undefined") {
+      const c = parseInt(String(expData.capacity), 10);
+      if (Number.isFinite(c) && c > 0) {
+        expData.maxGuests = c;
+        if (typeof expData.originalMaxGuests === "undefined") expData.originalMaxGuests = c;
+      }
+    }
     const exp = new Experience(expData);
 
     await exp.save();
@@ -2362,7 +2399,10 @@ app.put("/api/experiences/:id", authMiddleware, async (req, res) => {
     const expId = __cleanId(req.params.id, 64);
     if (!expId || !/^[a-fA-F0-9]{24}$/.test(expId)) return res.status(400).json({ message: "Invalid experienceId" });
     const exp = await Experience.findById(expId);
-    if (!exp || exp.hostId !== String(req.user._id)) return res.status(403).json({ message: "No" });
+    if (!exp) return res.status(404).json({ message: "Not found" });
+    const isOwner = (String(exp.hostId || "") === String(req.user._id || ""));
+    const isAdmin = Boolean(req.user && req.user.isAdmin);
+    if (!(isOwner || isAdmin)) return res.status(403).json({ message: "No" });
 
     const body = req.body || {};
     if (__isPlainObject(body) === false) return res.status(400).json({ message: "Invalid payload" });
@@ -2379,6 +2419,7 @@ app.put("/api/experiences/:id", authMiddleware, async (req, res) => {
       "addressLine",
       "addressNotes",
       "price",
+      "dynamicDiscounts",
       "capacity",
       "duration",
       "language",
@@ -2473,6 +2514,12 @@ app.put("/api/experiences/:id", authMiddleware, async (req, res) => {
       else updates.capacity = n;
     }
 
+
+    // Capacity mapping: booking enforcement uses maxGuests
+    if (typeof updates.capacity !== "undefined") {
+      const c = __toInt(updates.capacity);
+      if (c !== null && c > 0) updates.maxGuests = c;
+    }
     if (typeof updates.duration !== "undefined") updates.duration = __toStr(updates.duration);
 
     if (typeof updates.startDate !== "undefined") {
@@ -2676,6 +2723,7 @@ app.post("/api/experiences/:id/book", authMiddleware, async (req, res) => {
   if (!expId || !/^[a-fA-F0-9]{24}$/.test(expId)) return res.status(400).json({ message: "Invalid experienceId" });
   const exp = await Experience.findById(expId);
   if (!exp) return res.status(404).json({ message: "Experience not found" });
+  if (exp.isPaused) return res.status(400).json({ message: "Host is paused." });
   const meId = String(((req.user && (req.user._id || req.user.id)) || (req.user && req.user.userId) || ""));
   const hostId = String(exp.hostId || "");
   if (meId && hostId && meId === hostId) {
@@ -2683,7 +2731,38 @@ app.post("/api/experiences/:id/book", authMiddleware, async (req, res) => {
   }
 
   const { numGuests, isPrivate, bookingDate, timeSlot, guestNotes } = req.body || {};
-  const guests = Number.parseInt(numGuests, 10) || 1;
+  let guests = Number.parseInt(numGuests, 10) || 1;
+
+  // Booking caps (non-negotiable):
+  // - Public: 1..6 guests per request
+  // - Private: user books the entire slot (exclusive)
+  const __capInt = (v, lo, hi) => {
+    const n = Number.parseInt(String(v), 10);
+    if (!Number.isFinite(n)) return lo;
+    return Math.max(lo, Math.min(hi, n));
+  };
+
+  const __fullCapacity = () => {
+    const raw = (exp && (exp.privateCapacity || exp.maxGuests || 0)) || 0;
+    const cap = __capInt(raw, 0, 500);
+    return cap;
+  };
+
+  const __isPrivate = (function(v){
+    if (v === true) return true;
+    if (v === false) return false;
+    const t = String(v || "").trim().toLowerCase();
+    if (t === "true" || t === "1" || t === "yes") return true;
+    return false;
+  })(isPrivate);
+  if (__isPrivate) {
+    const fullCap = __fullCapacity();
+    if (!(fullCap > 0)) return res.status(400).json({ message: "Invalid capacity for private booking." });
+    guests = fullCap;
+  } else {
+    if (!(guests >= 1 && guests <= 6)) return res.status(400).json({ message: "Max 6 slots per booking" });
+  }
+
 
   const bookingDateStr = String(bookingDate || "").trim();
   const timeSlotStr = String(timeSlot || "").trim();
@@ -2708,17 +2787,190 @@ app.post("/api/experiences/:id/book", authMiddleware, async (req, res) => {
   let totalCents = unitCents * guests;
   let description = `${guests} Guests`;
 
-  if (guests >= 3) {
-    totalCents = Math.round(totalCents * 0.9);
-    description += " (10% Group Discount Applied)";
+  // DYNAMIC_DISCOUNTS_V1 (tiered)
+  // - host tiers: host funds discount (host payout reduced)
+  // - admin tiers: admin funds discount (host paid full; admin absorbs subsidy)
+  const __pickTier = (tiers, guestsNum) => {
+    try {
+      if (Array.isArray(tiers) == false) return null;
+      let best = null;
+      for (const t of tiers) {
+        if (t == null || typeof t !== "object") continue;
+        const minG = Math.floor(Number(t.minGuests));
+        const pct = Number(t.percent);
+        if (!(minG >= 2)) continue;
+        if (!(pct > 0 && pct <= 50)) continue;
+        if (guestsNum < minG) continue;
+        if (best == null) best = { minGuests: minG, percent: pct };
+        else {
+          if (minG > best.minGuests) best = { minGuests: minG, percent: pct };
+          else if (minG == best.minGuests && pct > best.percent) best = { minGuests: minG, percent: pct };
+        }
+      }
+      return best;
+    } catch (_) {
+      return null;
+    }
+  };
+
+  const dd = (exp && exp.dynamicDiscounts && typeof exp.dynamicDiscounts === "object") ? exp.dynamicDiscounts : {};
+  const ddGroup = (dd && dd.group && typeof dd.group === "object") ? dd.group : {};
+
+  const hostCfg = (ddGroup && ddGroup.host && typeof ddGroup.host === "object") ? ddGroup.host : {};
+  const adminCfg = (ddGroup && ddGroup.admin && typeof ddGroup.admin === "object") ? ddGroup.admin : {};
+
+  const hostEnabled = Boolean(hostCfg && hostCfg.enabled);
+  const adminEnabled = Boolean(adminCfg && adminCfg.enabled);
+
+  const hostTier = hostEnabled ? __pickTier(hostCfg.tiers, guests) : null;
+  const adminTier = adminEnabled ? __pickTier(adminCfg.tiers, guests) : null;
+
+  // Choose the best customer discount. If both exist, pick higher percent; tie -> prefer host (avoids admin subsidy).
+  let chosen = null;
+  if (hostTier && adminTier) {
+    if (Number(adminTier.percent) > Number(hostTier.percent)) chosen = { source: "admin", tier: adminTier };
+    else chosen = { source: "host", tier: hostTier };
+  }
+  else if (adminTier) chosen = { source: "admin", tier: adminTier };
+  else if (hostTier) chosen = { source: "host", tier: hostTier };
+
+  let preDiscountCents = totalCents;
+  let discountSource = "";
+  let discountPct = 0;
+  let discountMinGuests = 0;
+
+  if (chosen && !__isPrivate) {
+    discountSource = String(chosen.source || "");
+    discountPct = Number(chosen.tier && chosen.tier.percent) || 0;
+    discountMinGuests = Number(chosen.tier && chosen.tier.minGuests) || 0;
+    const factor = (100 - discountPct) / 100;
+    totalCents = Math.round(totalCents * factor);
+    if (discountPct > 0) {
+      description += " (" + String(discountPct) + "% Group Discount Applied)";
+    }
   }
 
-  if (isPrivate && exp.privatePrice) {
+  // Marketplace accounting:
+  // - host discount => host payout == customer pays
+  // - admin discount => host payout == pre-discount; admin absorbs difference
+  let hostPayoutCents = totalCents;
+  let adminSubsidyCents = 0;
+  if (discountSource === "admin") {
+    hostPayoutCents = preDiscountCents;
+    adminSubsidyCents = Math.max(0, preDiscountCents - totalCents);
+  }
+
+
+  if (__isPrivate && exp.privatePrice) {
     totalCents = toCents(exp.privatePrice);
     description = "Private Booking";
+    // Private booking: fixed total, no group discount mechanics, no admin subsidy
+    discountSource = "";
+    discountPct = 0;
+    discountMinGuests = 0;
+    // Align accounting fields to the fixed private total
+    try {
+      preDiscountCents = totalCents;
+    } catch (_) { }
+    hostPayoutCents = totalCents;
+    adminSubsidyCents = 0;
   }
   // Capacity hold must happen AFTER policy/terms acceptance, and BEFORE booking save (race-safe)
-  const hold = await reserveCapacitySlot(String(exp._id), bookingDateStr, timeSlotStr, guests);
+  let hold = null;
+
+  if (__isPrivate) {
+    // Private booking must be exclusive: only allowed if nobody reserved this slot yet.
+    const OR = String.fromCharCode(36) + "or";
+    const EXISTS = String.fromCharCode(36) + "exists";
+    const SET = String.fromCharCode(36) + "set";
+    const SET_ON_INSERT = String.fromCharCode(36) + "setOnInsert";
+
+    const q = { experienceId: String(exp._id), bookingDate: bookingDateStr, timeSlot: timeSlotStr };
+    q[OR] = [
+      { reservedGuests: (function(){ const x={}; x[EXISTS]=false; return x; })() },
+      { reservedGuests: 0 }
+    ];
+
+    const now = new Date();
+    const upd = {};
+    upd[SET] = { reservedGuests: guests, maxGuests: guests, updatedAt: now };
+    upd[SET_ON_INSERT] = { experienceId: String(exp._id), bookingDate: bookingDateStr, timeSlot: timeSlotStr, createdAt: now };
+
+    const r = await CapacitySlot.updateOne(q, upd, { upsert: true });
+    const matched = Number(r && r.matchedCount) || 0;
+    const upserted = Number(r && r.upsertedCount) || 0;
+    const did = Boolean(matched > 0 || upserted > 0);
+
+    if (!did) {
+      // Suggest the next available private slot to reduce booking friction.
+      // python-style int helper in JS scope:
+      function int(v){ const n = Number.parseInt(String(v), 10); return Number.isFinite(n) ? n : 0; }
+      function pad2(n){ return (n < 10 ? "0" : "") + String(n); }
+      function ymdFromDate(dt){
+        const y = dt.getUTCFullYear();
+        const m = dt.getUTCMonth() + 1;
+        const d = dt.getUTCDate();
+        return String(y) + "-" + pad2(m) + "-" + pad2(d);
+      }
+      function addDaysUTC(ymd, days){
+        const parts = String(ymd).split("-");
+        const y = int(parts[0]);
+        const m = int(parts[1]);
+        const d = int(parts[2]);
+        const dt = new Date(Date.UTC(y, m - 1, d));
+        dt.setUTCDate(dt.getUTCDate() + int(days));
+        return ymdFromDate(dt);
+      }
+      function dayNameUTC(ymd){
+        const parts = String(ymd).split("-");
+        const y = int(parts[0]);
+        const m = int(parts[1]);
+        const d = int(parts[2]);
+        const dt = new Date(Date.UTC(y, m - 1, d));
+        const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+        return days[dt.getUTCDay()];
+      }
+
+      const windowDays = 60;
+      const slots = (Array.isArray(exp.timeSlots) && exp.timeSlots.length > 0) ? exp.timeSlots : [timeSlotStr];
+      const availDays = (Array.isArray(exp.availableDays) && exp.availableDays.length > 0) ? exp.availableDays : null;
+      const blocked = (Array.isArray(exp.blockedDates) && exp.blockedDates.length > 0) ? exp.blockedDates : [];
+
+      let next = null;
+      for (let k = 0; k <= windowDays; k++) {
+        const d2 = addDaysUTC(bookingDateStr, k);
+        if (exp.startDate && String(d2) < String(exp.startDate)) continue;
+        if (exp.endDate && String(d2) > String(exp.endDate)) continue;
+        if (blocked.includes(d2)) continue;
+        if (availDays) {
+          const dn = dayNameUTC(d2);
+          if (!availDays.includes(dn)) continue;
+        }
+
+        for (const sl of slots) {
+          const sl2 = String(sl || "").trim();
+          if (!sl2) continue;
+          const cur = await CapacitySlot.findOne({ experienceId: String(exp._id), bookingDate: d2, timeSlot: sl2 }).lean();
+          const rsv = (cur && typeof cur.reservedGuests === "number") ? Number(cur.reservedGuests) : 0;
+          if (rsv === 0) {
+            next = { bookingDate: d2, timeSlot: sl2 };
+            break;
+          }
+        }
+        if (next) break;
+      }
+
+      return res.status(400).json({
+        message: "Private booking requires an empty slot.",
+        nextPrivateAvailable: next
+      });
+    }
+
+    hold = { ok: true, maxGuests: guests };
+  } else {
+    hold = await reserveCapacitySlot(String(exp._id), bookingDateStr, timeSlotStr, guests);
+  }
+
   const holdOk = Boolean(hold && hold.ok);
   if (holdOk == false) return res.status(400).json({ message: String(hold.message || "Fully booked.") });
 
@@ -2733,7 +2985,19 @@ app.post("/api/experiences/:id/book", authMiddleware, async (req, res) => {
     bookingDate: bookingDateStr,
     timeSlot: timeSlotStr,
     guestNotes: guestNotes || "",
-    pricing: { totalPrice: Number((totalCents / 100).toFixed(2)), totalCents, currency: "aud" },
+
+    // pricing breakdown (DYNAMIC_DISCOUNTS_V1)
+    pricing: {
+      unitCents: unitCents,
+      guests: guests,
+      subtotalCents: unitCents * guests,
+      preDiscountCents: preDiscountCents,
+      discount: { source: discountSource, percent: discountPct, minGuests: discountMinGuests },
+      totalCents: totalCents,
+      hostPayoutCents: hostPayoutCents,
+      adminSubsidyCents: adminSubsidyCents,
+      description: String(description || "")
+    },
 
     expiresAt: new Date(Date.now() + (15 * 60 * 1000)),
 
