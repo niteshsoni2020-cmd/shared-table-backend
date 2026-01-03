@@ -3363,7 +3363,7 @@ app.post("/api/bookings/:id/cancel", authMiddleware, async (req, res) => {
 
     // If already paid and refund is due, initiate Stripe refund server-side (idempotent)
     try {
-      const isPaid = (booking.paymentStatus === "paid" || wasConfirmed);
+      const isPaid = (booking.paymentStatus === "paid");
       const pi = String(booking.stripePaymentIntentId || "");
       const alreadyHasRefund = booking.refundDecision && booking.refundDecision.stripeRefundId;
       if (isPaid && refundCents > 0 && pi && !alreadyHasRefund) {
@@ -3390,7 +3390,6 @@ app.post("/api/bookings/:id/cancel", authMiddleware, async (req, res) => {
 
     await booking.save();
 
-    await maybeSendBookingCancelledComms(booking);
 
     return res.json({
       message: "Booking cancelled.",
@@ -4164,6 +4163,11 @@ async function transitionBooking(booking, nextStatus, meta = {}) {
   if (nextStatus === "refunded") {
     updates.refundedAt = booking.refundedAt || now;
   }
+
+  // Keep in-memory doc consistent with persisted transition
+  try {
+    Object.assign(booking, updates);
+  } catch (_) {}
 
   await booking.updateOne({ $set: updates });
 
