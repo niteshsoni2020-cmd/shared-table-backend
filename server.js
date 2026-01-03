@@ -2133,6 +2133,7 @@ app.get("/api/auth/me", authMiddleware, async (req, res) => {
 app.put("/api/auth/update", authMiddleware, async (req, res) => {
   try {
     const body = req.body || {};
+    if (__isPlainObject(body) === false) return res.status(400).json({ message: "Invalid payload" });
     const allowed = [
       "name",
       "bio",
@@ -2157,25 +2158,35 @@ app.put("/api/auth/update", authMiddleware, async (req, res) => {
       return !!v;
     };
 
+    const __toStrSafe = (v) => {
+      if (typeof v === "string") return v.trim();
+      if (typeof v === "number" || typeof v === "boolean") return String(v).trim();
+      return "";
+    };
+
     const __scrubMongoKeys = (val, depth) => {
       const d = typeof depth === "number" ? depth : 0;
       if (d > 6) return null;
-      if (!val || typeof val !== "object") return val;
+      if (val === null || typeof val === "undefined") return val;
+      if (typeof val !== "object") return val;
       if (Array.isArray(val)) return val.map((x) => __scrubMongoKeys(x, d + 1));
+      if (__isPlainObject(val) === false) return null;
       const out = {};
       for (const k of Object.keys(val)) {
         if (!k) continue;
         if (k[0] === "$") continue;
         if (k.indexOf(".") !== -1) continue;
+        if (k === "__proto__" || k === "constructor" || k === "prototype") continue;
         out[k] = __scrubMongoKeys(val[k], d + 1);
       }
       return out;
     };
 
-    if (typeof updates.name !== "undefined") updates.name = String(updates.name || "").trim();
-    if (typeof updates.bio !== "undefined") updates.bio = String(updates.bio || "").trim();
-    if (typeof updates.location !== "undefined") updates.location = String(updates.location || "").trim();
-    if (typeof updates.mobile !== "undefined") updates.mobile = String(updates.mobile || "").trim();
+    if (typeof updates.name !== "undefined") updates.name = __toStrSafe(updates.name);
+    if (typeof updates.bio !== "undefined") updates.bio = __toStrSafe(updates.bio);
+    if (typeof updates.location !== "undefined") updates.location = __toStrSafe(updates.location);
+    if (typeof updates.mobile !== "undefined") updates.mobile = __toStrSafe(updates.mobile);
+    if (typeof updates.profilePic !== "undefined") updates.profilePic = __toStrSafe(updates.profilePic);
 
     if (typeof updates.allowHandleSearch !== "undefined") updates.allowHandleSearch = __toBool(updates.allowHandleSearch);
     if (typeof updates.showExperiencesToFriends !== "undefined") updates.showExperiencesToFriends = __toBool(updates.showExperiencesToFriends);
@@ -2183,6 +2194,7 @@ app.put("/api/auth/update", authMiddleware, async (req, res) => {
 
     if (typeof updates.preferences !== "undefined") {
       updates.preferences = __scrubMongoKeys(updates.preferences, 0);
+      if (__isPlainObject(updates.preferences) === false) delete updates.preferences;
     }
 
     if (typeof updates.handle !== "undefined") {
