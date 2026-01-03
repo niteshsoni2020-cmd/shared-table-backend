@@ -3523,7 +3523,9 @@ app.get("/api/admin/users", adminMiddleware, async (req, res) => {
 
 app.delete("/api/admin/users/:id", adminMiddleware, async (req, res) => {
   try {
-    await User.findByIdAndDelete(req.params.id);
+    const userIdParam = __cleanId(req.params.id, 64);
+    if (!userIdParam) return res.status(400).json({ message: "Invalid userId" });
+    await User.findByIdAndDelete(userIdParam);
     res.json({ message: "User banned/deleted." });
   } catch (err) {
     res.status(500).json({ message: "Server error" });
