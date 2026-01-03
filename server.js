@@ -2301,7 +2301,7 @@ app.post("/api/experiences", authMiddleware, async (req, res) => {
 app.put("/api/experiences/:id", authMiddleware, async (req, res) => {
   try {
     const expId = __cleanId(req.params.id, 64);
-    if (!expId) return res.status(400).json({ message: "Invalid experienceId" });
+    if (!expId || !/^[a-fA-F0-9]{24}$/.test(expId)) return res.status(400).json({ message: "Invalid experienceId" });
     const exp = await Experience.findById(expId);
     if (!exp || exp.hostId !== String(req.user._id)) return res.status(403).json({ message: "No" });
 
@@ -2466,7 +2466,7 @@ app.put("/api/experiences/:id", authMiddleware, async (req, res) => {
 // Experiences: Delete
 app.delete("/api/experiences/:id", authMiddleware, async (req, res) => {
   const expId = __cleanId(req.params.id, 64);
-  if (!expId) return res.status(400).json({ message: "Invalid experienceId" });
+  if (!expId || !/^[a-fA-F0-9]{24}$/.test(expId)) return res.status(400).json({ message: "Invalid experienceId" });
   const exp = await Experience.findById(expId);
   if (!exp || (exp.hostId !== String(req.user._id) && !req.user.isAdmin)) return res.status(403).json({ message: "No" });
 
@@ -2523,7 +2523,7 @@ app.get("/api/experiences", async (req, res) => {
 app.get("/api/experiences/:id", async (req, res) => {
   try {
     const expId = __cleanId(req.params.id, 64);
-    if (!expId) return res.status(400).json({ message: "Invalid experienceId" });
+    if (!expId || !/^[a-fA-F0-9]{24}$/.test(expId)) return res.status(400).json({ message: "Invalid experienceId" });
     const exp = await Experience.findById(expId);
     if (!exp) return res.status(404).json({ message: "Not found" });
     const safe = stripExperiencePrivateFields((exp.toObject ? exp.toObject() : exp));
@@ -2537,7 +2537,7 @@ app.get("/api/experiences/:id", async (req, res) => {
 app.get("/api/experiences/:id/similar", async (req, res) => {
   try {
     const expId = __cleanId(req.params.id, 64);
-    if (!expId) return res.status(400).json({ message: "Invalid experienceId" });
+    if (!expId || !/^[a-fA-F0-9]{24}$/.test(expId)) return res.status(400).json({ message: "Invalid experienceId" });
     const currentExp = await Experience.findById(expId);
     if (!currentExp) return res.status(404).json({ message: "Not found" });
 
@@ -2607,7 +2607,7 @@ app.get("/api/experiences/:id/attendees", authMiddleware, async (req, res) => {
 // Booking: Create + Stripe checkout
 app.post("/api/experiences/:id/book", authMiddleware, async (req, res) => {
   const expId = __cleanId(req.params.id, 64);
-  if (!expId) return res.status(400).json({ message: "Invalid experienceId" });
+  if (!expId || !/^[a-fA-F0-9]{24}$/.test(expId)) return res.status(400).json({ message: "Invalid experienceId" });
   const exp = await Experience.findById(expId);
   if (!exp) return res.status(404).json({ message: "Experience not found" });
   const meId = String(((req.user && (req.user._id || req.user.id)) || (req.user && req.user.userId) || ""));
@@ -3051,7 +3051,7 @@ app.post("/api/reviews", authMiddleware, async (req, res) => {
 
 app.get("/api/experiences/:id/reviews", async (req, res) => {
   const expId = __cleanId(req.params.id, 64);
-  if (!expId) return res.status(400).json({ message: "Invalid experienceId" });
+  if (!expId || !/^[a-fA-F0-9]{24}$/.test(expId)) return res.status(400).json({ message: "Invalid experienceId" });
   const reviews = await Review.find({ experienceId: expId, type: "guest_to_host" }).sort({ date: -1 });
   res.json(reviews);
 });
@@ -3060,7 +3060,7 @@ app.get("/api/experiences/:id/reviews", async (req, res) => {
 app.post("/api/experiences/:id/like", authMiddleware, async (req, res) => {
   try {
     const expId = __cleanId(req.params.id, 64);
-    if (!expId) return res.status(400).json({ message: "Invalid experienceId" });
+    if (!expId || !/^[a-fA-F0-9]{24}$/.test(expId)) return res.status(400).json({ message: "Invalid experienceId" });
     const existing = await ExperienceLike.findOne({ experienceId: expId, userId: req.user._id });
     if (existing) {
       await ExperienceLike.findByIdAndDelete(existing._id);
@@ -3078,7 +3078,7 @@ app.post("/api/experiences/:id/like", authMiddleware, async (req, res) => {
 app.get("/api/experiences/:id/like", authMiddleware, async (req, res) => {
   try {
     const expId = __cleanId(req.params.id, 64);
-    if (!expId) return res.status(400).json({ message: "Invalid experienceId" });
+    if (!expId || !/^[a-fA-F0-9]{24}$/.test(expId)) return res.status(400).json({ message: "Invalid experienceId" });
     const liked = !!(await ExperienceLike.findOne({ experienceId: expId, userId: req.user._id }));
     const count = await ExperienceLike.countDocuments({ experienceId: expId });
     return res.json({ liked, count });
@@ -3106,7 +3106,7 @@ async function canComment(expId, userId) {
 app.post("/api/experiences/:id/comments", authMiddleware, async (req, res) => {
   try {
     const expId = __cleanId(req.params.id, 64);
-    if (!expId) return res.status(400).json({ message: "Invalid experienceId" });
+    if (!expId || !/^[a-fA-F0-9]{24}$/.test(expId)) return res.status(400).json({ message: "Invalid experienceId" });
     const gate = await canComment(expId, req.user._id);
     if (!gate.ok) return res.status(403).json({ message: "Not allowed" });
 
@@ -3138,7 +3138,7 @@ app.post("/api/experiences/:id/comments", authMiddleware, async (req, res) => {
 app.get("/api/experiences/:id/comments", authMiddleware, async (req, res) => {
   try {
     const expId = __cleanId(req.params.id, 64);
-    if (!expId) return res.status(400).json({ message: "Invalid experienceId" });
+    if (!expId || !/^[a-fA-F0-9]{24}$/.test(expId)) return res.status(400).json({ message: "Invalid experienceId" });
     const gate = await canComment(expId, req.user._id);
     if (!gate.ok) return res.status(403).json({ message: "Not allowed" });
 
@@ -3544,7 +3544,7 @@ app.get("/api/admin/experiences", adminMiddleware, async (req, res) => {
 app.patch("/api/admin/experiences/:id/toggle", adminMiddleware, async (req, res) => {
   try {
     const expId = __cleanId(req.params.id, 64);
-    if (!expId) return res.status(400).json({ message: "Invalid experienceId" });
+    if (!expId || !/^[a-fA-F0-9]{24}$/.test(expId)) return res.status(400).json({ message: "Invalid experienceId" });
     const exp = await Experience.findById(expId);
     if (!exp) return res.status(404).json({ message: "Not found" });
     exp.isPaused = !exp.isPaused;
