@@ -2256,13 +2256,23 @@ app.post("/api/experiences", authMiddleware, async (req, res) => {
   try {
     const body = req.body || {};
 
+    if (__isPlainObject(body) === false) return res.status(400).json({ message: "Invalid payload" });
+    const protoKeys = ["__proto__", "constructor", "prototype"];
+    for (const k of Object.keys(body)) {
+      if (protoKeys.includes(String(k))) return res.status(400).json({ message: "Invalid payload" });
+    }
+
+    const __toStr = (v) => String(v || "").trim();
+
     let tags = [];
     if (Array.isArray(body.tags)) tags = body.tags;
     else if (body.tags) tags = [body.tags];
+    tags = tags.map((t) => __toStr(t)).filter((t) => t);
     tags = [...new Set(tags.filter((t) => CATEGORY_PILLARS.includes(t)))];
 
-    const images = Array.isArray(body.images) ? body.images : [];
-    const imageUrl = images[0] || body.imageUrl || "";
+    let images = Array.isArray(body.images) ? body.images : [];
+    images = images.map((u) => __toStr(u)).filter((u) => u);
+    const imageUrl = images[0] || __toStr(body.imageUrl) || "";
 
     const allowed = [
       "title",
