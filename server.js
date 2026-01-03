@@ -3067,6 +3067,15 @@ app.post("/api/experiences/:id/book", authMiddleware, async (req, res) => {
     try {
       await releaseCapacitySlot(String(exp._id), bookingDateStr, timeSlotStr, guests);
     } catch (_) {}
+
+    // Do not leave an orphan pending_payment booking without a Stripe session.
+    try {
+      booking.status = "expired";
+      booking.paymentStatus = "unpaid";
+      booking.expiredAt = new Date();
+      await booking.save();
+    } catch (_) {}
+
     __log("error", "stripe_checkout_error", { rid: __ridFromReq(req), path: (req && req.originalUrl) ? req.originalUrl : undefined });
     res.status(500).json({ message: "Payment initialization failed" });
   }
