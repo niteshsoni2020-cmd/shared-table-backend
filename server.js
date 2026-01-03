@@ -1829,7 +1829,19 @@ async function reserveCapacitySlot(experienceId, dateStr, timeSlot, guests) {
   upd[SET] = { updatedAt: new Date() };
   upd[SET_ON_INSERT] = { maxGuests: maxGuests, createdAt: new Date() };
 
-  const r = await CapacitySlot.updateOne(q, upd, { upsert: true });
+  let r;
+  try {
+    r = await CapacitySlot.updateOne(q, upd, { upsert: true });
+  } catch (err) {
+    const code = (err && (err.code || err.errorCode)) || 0;
+    const msg = String(err && err.message ? err.message : "");
+    if (code === 11000 || code === 11001 || msg.indexOf("E11000") >= 0) {
+      // Another request upserted the same slot key concurrently. Retry once without upsert.
+      r = await CapacitySlot.updateOne(q, upd, { upsert: false });
+    } else {
+      throw err;
+    }
+  }
 
   const matched = Number(r && r.matchedCount) || 0;
   const upserted = Number(r && r.upsertedCount) || 0;
