@@ -2300,7 +2300,9 @@ app.post("/api/experiences", authMiddleware, async (req, res) => {
 // Experiences: Update (category sanitize)
 app.put("/api/experiences/:id", authMiddleware, async (req, res) => {
   try {
-    const exp = await Experience.findById(req.params.id);
+    const expId = __cleanId(req.params.id, 64);
+    if (!expId) return res.status(400).json({ message: "Invalid experienceId" });
+    const exp = await Experience.findById(expId);
     if (!exp || exp.hostId !== String(req.user._id)) return res.status(403).json({ message: "No" });
 
     const body = req.body || {};
@@ -2463,7 +2465,9 @@ app.put("/api/experiences/:id", authMiddleware, async (req, res) => {
 
 // Experiences: Delete
 app.delete("/api/experiences/:id", authMiddleware, async (req, res) => {
-  const exp = await Experience.findById(req.params.id);
+  const expId = __cleanId(req.params.id, 64);
+  if (!expId) return res.status(400).json({ message: "Invalid experienceId" });
+  const exp = await Experience.findById(expId);
   if (!exp || (exp.hostId !== String(req.user._id) && !req.user.isAdmin)) return res.status(403).json({ message: "No" });
 
   // Cancel all related bookings via canonical transition (timestamps/comms stay consistent)
@@ -2474,7 +2478,7 @@ app.delete("/api/experiences/:id", authMiddleware, async (req, res) => {
     }
   } catch (_) {}
 
-  await Experience.findByIdAndDelete(req.params.id);
+  await Experience.findByIdAndDelete(expId);
   res.json({ message: "Deleted" });
 });
 
@@ -2518,7 +2522,9 @@ app.get("/api/experiences", async (req, res) => {
 // Experience detail
 app.get("/api/experiences/:id", async (req, res) => {
   try {
-    const exp = await Experience.findById(req.params.id);
+    const expId = __cleanId(req.params.id, 64);
+    if (!expId) return res.status(400).json({ message: "Invalid experienceId" });
+    const exp = await Experience.findById(expId);
     if (!exp) return res.status(404).json({ message: "Not found" });
     const safe = stripExperiencePrivateFields((exp.toObject ? exp.toObject() : exp));
     return res.json(safe);
@@ -2530,7 +2536,9 @@ app.get("/api/experiences/:id", async (req, res) => {
 // Similar experiences
 app.get("/api/experiences/:id/similar", async (req, res) => {
   try {
-    const currentExp = await Experience.findById(req.params.id);
+    const expId = __cleanId(req.params.id, 64);
+    if (!expId) return res.status(400).json({ message: "Invalid experienceId" });
+    const currentExp = await Experience.findById(expId);
     if (!currentExp) return res.status(404).json({ message: "Not found" });
 
     const similar = await Experience.find({
@@ -2598,7 +2606,9 @@ app.get("/api/experiences/:id/attendees", authMiddleware, async (req, res) => {
 
 // Booking: Create + Stripe checkout
 app.post("/api/experiences/:id/book", authMiddleware, async (req, res) => {
-  const exp = await Experience.findById(req.params.id);
+  const expId = __cleanId(req.params.id, 64);
+  if (!expId) return res.status(400).json({ message: "Invalid experienceId" });
+  const exp = await Experience.findById(expId);
   if (!exp) return res.status(404).json({ message: "Experience not found" });
   const meId = String(((req.user && (req.user._id || req.user.id)) || (req.user && req.user.userId) || ""));
   const hostId = String(exp.hostId || "");
@@ -2909,7 +2919,9 @@ app.get("/api/my/bookings", authMiddleware, async (req, res) => {
 // Cancel booking
 app.post("/api/bookings/:id/cancel", authMiddleware, async (req, res) => {
   try {
-    const booking = await Booking.findById(req.params.id);
+    const bookingId = __cleanId(req.params.id, 64);
+    if (!bookingId) return res.status(400).json({ message: "Invalid bookingId" });
+    const booking = await Booking.findById(bookingId);
     if (!booking) return res.status(404).json({ message: "Booking not found" });
     if (String(booking.guestId) !== String(req.user._id)) return res.status(403).json({ message: "Unauthorized" });
 
@@ -3185,7 +3197,9 @@ app.get("/api/my/bookmarks/details", authMiddleware, async (req, res) => {
 // Booking visibility (friends feed opt-in)
 app.put("/api/bookings/:id/visibility", authMiddleware, async (req, res) => {
   try {
-    const booking = await Booking.findById(req.params.id);
+    const bookingId = __cleanId(req.params.id, 64);
+    if (!bookingId) return res.status(400).json({ message: "Invalid bookingId" });
+    const booking = await Booking.findById(bookingId);
     if (!booking) return res.status(404).json({ message: "Booking not found" });
     if (String(booking.guestId) !== String(req.user._id)) return res.status(403).json({ message: "Unauthorized" });
 
@@ -3275,7 +3289,9 @@ app.get("/api/social/requests", authMiddleware, async (req, res) => {
 // Social: accept / reject / block
 app.post("/api/social/requests/:id/accept", authMiddleware, async (req, res) => {
   try {
-    const c = await Connection.findById(req.params.id);
+    const connId = __cleanId(req.params.id, 64);
+    if (!connId) return res.status(400).json({ message: "Invalid requestId" });
+    const c = await Connection.findById(connId);
     if (!c) return res.status(404).json({ message: "Not found" });
     if (String(c.addresseeId) !== String(req.user._id)) return res.status(403).json({ message: "Unauthorized" });
     if (c.status !== "pending") return res.status(400).json({ message: "Not pending" });
@@ -3291,7 +3307,9 @@ app.post("/api/social/requests/:id/accept", authMiddleware, async (req, res) => 
 
 app.post("/api/social/requests/:id/reject", authMiddleware, async (req, res) => {
   try {
-    const c = await Connection.findById(req.params.id);
+    const connId = __cleanId(req.params.id, 64);
+    if (!connId) return res.status(400).json({ message: "Invalid requestId" });
+    const c = await Connection.findById(connId);
     if (!c) return res.status(404).json({ message: "Not found" });
     if (String(c.addresseeId) !== String(req.user._id)) return res.status(403).json({ message: "Unauthorized" });
     if (c.status !== "pending") return res.status(400).json({ message: "Not pending" });
@@ -3307,7 +3325,9 @@ app.post("/api/social/requests/:id/reject", authMiddleware, async (req, res) => 
 
 app.post("/api/social/requests/:id/block", authMiddleware, async (req, res) => {
   try {
-    const c = await Connection.findById(req.params.id);
+    const connId = __cleanId(req.params.id, 64);
+    if (!connId) return res.status(400).json({ message: "Invalid requestId" });
+    const c = await Connection.findById(connId);
     if (!c) return res.status(404).json({ message: "Not found" });
 
     const me = String(req.user._id);
@@ -3521,7 +3541,9 @@ app.get("/api/admin/experiences", adminMiddleware, async (req, res) => {
 
 app.patch("/api/admin/experiences/:id/toggle", adminMiddleware, async (req, res) => {
   try {
-    const exp = await Experience.findById(req.params.id);
+    const expId = __cleanId(req.params.id, 64);
+    if (!expId) return res.status(400).json({ message: "Invalid experienceId" });
+    const exp = await Experience.findById(expId);
     if (!exp) return res.status(404).json({ message: "Not found" });
     exp.isPaused = !exp.isPaused;
     await exp.save();
@@ -3533,7 +3555,9 @@ app.patch("/api/admin/experiences/:id/toggle", adminMiddleware, async (req, res)
 
 app.get("/api/users/:userId/profile", async (req, res) => {
   try {
-    const user = await User.findById(req.params.userId)
+    const userIdParam = __cleanId(req.params.userId, 64);
+    if (!userIdParam) return res.status(400).json({ message: "Invalid userId" });
+    const user = await User.findById(userIdParam)
       .select("name profilePic bio handle publicProfile createdAt")
       .lean();
 
