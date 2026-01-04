@@ -45,9 +45,11 @@ function renderVars(str, vars) {
 
 function loadTemplateById(id) {
   if (!id) throw new Error("TEMPLATE_ID_REQUIRED");
-  const file = path.join(process.cwd(), "emails", id);
+  const raw = String(id);
+  const base = raw.endsWith(".txt") ? raw.slice(0, -4) : raw;
+  const file = path.join(process.cwd(), "emails", base + ".txt");
   if (!fs.existsSync(file)) {
-    throw new Error("TEMPLATE_FILE_NOT_FOUND_" + id);
+    throw new Error("TEMPLATE_FILE_NOT_FOUND_" + base + ".txt");
   }
   return parseTemplate(fs.readFileSync(file, "utf-8"));
 }
