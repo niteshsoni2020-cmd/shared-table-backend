@@ -8,7 +8,7 @@
 
 | ID | Gate | Status | Evidence | Notes |
 |---|---|---:|---|---|
-| A1 | Email ownership verification | NO | - | YES only if token and route exist |
+| A1 | Email ownership verification | YES | L2413,2527 | Token + verify route exist |
 | A2 | Account states enforced | NO | - | Needs explicit state field plus enforcement |
 | A3 | Password policy | NO | - | YES requires min-length plus confirm enforcement |
 | A4 | Session revocation | NO | - | YES requires server-side revocation mechanism |
@@ -52,40 +52,6 @@
 - Local /health HTTP: 200
 - Notes:
   - FULL CLEAN AUDIT: last 4-5 days execution reflected
-| A1 | Email ownership verification | YES | L150,312 | Verified token + route exist |
-| A3 | Password policy | YES | L210,245 | Min-length + confirm enforced |
-| A4 | Session revocation | YES | L310,312 | Server-side revocation present |
-| A5 | Token governance | YES | L1553 | Expiry + versioning enforced |
-| A6 | Role safety | YES | L1033,1551,1607,2058,2261 | Privilege fields safe |
-| B1 | Confirm authority | YES | L50,311,315,316,317,3099 | Webhook + verify idempotent |
-| B2 | Payment states | PARTIAL | L473,531,532,1115,1117 | Failed + abandoned modeled |
-| B3 | Refund safety | PARTIAL | L541,550,557,1171,3360 | Explicit refund states |
-| B4 | Reconciliation job | PARTIAL | L1122,3388,4077 | Needs scheduled worker |
-| B5 | Disputes workflow | YES | L1179 | Workflow primitives verified |
-| B6 | Abuse thresholds | PARTIAL | L225,1123 | Thresholds enforced partially |
-| C1 | Policy snapshot | YES | L1148,1150,1153,1154,1255 | Snapshot fields exist |
-| C2 | Lifecycle states | PARTIAL | L390,473,1496,1522,1530 | Full explicit state list incomplete |
-| C3 | Host cancellation | YES | L1140,2616,3311,3320,4156 | Host cancel + refunds ok |
-| C4 | Completion transition | YES | L390,1522,1530,4077 | Confirmed → completed ok |
-| D1 | Job runner | PARTIAL | L4077 | Scheduler/queue needed |
-| D2 | Guest comms | PARTIAL | L919,942,965,988,1400 | Full comms coverage partial |
-| D3 | Host comms | PARTIAL | L24,804,942,946,988 | Coverage partial |
-| D4 | Admin alerts | NO | - | Alerts for refunds/disputes missing |
-| D5 | Delivery tracking | NO | - | Retry + tracking missing |
-| E1 | Admin audit trail | NO | - | Who/why/when missing |
-| E2 | Safe deletion | PARTIAL | L3905,3914 | Soft deletion partial |
-| E3 | State discipline | YES | L555,574,1488,2616,3215 | Constrained edits enforced |
-| E4 | Observability | YES | L59,60,61,64,66 | Logs + request IDs + redaction present |
-| E5 | Health/readiness | YES | L5,6,13,15,19 | DB + Stripe + Mail ok |
-| F1 | DTO minimization | YES | L1017,1266,1696,1752,1783 | Response DTO enforced |
-| F2 | Retention/erasure | PARTIAL | L1053,1119,1595,2112,2152 | Retention workflow partially enforced |
-| F3 | Privacy invariants | PARTIAL | L1,83,98,100,120 | PII minimization partially enforced |
-| G1 | Abuse controls | PARTIAL | L53,226,233,240,247 | Anti-spam / rate limits partially enforced |
-| G2 | Moderation workflow | NO | - | Reports + triage missing |
-| H1 | Tests | NO | - | No automated test script |
-| H2 | Migrations | NO | - | Migration/versioning missing |
-| H3 | Env guards | PARTIAL | L198,201,206,207,1551 | Boot-time env validation partial |
-| H4 | Seed safety | NO | - | Prod hard-stop + override flag missing |
 <!-- BATCH6_STATUS_SNAPSHOT_END -->
 
 <!-- PROD_VERIFY_START -->
