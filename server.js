@@ -2326,7 +2326,20 @@ app.post("/api/auth/register", registerLimiter, async (req, res) => {
 
     // Send verification email via templates (non-blocking)
     try {
-      const verifyUrl = __frontendBaseUrl() + "/verify-email?email=" + encodeURIComponent(String(user.email || "")) + "&token=" + encodeURIComponent(String(vtoken || ""));
+      const __apiBase = (() => {
+        try {
+          const env1 = (process && process.env && (process.env.BACKEND_BASE_URL || process.env.BASE_URL)) ? String(process.env.BACKEND_BASE_URL || process.env.BASE_URL) : "";
+          const envBase = env1.replace(/\/$/, "");
+          if (envBase) return envBase;
+          const proto = (req && (req.headers && (req.headers["x-forwarded-proto"] || req.headers["X-Forwarded-Proto"]))) ? String(req.headers["x-forwarded-proto"] || req.headers["X-Forwarded-Proto"]) : "";
+          const p2 = proto ? proto.split(",")[0].trim() : "";
+          const scheme = p2 || (req && req.protocol ? String(req.protocol) : "https");
+          const host = (req && req.get) ? String(req.get("host") || "") : "";
+          if (!host) return "";
+          return scheme + "://" + host;
+        } catch (_) { return ""; }
+      })();
+      const verifyUrl = (__apiBase || "") + "/api/auth/verify-email?email=" + encodeURIComponent(String(user.email || "")) + "&token=" + encodeURIComponent(String(vtoken || ""));
       __verifyUrl = String(verifyUrl || "");
       const __p = sendEventEmail({
         eventName: "EMAIL_VERIFICATION",
@@ -2383,7 +2396,11 @@ app.get("/api/auth/verify-email", async (req, res) => {
       return res.status(400).json({ message: "Invalid or expired token" });
     }
     const th = crypto.createHash("sha256").update(token).digest("hex");
-    if (String(th) !== String(user.emailVerificationTokenHash)) {
+    const __stored = String(user.emailVerificationTokenHash || "");
+    const __th = String(th || "");
+    const __tok = String(token || "");
+    const __ok = (__stored && ((__th && __th === __stored) || (__tok && __tok === __stored)));
+    if (!__ok) {
       return res.status(400).json({ message: "Invalid or expired token" });
     }
 
@@ -2416,7 +2433,7 @@ app.post("/api/auth/login", loginLimiter, async (req, res) => {
     const user = await User.findOne({ email: String(email).toLowerCase().trim() });
     if (!user) return res.status(401).json({ message: "Invalid credentials" });
 
-    if (user && user.emailVerified === false) {
+    if (user && user.emailVerified !== true) {
       return res.status(403).json({ message: "Please verify your email.", code: "email_not_verified" });
     }
 
