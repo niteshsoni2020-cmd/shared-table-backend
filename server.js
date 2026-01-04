@@ -2578,6 +2578,9 @@ app.post("/api/auth/login", loginLimiter, async (req, res) => {
 
     const user = await User.findOne({ email: String(email).toLowerCase().trim() });
     if (!user) return res.status(401).json({ message: "Invalid credentials" });
+      if (user.emailVerified !== true) {
+        return res.status(403).json({ message: "Email not verified" });
+      }
 
     if (user && user.emailVerified !== true) {
       return res.status(403).json({ message: "Please verify your email.", code: "email_not_verified" });

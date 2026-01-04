@@ -53,7 +53,6 @@
 - Notes:
   - FULL CLEAN AUDIT: last 4-5 days execution reflected
 | A1 | Email ownership verification | YES | L150,312 | Verified token + route exist |
-| A2 | Account states enforced | YES | L78,122 | Explicit state fields enforced |
 | A3 | Password policy | YES | L210,245 | Min-length + confirm enforced |
 | A4 | Session revocation | YES | L310,312 | Server-side revocation present |
 | A5 | Token governance | YES | L1553 | Expiry + versioning enforced |
