@@ -1166,6 +1166,10 @@ const userSchema = new mongoose.Schema(
     // Password reset (email-optional; token stored as hash)
     passwordResetTokenHash: { type: String, default: "" },
     emailVerified: { type: Boolean, default: false },
+    accountStatus: { type: String, default: "active" }, // active|disabled|suspended|banned|locked|deleted
+    accountStatusChangedAt: { type: Date, default: null },
+    accountStatusReason: { type: String, default: "" },
+    tokenVersion: { type: Number, default: 0 },
     emailVerificationTokenHash: { type: String, default: "" },
     emailVerificationRequestedAt: { type: Date, default: null },
     emailVerificationExpiresAt: { type: Date, default: null },
@@ -1938,7 +1942,7 @@ function __passwordPolicyOk(pw) {
 
 function signToken(user) {
   if (!JWT_SECRET) throw new Error("Missing JWT_SECRET");
-  return jwt.sign({ userId: String(user._id), isAdmin: !!user.isAdmin }, JWT_SECRET, {
+  return jwt.sign({ userId: String(user._id), isAdmin: !!user.isAdmin, tv: Number(user.tokenVersion || 0) }, JWT_SECRET, {
     expiresIn: "30d",
   });
 }
@@ -1964,6 +1968,17 @@ async function authMiddleware(req, res, next) {
 
     if (user.emailVerified !== true) {
       return res.status(403).json({ message: "Email not verified" });
+    }
+
+    const st = String(user.accountStatus || "active");
+    if (st && st !== "active") {
+      return res.status(403).json({ message: "Account not active" });
+    }
+
+    const tv = Number.isFinite(Number(user.tokenVersion)) ? Number(user.tokenVersion) : 0;
+    const ptv = Number.isFinite(Number(payload.tv)) ? Number(payload.tv) : 0;
+    if (ptv != tv) {
+      return res.status(401).json({ message: "Session revoked" });
     }
 
     req.user = user;
@@ -2001,6 +2016,30 @@ function adminMiddleware(req, res, next) {
     next();
   });
 }
+
+
+// --- AUTH SESSION CONTROL (REVOCATION) ---
+app.post("/api/auth/logout", authMiddleware, async (req, res) => {
+  try {
+    const cur = Number.isFinite(Number(req.user.tokenVersion)) ? Number(req.user.tokenVersion) : 0;
+    req.user.tokenVersion = cur + 1;
+    await req.user.save();
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(500).json({ message: "Server error" });
+  }
+});
+
+app.post("/api/auth/logout-all", authMiddleware, async (req, res) => {
+  try {
+    const cur = Number.isFinite(Number(req.user.tokenVersion)) ? Number(req.user.tokenVersion) : 0;
+    req.user.tokenVersion = cur + 1;
+    await req.user.save();
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(500).json({ message: "Server error" });
+  }
+});
 
 // --- POLICY ROUTES ---
 app.get("/api/policy/active", async (req, res) => {
@@ -2586,6 +2625,11 @@ app.post("/api/auth/login", loginLimiter, async (req, res) => {
     if (!user) return res.status(401).json({ message: "Invalid credentials" });
       if (user.emailVerified !== true) {
         return res.status(403).json({ message: "Email not verified" });
+
+      const st = String(user.accountStatus || "active");
+      if (st && st !== "active") {
+        return res.status(403).json({ message: "Account not active" });
+      }
       }
 
     if (user && user.emailVerified !== true) {
