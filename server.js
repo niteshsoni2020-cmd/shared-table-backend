@@ -2339,13 +2339,14 @@ app.post("/api/auth/register", registerLimiter, async (req, res) => {
           return scheme + "://" + host;
         } catch (_) { return ""; }
       })();
-      const verifyUrl = (__apiBase || "") + "/api/auth/verify-email?email=" + encodeURIComponent(String(user.email || "")) + "&token=" + encodeURIComponent(String(vtoken || ""));
-      __verifyUrl = String(verifyUrl || "");
+      const verifyUrlBackend = (__apiBase || "") + "/api/auth/verify-email?email=" + encodeURIComponent(String(user.email || "")) + "&token=" + encodeURIComponent(String(vtoken || ""));
+      const verifyUrlFrontend = __frontendBaseUrl() + "/verify-email?email=" + encodeURIComponent(String(user.email || "")) + "&token=" + encodeURIComponent(String(vtoken || ""));
+      __verifyUrl = String(verifyUrlBackend || "");
       const __p = sendEventEmail({
         eventName: "EMAIL_VERIFICATION",
         category: "SECURITY",
         to: String(user.email || ""),
-        vars: { Name: String(user.name || "there"), VERIFY_EMAIL_URL: String(verifyUrl || "") }
+        vars: { Name: String(user.name || "there"), VERIFY_EMAIL_URL: String(verifyUrlFrontend || "") }
       });
       const __t = new Promise((_, rej) => setTimeout(() => rej(new Error("email_timeout")), 6000));
       Promise.race([__p, __t]).catch(() => {});
@@ -2411,12 +2412,14 @@ app.get("/api/auth/verify-email", async (req, res) => {
     await user.save();
 
     try {
-      await sendEventEmail({
+      const __p = sendEventEmail({
         eventName: "WELCOME_POST_VERIFICATION",
         category: "NOTIFICATIONS",
         to: String(user.email || ""),
         vars: { Name: String(user.name || "there"), DASHBOARD_URL: __dashboardUrl() }
       });
+      const __t = new Promise((_, rej) => setTimeout(() => rej(new Error("email_timeout")), 6000));
+      Promise.race([__p, __t]).catch(() => {});
     } catch (_) {}
 
     return res.json({ ok: true });
