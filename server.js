@@ -3445,7 +3445,11 @@ app.post("/api/experiences/:id/book", authMiddleware, async (req, res) => {
 
     booking.stripeSessionId = session.id;
     await booking.save();
-    res.json({ url: session.url });
+    return res.json({
+      bookingId: String(booking._id),
+      sessionId: String(session.id),
+      url: session.url,
+    });
   } catch (e) {
     try {
       await releaseCapacitySlot(String(exp._id), bookingDateStr, timeSlotStr, guests);
