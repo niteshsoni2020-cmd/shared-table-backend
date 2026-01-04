@@ -98,8 +98,8 @@ const seed = async () => {
 
     console.log('🌱 Seeding Users...');
 
-    const adminPass = await bcrypt.hash('admin', 10);
-    const userPass = await bcrypt.hash('123', 10);
+    const adminPass = await bcrypt.hash('Admin1234', 10);
+    const userPass = await bcrypt.hash('Test1234', 10);
 
     // Admin account (not shown as a host card)
     const admin = await User.create({
