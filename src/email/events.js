@@ -19,7 +19,7 @@ const EVENTS = {
   HOST_APPLICATION_APPROVED: "18_host_application_approved.txt",
   HOST_APPLICATION_DECLINED: "19_host_application_declined.txt",
   PAYMENT_FAILED: "20_payment_failed.txt",
-  BOOKING_EXPIRED_GUEST: "21_booking_expired.txt",
+  BOOKING_EXPIRED: "21_booking_expired.txt",
   BOOKING_EXPIRED_HOST: "21_booking_expired_host.txt",
   EXPERIENCE_UPDATED_GUEST: "22_experience_updated_guest.txt",
   EXPERIENCE_UPDATED_HOST: "23_experience_updated_host.txt",
@@ -29,12 +29,25 @@ const EVENTS = {
   EXPERIENCE_RECOMMENDATION: "27_experience_recommendation.txt",
   HOST_PAYOUT_PROCESSED: "28_host_payout_processed.txt",
   REFUND_PROCESSED: "29_refund_processed.txt",
-  SYSTEM_MESSAGE: "30_system_message.txt",
+  SYSTEM_MESSAGE: "30_system_message.txt"
 };
 
-function getTemplateForEvent(e) {
-  if (!(e in EVENTS)) throw new Error("EMAIL_EVENT_UNKNOWN_" + e);
-  return EVENTS[e];
+const ALIASES = {
+  BOOKING_EXPIRED_GUEST: "BOOKING_EXPIRED"
+};
+
+function normalizeEventName(ev) {
+  const s = String(ev || "").trim().toUpperCase();
+  if (!s) return "";
+  return ALIASES[s] || s;
+}
+
+function getTemplateForEvent(eventName) {
+  const ev = normalizeEventName(eventName);
+  if (!ev) throw new Error("EMAIL_EVENT_NAME_REQUIRED");
+  const id = EVENTS[ev];
+  if (!id) throw new Error("EMAIL_EVENT_UNKNOWN_" + ev);
+  return id;
 }
 
 module.exports = { getTemplateForEvent };

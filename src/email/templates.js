@@ -34,17 +34,14 @@ function extractVars(str) {
 }
 
 function renderVars(str, vars) {
-  const required = extractVars(str);
-  for (const key of required) {
-    if (!(key in vars)) {
-      throw new Error("TEMPLATE_VAR_MISSING_" + key);
-    }
-    if (String(vars[key]).trim().length === 0) {
-      throw new Error("TEMPLATE_VAR_EMPTY_" + key);
-    }
-  }
-  return str.replace(/\{\{([A-Za-z0-9_]+)\}\}/g, (_, k) => String(vars[k]));
+  const v = (vars && typeof vars === "object") ? vars : {};
+  return str.replace(/\{\{([A-Za-z0-9_]+)\}\}/g, (_, k) => {
+    const raw = Object.prototype.hasOwnProperty.call(v, k) ? v[k] : "";
+    const s = String(raw == null ? "" : raw).trim();
+    return (s.length > 0) ? s : "—";
+  });
 }
+
 
 function loadTemplateById(id) {
   if (!id) throw new Error("TEMPLATE_ID_REQUIRED");

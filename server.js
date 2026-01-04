@@ -1458,6 +1458,8 @@ async function maybeSendBookingConfirmedComms(booking) {
       EXPERIENCE_TITLE: expTitle,
       BOOKING_DATE: bookingDate,
       TIME_SLOT: timeSlot,
+      DATE: bookingDate,
+      TIME: timeSlot,
       DASHBOARD_URL: __dashboardUrl()
     };
 
@@ -1537,6 +1539,8 @@ async function maybeSendBookingCancelledComms(booking) {
       EXPERIENCE_TITLE: expTitle,
       BOOKING_DATE: bookingDate,
       TIME_SLOT: timeSlot,
+      DATE: bookingDate,
+      TIME: timeSlot,
       DASHBOARD_URL: __dashboardUrl()
     };
 
@@ -1612,6 +1616,8 @@ async function maybeSendBookingExpiredComms(booking) {
       EXPERIENCE_TITLE: expTitle,
       BOOKING_DATE: bookingDate,
       TIME_SLOT: timeSlot,
+      DATE: bookingDate,
+      TIME: timeSlot,
       DASHBOARD_URL: __dashboardUrl()
     };
 
@@ -1684,6 +1690,9 @@ async function maybeSendRefundProcessedComms(booking) {
       EXPERIENCE_TITLE: expTitle,
       BOOKING_DATE: bookingDate,
       TIME_SLOT: timeSlot,
+      DATE: bookingDate,
+      TIME: timeSlot,
+      AMOUNT: String((b && (b.refundAmount || b.refundAmountCents || b.amountRefunded || b.amount || b.totalAmount || b.total)) || "").trim(),
       DASHBOARD_URL: __dashboardUrl()
     };
 
@@ -1744,6 +1753,8 @@ async function maybeSendBookingCancelledByHostComms(booking) {
       EXPERIENCE_TITLE: expTitle,
       BOOKING_DATE: bookingDate,
       TIME_SLOT: timeSlot,
+      DATE: bookingDate,
+      TIME: timeSlot,
       DASHBOARD_URL: __dashboardUrl()
     };
 
@@ -2342,6 +2353,7 @@ app.post("/api/auth/register", registerLimiter, async (req, res) => {
       const verifyUrlBackend = (__apiBase || "") + "/api/auth/verify-email?email=" + encodeURIComponent(String(user.email || "")) + "&token=" + encodeURIComponent(String(vtoken || ""));
       const verifyUrlFrontend = __frontendBaseUrl() + "/verify-email?email=" + encodeURIComponent(String(user.email || "")) + "&token=" + encodeURIComponent(String(vtoken || ""));
       __verifyUrl = String(verifyUrlBackend || "");
+      const __need = ["Name", "VERIFY_EMAIL_URL"];
       const __p = sendEventEmail({
         eventName: "EMAIL_VERIFICATION",
         category: "SECURITY",
@@ -2412,6 +2424,7 @@ app.get("/api/auth/verify-email", async (req, res) => {
     await user.save();
 
     try {
+      const __need = ["Name", "DASHBOARD_URL"];
       const __p = sendEventEmail({
         eventName: "WELCOME_POST_VERIFICATION",
         category: "NOTIFICATIONS",
@@ -2478,6 +2491,7 @@ app.post("/api/auth/forgot-password", forgotPasswordLimiter, async (req, res) =>
       if (canEmail) {
         // Do not block the HTTP response on email delivery (email can hang on misconfig)
         try {
+          const __need = ["Name", "RESET_PASSWORD_URL"];
           const __p = sendEventEmail({
             eventName: "PASSWORD_RESET_REQUEST",
             category: "SECURITY",

@@ -1,0 +1,16 @@
+Subject: A booking request expired
+
+Hi {{HOST_NAME}},
+
+A booking request for your experience expired due to incomplete payment.
+
+Experience: {{EXPERIENCE_TITLE}}  
+Date: {{BOOKING_DATE}}  
+Time: {{TIME_SLOT}}  
+Guest: {{GUEST_NAME}}
+
+You can review your bookings from your dashboard:
+{{DASHBOARD_URL}}
+
+Warmly,  
+The Shared Table Story
