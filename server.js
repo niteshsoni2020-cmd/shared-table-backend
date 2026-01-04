@@ -2400,7 +2400,7 @@ app.get("/api/auth/verify-email", async (req, res) => {
     const __stored = String(user.emailVerificationTokenHash || "");
     const __th = String(th || "");
     const __tok = String(token || "");
-    const __ok = (__stored && ((__th && __th === __stored) || (__tok && __tok === __stored)));
+    const __ok = (!!__stored && !!__th && (__th === __stored));
     if (!__ok) {
       return res.status(400).json({ message: "Invalid or expired token" });
     }
