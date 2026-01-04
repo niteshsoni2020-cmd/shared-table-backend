@@ -2322,9 +2322,12 @@ app.post("/api/auth/register", registerLimiter, async (req, res) => {
 
     await user.save();
 
+    let __verifyUrl = "";
+
     // Send verification email via templates (non-blocking)
     try {
       const verifyUrl = __frontendBaseUrl() + "/verify-email?email=" + encodeURIComponent(String(user.email || "")) + "&token=" + encodeURIComponent(String(vtoken || ""));
+      __verifyUrl = String(verifyUrl || "");
       const __p = sendEventEmail({
         eventName: "EMAIL_VERIFICATION",
         category: "SECURITY",
@@ -2335,7 +2338,27 @@ app.post("/api/auth/register", registerLimiter, async (req, res) => {
       Promise.race([__p, __t]).catch(() => {});
     } catch (_) {}
 
-    res.status(201).json({ token: signToken(user), user: sanitizeUser(user) });
+    const __resp = { token: signToken(user), user: sanitizeUser(user) };
+
+    const __vdbgSecret = String(process.env.VERIFY_DEBUG_SECRET || "").trim();
+    const __vdbgHeader = String((req.headers && (req.headers["x-verify-debug-secret"] || req.headers["X-Verify-Debug-Secret"])) || "").trim();
+
+    if (__vdbgSecret.length >= 24 && __vdbgHeader) {
+      const a = __vdbgSecret;
+      const b = __vdbgHeader;
+      const n = (a.length > b.length) ? a.length : b.length;
+      let acc = 0;
+      for (let idx = 0; idx < n; idx++) {
+        const ca = (idx < a.length) ? a.charCodeAt(idx) : 0;
+        const cb = (idx < b.length) ? b.charCodeAt(idx) : 0;
+        acc = acc | (ca ^ cb);
+      }
+      if (acc === 0 && __verifyUrl) {
+        __resp.dev = { verifyUrl: String(__verifyUrl) };
+      }
+    }
+
+    return res.status(201).json(__resp);
   } catch (e) {
     __log("error", "auth_register_error", { rid: __ridFromReq(req), path: (req && req.originalUrl) ? req.originalUrl : undefined });
     res.status(500).json({ message: "Error" });
