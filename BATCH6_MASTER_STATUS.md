@@ -89,4 +89,9 @@
 | H4 | Seed safety | NO | - | Prod hard-stop + override flag missing |
 <!-- BATCH6_STATUS_SNAPSHOT_END -->
 
-
+<!-- PROD_VERIFY_START -->
+## Production Verification (AUTO)
+- Verified (UTC): 2026-01-04 23:06:50Z
+- Prod /version sha: 
+- Evidence: curl https://shared-table-api.onrender.com/version
+<!-- PROD_VERIFY_END -->

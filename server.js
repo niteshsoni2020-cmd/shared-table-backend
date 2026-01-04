@@ -2494,7 +2494,7 @@ app.post("/api/auth/register", registerLimiter, async (req, res) => {
       Promise.race([__p, __t]).catch(() => {});
     } catch (_) {}
 
-    const __resp = { token: signToken(user), user: sanitizeUser(user) };
+    const __resp = { success: true, token: signToken(user), user: sanitizeUser(user) };
 
     const __vdbgSecret = String(process.env.VERIFY_DEBUG_SECRET || "").trim();
     const __vdbgHeader = String((req.headers && (req.headers["x-verify-debug-secret"] || req.headers["X-Verify-Debug-Secret"])) || "").trim();
