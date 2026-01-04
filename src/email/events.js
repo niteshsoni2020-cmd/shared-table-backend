@@ -51,3 +51,4 @@ function getTemplateForEvent(eventName) {
 }
 
 module.exports = { getTemplateForEvent };
+

@@ -481,6 +481,38 @@ app.post(
 
         await booking.save();
 
+        try {
+          if (!booking.comms || typeof booking.comms !== "object") booking.comms = {};
+          const __already = booking.comms.invoiceReceiptGuestSentAt ? new Date(booking.comms.invoiceReceiptGuestSentAt) : null;
+          if (!__already) {
+            const __to = booking.guestEmail ? String(booking.guestEmail).trim() : "";
+            const __nm = booking.guestName ? String(booking.guestName).trim() : "";
+            const __date = booking.bookingDate ? String(booking.bookingDate).trim() : "";
+            const __title = booking.experienceTitle ? String(booking.experienceTitle).trim() : (booking.title ? String(booking.title).trim() : "");
+            const __cur = booking.currency ? String(booking.currency).trim().toUpperCase() : "AUD";
+            let __cents = null;
+            if (Number.isFinite(Number(booking.amountCents))) __cents = Number(booking.amountCents);
+            else if (booking.pricing && Number.isFinite(Number(booking.pricing.totalCents))) __cents = Number(booking.pricing.totalCents);
+            const __amt = (__cents === null) ? "" : (__cur + " " + (Number(__cents) / 100).toFixed(2));
+            if (__to) {
+              await sendEventEmail({
+                to: __to,
+                eventName: "INVOICE_RECEIPT_GUEST",
+                category: "PAYMENTS",
+                vars: {
+                  DASHBOARD_URL: __dashboardUrl(),
+                  Name: __nm,
+                  DATE: __date,
+                  EXPERIENCE_TITLE: __title,
+                  AMOUNT: __amt
+                }
+              });
+              booking.comms.invoiceReceiptGuestSentAt = new Date();
+              await booking.save();
+            }
+          }
+        } catch (_) {}
+
 
       }
 
@@ -546,6 +578,29 @@ app.post(
 
         // Keep paymentStatus as unpaid unless already paid/confirmed
         if (String(booking.paymentStatus || "unpaid") !== "paid") booking.paymentStatus = "unpaid";
+
+        try {
+          if (!booking.comms || typeof booking.comms !== "object") booking.comms = {};
+          const __sent = booking.comms.paymentFailedSentAt ? new Date(booking.comms.paymentFailedSentAt) : null;
+          const __isExpired = (event.type === "checkout.session.expired");
+          const __isFail = (piStatus === "requires_payment_method" || piStatus === "canceled" || piStatus === "cancelled");
+          if (!__sent && (__isExpired || (__isFail && stripeStatus !== "paid"))) {
+            const __to = booking.guestEmail ? String(booking.guestEmail).trim() : "";
+            const __nm = booking.guestName ? String(booking.guestName).trim() : "";
+            if (__to) {
+              await sendEventEmail({
+                to: __to,
+                eventName: "PAYMENT_FAILED",
+                category: "PAYMENTS",
+                vars: {
+                  DASHBOARD_URL: __dashboardUrl(),
+                  Name: __nm
+                }
+              });
+              booking.comms.paymentFailedSentAt = new Date();
+            }
+          }
+        } catch (_) {}
 
         await booking.save();
         return res.json({ received: true });
@@ -1146,6 +1201,7 @@ const bookingSchema = new mongoose.Schema(
 
     expiresAt: { type: Date, default: null },
     pricing: Object,
+    comms: { type: Object, default: {} },
 
     // Payment reconciliation
     // Payment attempt governance (anti-abuse / user protection)
@@ -1660,7 +1716,11 @@ async function maybeSendBookingExpiredComms(booking) {
 async function maybeSendRefundProcessedComms(booking) {
   try {
     if (!booking) return;
-    if (booking.refundedAt) return;
+    try {
+      if (!booking.comms || typeof booking.comms !== "object") booking.comms = {};
+      const already = booking.comms.refundProcessedGuestSentAt ? new Date(booking.comms.refundProcessedGuestSentAt) : null;
+      if (already) return;
+    } catch (_) {}
 
     const b = booking || {};
     const guestEmail = String(b.guestEmail || "").trim();
@@ -1692,7 +1752,33 @@ async function maybeSendRefundProcessedComms(booking) {
       TIME_SLOT: timeSlot,
       DATE: bookingDate,
       TIME: timeSlot,
-      AMOUNT: String((b && (b.refundAmount || b.refundAmountCents || b.amountRefunded || b.amount || b.totalAmount || b.total)) || "").trim(),
+      AMOUNT: (function() {
+        try {
+          const cur = String((b && b.currency) || "aud").trim().toUpperCase() || "AUD";
+          let cents = null;
+          const cands = [
+            (b && (b.refundAmountCents)),
+            (b && (b.refundAmount)),
+            (b && (b.amountRefunded)),
+            (b && (b.amountCents)),
+            (b && (b.amount)),
+            (b && (b.totalAmount)),
+            (b && (b.total)),
+            (b && b.pricing && b.pricing.totalCents)
+          ];
+          for (const v of cands) {
+            const n = Number(v);
+            if (Number.isFinite(n) && n > 0) { cents = n; break; }
+          }
+          if (cents === null) return "";
+          // If it looks like dollars (small number), treat as dollars; else treat as cents.
+          const isDollars = cents > 0 && cents < 1000;
+          const amt = isDollars ? Number(cents).toFixed(2) : (Number(cents) / 100).toFixed(2);
+          return cur + " " + amt;
+        } catch (_) {
+          return "";
+        }
+      })(),
       DASHBOARD_URL: __dashboardUrl()
     };
 
@@ -1709,6 +1795,11 @@ async function maybeSendRefundProcessedComms(booking) {
         to: guestEmail,
         vars: __vars
       });
+      try {
+        if (!booking.comms || typeof booking.comms !== "object") booking.comms = {};
+        booking.comms.refundProcessedGuestSentAt = new Date();
+        await booking.save();
+      } catch (_) {}
     }
 
     void hostEmail;
@@ -2590,6 +2681,23 @@ app.post("/api/auth/reset-password", resetPasswordLimiter, async (req, res) => {
     user.passwordResetExpiresAt = null;
     user.passwordResetRequestedAt = null;
     await user.save();
+
+    // Comms: password changed confirmation
+    try {
+      const __to = (user && user.email) ? String(user.email).trim() : "";
+      const __nm = (user && user.name) ? String(user.name).trim() : "";
+      if (__to) {
+        await sendEventEmail({
+          to: __to,
+          eventName: "PASSWORD_CHANGED_CONFIRMATION",
+          category: "SECURITY",
+          vars: {
+            DASHBOARD_URL: __dashboardUrl(),
+            Name: __nm
+          }
+        });
+      }
+    } catch (_) {}
 
     return res.json({ ok: true });
   } catch (e) {
@@ -3479,6 +3587,26 @@ app.post("/api/experiences/:id/book", authMiddleware, async (req, res) => {
     try { await releaseCapacitySlot(String(exp._id), bookingDateStr, timeSlotStr, guests); } catch (_) {}
     throw e;
   }
+  // Comms: booking request submitted (guest)
+  try {
+    const __guestEmail = (req.user && req.user.email) ? String(req.user.email).trim() : "";
+    const __guestNameSafe = (req.user && req.user.name) ? String(req.user.name).trim() : "";
+    if (__guestEmail) {
+      await sendEventEmail({
+        to: __guestEmail,
+        eventName: "BOOKING_REQUEST_SUBMITTED",
+        category: "NOTIFICATIONS",
+        vars: {
+          DASHBOARD_URL: __dashboardUrl(),
+          DATE: bookingDateStr,
+          TIME: timeSlotStr,
+          EXPERIENCE_TITLE: String(exp.title || ""),
+          Name: __guestNameSafe
+        }
+      });
+    }
+  } catch (_) {}
+
   try {
     const baseUrl = __requirePublicUrl();
     const session = await stripe.checkout.sessions.create({

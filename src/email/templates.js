@@ -52,6 +52,12 @@ function loadTemplateById(id) {
   return parseTemplate(fs.readFileSync(file, "utf-8"));
 }
 
+function requiredVarsForTemplateId(id) {
+  const t = loadTemplateById(id);
+  const combined = String(t.subject || "") + "\n" + String(t.body || "");
+  return extractVars(combined);
+}
+
 function renderTemplate(id, vars) {
   const t = loadTemplateById(id);
   return {
@@ -60,4 +66,4 @@ function renderTemplate(id, vars) {
   };
 }
 
-module.exports = { renderTemplate };
+module.exports = { renderTemplate, requiredVarsForTemplateId };
