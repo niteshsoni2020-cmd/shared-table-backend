@@ -1629,7 +1629,7 @@ async function maybeSendBookingExpiredComms(booking) {
     }
     if (guestEmail.length > 0) {
       await sendEventEmail({
-        eventName: "BOOKING_EXPIRED_GUEST",
+        eventName: "BOOKING_EXPIRED",
         category: "NOTIFICATIONS",
         to: guestEmail,
         vars: __vars
