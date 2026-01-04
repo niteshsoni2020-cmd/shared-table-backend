@@ -851,9 +851,10 @@ mongoose
   try { await ensureDefaultPolicyExists(); } catch (_) {}
   try { await __ensureStripeWebhookIndex(); } catch (_) {}
   __log("info", "db_connected", { rid: undefined, path: undefined });
-
-  // Start unpaid booking expiry cleanup scheduler only after DB is connected
+  try { global.__tsts_db_connected = true; } catch (_) {}
   try { startUnpaidBookingExpiryCleanupLoop_V1(); } catch (_) {}
+
+
 })
   .catch((err) => { __log("error", "db_connect_error", { rid: undefined, path: undefined }); });
 
@@ -2438,10 +2439,15 @@ app.post("/api/auth/register", registerLimiter, async (req, res) => {
     if (typeof clean.handle !== "undefined") clean.handle = String(clean.handle || "").trim().toLowerCase();
     if (typeof clean.email !== "undefined") clean.email = String(clean.email).toLowerCase().trim();
     const emailNorm = String(body.email || "").toLowerCase().trim();
-    if (!emailNorm || !body.password) return res.status(400).json({ message: "Email and password required" });
+    const pwRaw = (typeof body.password === "undefined") ? "" : String(body.password || "");
+    const pwConf = (typeof body.confirmPassword === "undefined") ? "" : String(body.confirmPassword || "");
+    if (!emailNorm || !pwRaw || !pwConf) return res.status(400).json({ message: "Email, password and confirmPassword required" });
+    if (pwRaw !== pwConf) return res.status(400).json({ message: "Passwords do not match", code: "password_confirm_register" });
+    const __pp = __passwordPolicyOk(pwRaw);
+    if (!__pp.ok) return res.status(400).json({ message: __pp.reason, code: "password_policy_register" });
     if (await User.findOne({ email: emailNorm })) return res.status(400).json({ message: "Taken" });
 
-    const hashedPassword = await bcrypt.hash(String(body.password), 10);
+    const hashedPassword = await bcrypt.hash(String(pwRaw), 10);
     clean.email = emailNorm;
 
     const user = new User({
@@ -2702,6 +2708,11 @@ app.post("/api/auth/reset-password", resetPasswordLimiter, async (req, res) => {
 
     if (!email || !token || !newPasswordRaw) return res.status(400).json({ message: "Missing fields" });
     if (newPasswordRaw.length < 8) return res.status(400).json({ message: "Password too short" });
+    const confRaw = String(((req.body && (typeof req.body.confirmPassword !== "undefined" ? req.body.confirmPassword : req.body.confirmNewPassword)) ) || "");
+    if (!confRaw) return res.status(400).json({ message: "confirmPassword required" });
+    if (String(newPasswordRaw) != String(confRaw)) return res.status(400).json({ message: "Passwords do not match", code: "password_confirm_reset" });
+    const __pp2 = __passwordPolicyOk(newPasswordRaw);
+    if (!__pp2.ok) return res.status(400).json({ message: __pp2.reason, code: "password_policy_reset" });
 
     const user = await User.findOne({ email });
     if (!user) return res.status(400).json({ message: "Invalid or expired token" });
@@ -2716,8 +2727,6 @@ app.post("/api/auth/reset-password", resetPasswordLimiter, async (req, res) => {
       return res.status(400).json({ message: "Invalid or expired token" });
     }
 
-    const __pp2 = __passwordPolicyOk(((req.body && (req.body.password || req.body.newPassword)) || ""));
-    if (!__pp2.ok) return res.status(400).json({ message: __pp2.reason, code: "password_policy_reset" });
     user.password = await bcrypt.hash(newPasswordRaw, 10);
     user.passwordResetTokenHash = "";
     user.passwordResetExpiresAt = null;
@@ -2729,7 +2738,7 @@ app.post("/api/auth/reset-password", resetPasswordLimiter, async (req, res) => {
       const __to = (user && user.email) ? String(user.email).trim() : "";
       const __nm = (user && user.name) ? String(user.name).trim() : "";
       if (__to) {
-        await sendEventEmail({
+        sendEventEmail({
           to: __to,
           eventName: "PASSWORD_CHANGED_CONFIRMATION",
           category: "SECURITY",
@@ -4698,6 +4707,33 @@ app.get("/version", (req, res) => {
     "unknown";
   return res.json({ service: "shared-table-api", sha });
 });
+
+// STARTUP: do not accept traffic until DB is ready (avoid mongoose buffering dead-hangs)
+async function __startServerAfterDb() {
+  try {
+    // Wait for mongoose connection to be readyState=1
+    const t0 = Date.now();
+    while (!(global && global.__tsts_db_connected === true)) {
+      if (Date.now() - t0 > 30000) {
+        console.error("STARTUP_DB_TIMEOUT");
+        process.exit(1);
+      }
+      await new Promise((r) => setTimeout(r, 100));
+    }
+
+    // Start job loops only after DB is ready
+    // jobs start after db_connected
+
+
+    app.listen(PORT, () => {
+      try { __log("info", "server_listen", { rid: undefined, path: undefined }); } catch (_) {}
+    });
+  } catch (e) {
+    console.error("STARTUP_FATAL", (e && e.message) ? e.message : String(e));
+    process.exit(1);
+  }
+}
+
 app.get("/health", (req, res) => {
   try {
     const uptime = process.uptime();
@@ -4728,7 +4764,7 @@ app.get("/health", (req, res) => {
   }
 });
 
-app.listen(PORT, () => { __log("info", "server_listen", { rid: undefined, path: undefined }); });
+__startServerAfterDb();
 
 // ===== BOOKING STATE TRANSITIONS =====
 // Single canonical transition handler.
