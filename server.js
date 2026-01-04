@@ -50,6 +50,26 @@ const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 const STRIPE_WEBHOOK_SECRET = String(process.env.STRIPE_WEBHOOK_SECRET || "");
 const nodemailer = require("nodemailer");
 const { sendEventEmail } = require("./src/email");
+
+function __fireAndForgetEmail(payload) {
+  try {
+    const p = sendEventEmail(payload);
+    if (p && typeof p.catch === "function") {
+      p.catch(function(e) {
+        try {
+          const msg = (e && e.message) ? e.message : String(e);
+          console.error("EMAIL_ASYNC_ERR", msg);
+        } catch (_) {}
+      });
+    }
+  } catch (e) {
+    try {
+      const msg = (e && e.message) ? e.message : String(e);
+      console.error("EMAIL_DISPATCH_ERR", msg);
+    } catch (_) {}
+  }
+}
+
 const bcrypt = require("bcryptjs");
 const rateLimit = require("express-rate-limit");
 const helmet = require("helmet");
@@ -483,19 +503,24 @@ app.post(
 
         try {
           if (!booking.comms || typeof booking.comms !== "object") booking.comms = {};
-          const __already = booking.comms.invoiceReceiptGuestSentAt ? new Date(booking.comms.invoiceReceiptGuestSentAt) : null;
-          if (!__already) {
+          const __when = new Date();
+          const __gate = await Booking.findOneAndUpdate(
+            { _id: booking._id, $or: [ { "comms.invoiceReceiptGuestSentAt": { $exists: false } }, { "comms.invoiceReceiptGuestSentAt": null } ] },
+            { $set: { "comms.invoiceReceiptGuestSentAt": __when } },
+            { new: true }
+          );
+          if (__gate) {
             const __to = booking.guestEmail ? String(booking.guestEmail).trim() : "";
             const __nm = booking.guestName ? String(booking.guestName).trim() : "";
             const __date = booking.bookingDate ? String(booking.bookingDate).trim() : "";
-            const __title = booking.experienceTitle ? String(booking.experienceTitle).trim() : (booking.title ? String(booking.title).trim() : "");
+            const __title = booking.experienceTitle ? String(booking.experienceTitle).trim() : (booking.title ? String(booking.title).trim() : "" );
             const __cur = booking.currency ? String(booking.currency).trim().toUpperCase() : "AUD";
             let __cents = null;
             if (Number.isFinite(Number(booking.amountCents))) __cents = Number(booking.amountCents);
             else if (booking.pricing && Number.isFinite(Number(booking.pricing.totalCents))) __cents = Number(booking.pricing.totalCents);
             const __amt = (__cents === null) ? "" : (__cur + " " + (Number(__cents) / 100).toFixed(2));
             if (__to) {
-              await sendEventEmail({
+              __fireAndForgetEmail({
                 to: __to,
                 eventName: "INVOICE_RECEIPT_GUEST",
                 category: "PAYMENTS",
@@ -507,8 +532,6 @@ app.post(
                   AMOUNT: __amt
                 }
               });
-              booking.comms.invoiceReceiptGuestSentAt = new Date();
-              await booking.save();
             }
           }
         } catch (_) {}
@@ -581,23 +604,29 @@ app.post(
 
         try {
           if (!booking.comms || typeof booking.comms !== "object") booking.comms = {};
-          const __sent = booking.comms.paymentFailedSentAt ? new Date(booking.comms.paymentFailedSentAt) : null;
           const __isExpired = (event.type === "checkout.session.expired");
           const __isFail = (piStatus === "requires_payment_method" || piStatus === "canceled" || piStatus === "cancelled");
-          if (!__sent && (__isExpired || (__isFail && stripeStatus !== "paid"))) {
-            const __to = booking.guestEmail ? String(booking.guestEmail).trim() : "";
-            const __nm = booking.guestName ? String(booking.guestName).trim() : "";
-            if (__to) {
-              await sendEventEmail({
-                to: __to,
-                eventName: "PAYMENT_FAILED",
-                category: "PAYMENTS",
-                vars: {
-                  DASHBOARD_URL: __dashboardUrl(),
-                  Name: __nm
-                }
-              });
-              booking.comms.paymentFailedSentAt = new Date();
+          if (__isExpired || (__isFail && stripeStatus !== "paid")) {
+            const __when = new Date();
+            const __gate = await Booking.findOneAndUpdate(
+              { _id: booking._id, $or: [ { "comms.paymentFailedSentAt": { $exists: false } }, { "comms.paymentFailedSentAt": null } ] },
+              { $set: { "comms.paymentFailedSentAt": __when } },
+              { new: true }
+            );
+            if (__gate) {
+              const __to = booking.guestEmail ? String(booking.guestEmail).trim() : "";
+              const __nm = booking.guestName ? String(booking.guestName).trim() : "";
+              if (__to) {
+                __fireAndForgetEmail({
+                  to: __to,
+                  eventName: "PAYMENT_FAILED",
+                  category: "PAYMENTS",
+                  vars: {
+                    DASHBOARD_URL: __dashboardUrl(),
+                    Name: __nm
+                  }
+                });
+              }
             }
           }
         } catch (_) {}
@@ -608,6 +637,9 @@ app.post(
 
       if (event.type === "refund.updated" || event.type === "refund.created") {
         const refund = event.data.object || {};
+        const __refundAmt = (refund && Number.isFinite(Number(refund.amount))) ? Number(refund.amount) : null;
+        const __refundCur = refund && refund.currency ? String(refund.currency).toLowerCase() : "";
+
         const pi = String(refund.payment_intent || "");
         const refundId = String(refund.id || "");
         const refundStatus = String(refund.status || "");
@@ -618,6 +650,9 @@ app.post(
         if (!booking) return res.json({ received: true });
 
         if (!booking.refundDecision || typeof booking.refundDecision !== "object") booking.refundDecision = {};
+        if (__refundAmt !== null) booking.refundDecision.refundAmountCents = __refundAmt;
+        if (__refundCur) booking.refundDecision.refundCurrency = __refundCur;
+
         if (refundId) booking.refundDecision.stripeRefundId = refundId;
         if (refundStatus) booking.refundDecision.stripeRefundStatus = refundStatus;
 
@@ -1530,7 +1565,7 @@ async function maybeSendBookingConfirmedComms(booking) {
         eventName: "BOOKING_CONFIRMED_GUEST",
         category: "NOTIFICATIONS",
         to: guestEmail,
-        vars: __vars
+        vars: { DASHBOARD_URL: __vars["DASHBOARD_URL"], DATE: __vars["DATE"], EXPERIENCE_TITLE: __vars["EXPERIENCE_TITLE"], HOST_NAME: __vars["HOST_NAME"], Name: __vars["Name"], TIME: __vars["TIME"] }
       });
     }
 
@@ -1547,7 +1582,7 @@ async function maybeSendBookingConfirmedComms(booking) {
         eventName: "BOOKING_CONFIRMED_HOST",
         category: "NOTIFICATIONS",
         to: hostEmail,
-        vars: __vars
+        vars: { DASHBOARD_URL: __vars["DASHBOARD_URL"], DATE: __vars["DATE"], EXPERIENCE_TITLE: __vars["EXPERIENCE_TITLE"], GUEST_NAME: __vars["GUEST_NAME"], HOST_NAME: __vars["HOST_NAME"], TIME: __vars["TIME"] }
       });
     }
 
@@ -1611,7 +1646,7 @@ async function maybeSendBookingCancelledComms(booking) {
         eventName: "BOOKING_CANCELLED_BY_GUEST_GUEST",
         category: "NOTIFICATIONS",
         to: guestEmail,
-        vars: __vars
+        vars: { DASHBOARD_URL: __vars["DASHBOARD_URL"], DATE: __vars["DATE"], EXPERIENCE_TITLE: __vars["EXPERIENCE_TITLE"], Name: __vars["Name"], TIME: __vars["TIME"] }
       });
     }
 
@@ -1628,7 +1663,7 @@ async function maybeSendBookingCancelledComms(booking) {
         eventName: "BOOKING_CANCELLED_BY_GUEST_HOST",
         category: "NOTIFICATIONS",
         to: hostEmail,
-        vars: __vars
+        vars: { DASHBOARD_URL: __vars["DASHBOARD_URL"], DATE: __vars["DATE"], EXPERIENCE_TITLE: __vars["EXPERIENCE_TITLE"], HOST_NAME: __vars["HOST_NAME"], TIME: __vars["TIME"] }
       });
     }
   } catch (e) {
@@ -1688,7 +1723,7 @@ async function maybeSendBookingExpiredComms(booking) {
         eventName: "BOOKING_EXPIRED",
         category: "NOTIFICATIONS",
         to: guestEmail,
-        vars: __vars
+        vars: { DASHBOARD_URL: __vars["DASHBOARD_URL"], Name: __vars["Name"] }
       });
     }
 
@@ -1705,7 +1740,7 @@ async function maybeSendBookingExpiredComms(booking) {
         eventName: "BOOKING_EXPIRED_HOST",
         category: "NOTIFICATIONS",
         to: hostEmail,
-        vars: __vars
+        vars: { BOOKING_DATE: __vars["BOOKING_DATE"], DASHBOARD_URL: __vars["DASHBOARD_URL"], EXPERIENCE_TITLE: __vars["EXPERIENCE_TITLE"], GUEST_NAME: __vars["GUEST_NAME"], HOST_NAME: __vars["HOST_NAME"], TIME_SLOT: __vars["TIME_SLOT"] }
       });
     }
   } catch (e) {
@@ -1793,7 +1828,7 @@ async function maybeSendRefundProcessedComms(booking) {
         eventName: "REFUND_PROCESSED",
         category: "PAYMENTS",
         to: guestEmail,
-        vars: __vars
+        vars: { AMOUNT: __vars["AMOUNT"], DASHBOARD_URL: __vars["DASHBOARD_URL"], Name: __vars["Name"] }
       });
       try {
         if (!booking.comms || typeof booking.comms !== "object") booking.comms = {};
@@ -1860,7 +1895,7 @@ async function maybeSendBookingCancelledByHostComms(booking) {
         eventName: "BOOKING_CANCELLED_BY_HOST_GUEST",
         category: "NOTIFICATIONS",
         to: guestEmail,
-        vars: __vars
+        vars: { DASHBOARD_URL: __vars["DASHBOARD_URL"], DATE: __vars["DATE"], EXPERIENCE_TITLE: __vars["EXPERIENCE_TITLE"], Name: __vars["Name"], TIME: __vars["TIME"] }
       });
     }
 
@@ -1877,7 +1912,7 @@ async function maybeSendBookingCancelledByHostComms(booking) {
         eventName: "BOOKING_CANCELLED_BY_HOST_HOST",
         category: "NOTIFICATIONS",
         to: hostEmail,
-        vars: __vars
+        vars: { DASHBOARD_URL: __vars["DASHBOARD_URL"], DATE: __vars["DATE"], EXPERIENCE_TITLE: __vars["EXPERIENCE_TITLE"], HOST_NAME: __vars["HOST_NAME"], TIME: __vars["TIME"] }
       });
     }
   } catch (e) {

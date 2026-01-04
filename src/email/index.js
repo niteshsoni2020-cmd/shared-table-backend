@@ -28,9 +28,29 @@ async function sendEventEmail(i) {
   function __needs(k) { return Array.isArray(__req) && __req.indexOf(k) >= 0; }
 
   if (__needs("DASHBOARD_URL")) {
-    const fb = String(process.env.FRONTEND_BASE_URL || "http://localhost:3000").replace(/\/$/, "");
+    const fbEnv = String(process.env.FRONTEND_BASE_URL || "").trim();
+      if (fbEnv.length === 0 && __isProd) {
+        throw new Error("FRONTEND_BASE_URL_REQUIRED");
+      }
+      const fb = String((fbEnv.length > 0 ? fbEnv : "http://localhost:3000")).replace(/\/$/, "");
     __setIfMissing("DASHBOARD_URL", fb + "/dashboard");
   }
+
+    if (__needs("REVIEW_URL")) {
+      const fbEnv2 = String(process.env.FRONTEND_BASE_URL || "").trim();
+      if (fbEnv2.length === 0 && __isProd) {
+        throw new Error("FRONTEND_BASE_URL_REQUIRED");
+      }
+      const fb2 = String((fbEnv2.length > 0 ? fbEnv2 : "http://localhost:3000")).replace(/\/$/, "");
+      const __bid = String(__val("BOOKING_ID") || __val("bookingId") || "").trim();
+      const __eid = String(__val("EXPERIENCE_ID") || "").trim();
+      let __review = "";
+      if (__bid.length > 0) __review = fb2 + "/review?bookingId=" + encodeURIComponent(__bid);
+      else if (__eid.length > 0) __review = fb2 + "/review?experienceId=" + encodeURIComponent(__eid);
+      else __review = String(__val("DASHBOARD_URL") || fb2 + "/dashboard");
+      __setIfMissing("REVIEW_URL", __review);
+    }
+
 
   if (__needs("HOST_NAME")) {
     __setIfMissing("HOST_NAME", __val("Name"));
