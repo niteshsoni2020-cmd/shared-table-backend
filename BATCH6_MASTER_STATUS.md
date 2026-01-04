@@ -43,14 +43,3 @@
 | H2 | Migrations | NO | - | YES requires migrations or schema versioning |
 | H3 | Env guards | PARTIAL | L198,201,206,207,1551 | YES requires boot-time env validation |
 | H4 | Seed safety | NO | - | YES requires prod hard-stop plus explicit override flag |
-
-## Closure Update — 2026-01-04 22:24:52 UTC
-- Commit: 6c2d1cd
-- Change: authMiddleware enforces emailVerified; seed passwords meet policy
-- Deploy: Render (shared-table-api.onrender.com)
-- Verification:
-  - /health → 200
-  - /api/policy/active → 200 (public)
-  - /api/auth/me (no token) → 401
-  - /api/auth/login {} → 400
-- Batch-6 Status: CLOSED
