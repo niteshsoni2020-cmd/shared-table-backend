@@ -1705,6 +1705,16 @@ async function maybeSendBookingCancelledComms(booking) {
 async function maybeSendBookingExpiredComms(booking) {
   try {
     if (!booking) return;
+    try {
+      if (!booking.comms || typeof booking.comms !== "object") booking.comms = {};
+    } catch (_) {}
+
+    let __expiredGuestAlready = false;
+    let __expiredHostAlready = false;
+    try {
+      __expiredGuestAlready = Boolean(booking.comms.bookingExpiredGuestSentAt);
+      __expiredHostAlready = Boolean(booking.comms.bookingExpiredHostSentAt);
+    } catch (_) {}
 
     const b = booking || {};
     const guestEmail = String(b.guestEmail || "").trim();
@@ -1747,13 +1757,23 @@ async function maybeSendBookingExpiredComms(booking) {
       if (Object.prototype.hasOwnProperty.call(__ctx, k) && String(__ctx[k] || "").trim().length > 0) __vars[k] = String(__ctx[k]).trim();
       else __vars[k] = "—";
     }
-    if (guestEmail.length > 0) {
+    if (guestEmail.length > 0 && __expiredGuestAlready == false) {
       await sendEventEmail({
         eventName: "BOOKING_EXPIRED",
         category: "NOTIFICATIONS",
         to: guestEmail,
         vars: { DASHBOARD_URL: __vars["DASHBOARD_URL"], Name: __vars["Name"] }
       });
+      try {
+        if (!booking.comms || typeof booking.comms !== "object") booking.comms = {};
+        booking.comms.bookingExpiredGuestSentAt = new Date();
+        try {
+          const D = String.fromCharCode(36);
+          const upd = {};
+          upd[D + "set"] = { "comms.bookingExpiredGuestSentAt": booking.comms.bookingExpiredGuestSentAt };
+          await Booking.updateOne({ _id: booking._id }, upd);
+        } catch (_) {}
+      } catch (_) {}
     }
 
     const __ctx2 = Object.assign({}, __ctx);
@@ -1764,13 +1784,23 @@ async function maybeSendBookingExpiredComms(booking) {
       if (Object.prototype.hasOwnProperty.call(__ctx2, k) && String(__ctx2[k] || "").trim().length > 0) __vars[k] = String(__ctx2[k]).trim();
       else __vars[k] = "—";
     }
-    if (hostEmail.length > 0) {
+    if (hostEmail.length > 0 && __expiredHostAlready == false) {
       await sendEventEmail({
         eventName: "BOOKING_EXPIRED_HOST",
         category: "NOTIFICATIONS",
         to: hostEmail,
         vars: { BOOKING_DATE: __vars["BOOKING_DATE"], DASHBOARD_URL: __vars["DASHBOARD_URL"], EXPERIENCE_TITLE: __vars["EXPERIENCE_TITLE"], GUEST_NAME: __vars["GUEST_NAME"], HOST_NAME: __vars["HOST_NAME"], TIME_SLOT: __vars["TIME_SLOT"] }
       });
+      try {
+        if (!booking.comms || typeof booking.comms !== "object") booking.comms = {};
+        booking.comms.bookingExpiredHostSentAt = new Date();
+        try {
+          const D = String.fromCharCode(36);
+          const upd = {};
+          upd[D + "set"] = { "comms.bookingExpiredHostSentAt": booking.comms.bookingExpiredHostSentAt };
+          await Booking.updateOne({ _id: booking._id }, upd);
+        } catch (_) {}
+      } catch (_) {}
     }
   } catch (e) {
     console.error("COMMS_EXPIRED_ERR", (e && e.message) ? e.message : String(e));
@@ -3810,10 +3840,10 @@ app.post("/api/experiences/:id/book", authMiddleware, async (req, res) => {
 
     // Do not leave an orphan pending_payment booking without a Stripe session.
     try {
-      booking.status = "expired";
       booking.paymentStatus = "unpaid";
       booking.expiredAt = new Date();
       await booking.save();
+      await transitionBooking(booking, "expired", { reason: "stripe_checkout_error", suppressComms: true });
     } catch (_) {}
 
     __log("error", "stripe_checkout_error", { rid: __ridFromReq(req), path: (req && req.originalUrl) ? req.originalUrl : undefined });
@@ -4957,24 +4987,27 @@ async function transitionBooking(booking, nextStatus, meta = {}) {
   await booking.updateOne({ $set: updates });
 
   // fire-and-forget comms (must not block state)
-  try {
-    if (nextStatus === "confirmed") {
-      await maybeSendBookingConfirmedComms(booking);
+  // meta.suppressComms=true allows internal transitions without email noise
+  if (!(meta && meta.suppressComms === true)) {
+    try {
+      if (nextStatus === "confirmed") {
+        await maybeSendBookingConfirmedComms(booking);
+      }
+      if (nextStatus === "cancelled") {
+        await maybeSendBookingCancelledComms(booking);
+      }
+      if (nextStatus === "expired") {
+        await maybeSendBookingExpiredComms(booking);
+      }
+      if (nextStatus === "cancelled_by_host") {
+        await maybeSendBookingCancelledByHostComms(booking);
+      }
+      if (nextStatus === "refunded") {
+        await maybeSendRefundProcessedComms(booking);
+      }
+    } catch (e) {
+      console.error("BOOKING_COMMS_FAIL", booking._id, nextStatus, e?.message);
     }
-    if (nextStatus === "cancelled") {
-      await maybeSendBookingCancelledComms(booking);
-    }
-    if (nextStatus === "expired") {
-      await maybeSendBookingExpiredComms(booking);
-    }
-    if (nextStatus === "cancelled_by_host") {
-      await maybeSendBookingCancelledByHostComms(booking);
-    }
-    if (nextStatus === "refunded") {
-      await maybeSendRefundProcessedComms(booking);
-    }
-  } catch (e) {
-    console.error("BOOKING_COMMS_FAIL", booking._id, nextStatus, e?.message);
   }
 
   return booking;
