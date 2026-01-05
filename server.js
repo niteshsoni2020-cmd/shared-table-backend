@@ -114,6 +114,7 @@ const commDeliverySchema = new mongoose.Schema({
   ok: { type: Boolean, default: false },
   provider: { type: String, default: "" },
   providerMessageId: { type: String, default: "" },
+  statusCode: { type: Number, default: null },
   ms: { type: Number, default: 0 },
   error: { type: String, default: "" },
   attempt: { type: Number, default: 1 },
