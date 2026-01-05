@@ -218,29 +218,6 @@ function __emailRetryDelayMs() {
   const v = Number.parseInt(String(process.env.EMAIL_RETRY_DELAY_MS || "30000"), 10);
   return (Number.isFinite(v) && v >= 1000 && v <= 10 * 60 * 1000) ? v : 30000;
 }
-
-async function __sendEventEmailTracked(payload, meta) {
-  const p = (payload && typeof payload === "object") ? payload : {};
-  const m = (meta && typeof meta === "object") ? meta : {};
-
-  const rid = String(m.rid || "");
-  const toRaw = String(p.to || "");
-  const eventName = String(p.eventName || "");
-  const category = String(p.category || "");
-  const templateId = String(p.templateId || "");
-
-  const toMasked = __maskEmail(toRaw);
-  const toHash = __hashEmail(toRaw);
-
-const providerGuess = String(
-  (p && (p.provider || p.emailProvider)) ||
-  (m && (m.provider || m.emailProvider)) ||
-  process.env.EMAIL_PROVIDER ||
-  process.env.MAIL_PROVIDER ||
-  process.env.EMAIL_TRANSPORT ||
-  ""
-);
-
 function __pickStatusCode(x) {
   try {
     const v = (x && (x.statusCode || x.responseCode || x.status)) || "";
@@ -285,9 +262,31 @@ function __errDetails(e) {
   } catch (_) {
     return "send_failed";
   }
+
+
+
 }
 
+  async function __sendEventEmailTracked(payload, meta) {
+  const p = (payload && typeof payload === "object") ? payload : {};
+  const m = (meta && typeof meta === "object") ? meta : {};
 
+  const rid = String(m.rid || "");
+  const toRaw = String(p.to || "");
+  const eventName = String(p.eventName || "");
+  const category = String(p.category || "");
+  const templateId = String(p.templateId || "");
+
+  const toMasked = __maskEmail(toRaw);
+  const toHash = __hashEmail(toRaw);
+  const providerGuess = String(
+    (p && (p.provider || p.emailProvider)) ||
+    (m && (m.provider || m.emailProvider)) ||
+    process.env.EMAIL_PROVIDER ||
+    process.env.MAIL_PROVIDER ||
+    process.env.EMAIL_TRANSPORT ||
+    ""
+  );
   let doc = null;
   try {
     doc = await CommDelivery.create({
@@ -606,6 +605,120 @@ const adminLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
 });
+
+// PER_ACTION_LIMITERS_TSTS (Batch6 G1)
+function __rlKey(req) {
+  try {
+    if (req && req.user && (req.user._id || req.user.id)) return String(req.user._id || req.user.id);
+    if (req && req.ip) return String(req.ip);
+    return "";
+  } catch (_) {
+    return "";
+  }
+}
+
+function __rlHandler(reason) {
+  return async function(req, res) {
+    try { await __maybeStrikeAndMute(req, reason); } catch (_) {}
+    return res.status(429).json({ message: "Too many requests" });
+  };
+}
+
+const commentLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  limit: 6,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: __rlKey,
+  handler: __rlHandler("comment")
+});
+
+const likeLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  limit: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: __rlKey,
+  handler: __rlHandler("like")
+});
+
+const connectLimiter = rateLimit({
+  windowMs: 5 * 60 * 1000,
+  limit: 12,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: __rlKey,
+  handler: __rlHandler("connect")
+});
+
+const bookingCreateLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  limit: 12,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: __rlKey,
+  handler: __rlHandler("book")
+});
+
+const reviewLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  limit: 6,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: __rlKey,
+  handler: __rlHandler("review")
+});
+
+
+// ABUSE_CONTROLS_TSTS (Batch6 G1)
+function __abuseMuteMinutes() {
+  const raw = String(process.env.ABUSE_MUTE_MINUTES || "15").trim();
+  const n = Number.parseInt(raw, 10);
+  if (!Number.isFinite(n) || n < 1) return 15;
+  if (n > 1440) return 1440;
+  return n;
+}
+
+function __abuseStrikeWindowMs() {
+  const raw = String(process.env.ABUSE_STRIKE_WINDOW_MS || "900000").trim();
+  const n = Number.parseInt(raw, 10);
+  if (!Number.isFinite(n) || n < 60000) return 900000;
+  if (n > 86400000) return 86400000;
+  return n;
+}
+
+function __abuseStrikeThreshold() {
+  const raw = String(process.env.ABUSE_STRIKE_THRESHOLD || "3").trim();
+  const n = Number.parseInt(raw, 10);
+  if (!Number.isFinite(n) || n < 1) return 3;
+  if (n > 20) return 20;
+  return n;
+}
+
+async function __maybeStrikeAndMute(req, reason) {
+  try {
+    const u = (req && req.user) ? req.user : null;
+    if (!u) return;
+    const now = new Date();
+    const winMs = __abuseStrikeWindowMs();
+    const thr = __abuseStrikeThreshold();
+    const ws = (u.abuseStrikeWindowStart instanceof Date && !Number.isNaN(u.abuseStrikeWindowStart.getTime())) ? u.abuseStrikeWindowStart : null;
+    const within = ws ? ((now.getTime() - ws.getTime()) <= winMs) : false;
+    if (!within) {
+      u.abuseStrikeWindowStart = now;
+      u.abuseStrikeCount = 0;
+    }
+    const cur = Number.isFinite(Number(u.abuseStrikeCount)) ? Number(u.abuseStrikeCount) : 0;
+    u.abuseStrikeCount = cur + 1;
+    if (u.abuseStrikeCount >= thr) {
+      const mins = __abuseMuteMinutes();
+      u.mutedUntil = new Date(now.getTime() + mins * 60 * 1000);
+    }
+    await u.save();
+  } catch (_) {
+  }
+}
+
 
 // CORS (locked allowlist)
 // Set CORS_ORIGINS as comma-separated list
@@ -1489,6 +1602,10 @@ const userSchema = new mongoose.Schema(
     accountStatus: { type: String, default: "active" }, // active|disabled|suspended|banned|locked|deleted
     accountStatusChangedAt: { type: Date, default: null },
     accountStatusReason: { type: String, default: "" },
+    mutedUntil: { type: Date, default: null },
+    abuseStrikeCount: { type: Number, default: 0 },
+    abuseStrikeWindowStart: { type: Date, default: null },
+    blockedUserIds: { type: [String], default: [] },
     isDeleted: { type: Boolean, default: false },
     deletedAt: { type: Date, default: null },
     deletedBy: { type: String, default: "" },
@@ -2344,7 +2461,12 @@ async function authMiddleware(req, res, next) {
       return res.status(403).json({ message: "Account not active" });
     }
 
-    const tv = Number.isFinite(Number(user.tokenVersion)) ? Number(user.tokenVersion) : 0;
+    const mu = (user.mutedUntil instanceof Date && !Number.isNaN(user.mutedUntil.getTime())) ? user.mutedUntil : null;
+    if (mu && mu.getTime() > Date.now()) {
+      return res.status(403).json({ message: "Account muted" });
+    }
+
+    const tv =  Number.isFinite(Number(user.tokenVersion)) ? Number(user.tokenVersion) : 0;
     const ptv = Number.isFinite(Number(payload.tv)) ? Number(payload.tv) : 0;
     if (ptv != tv) {
       return res.status(401).json({ message: "Session revoked" });
@@ -3797,7 +3919,7 @@ app.get("/api/experiences/:id/attendees", authMiddleware, async (req, res) => {
 });
 
 // Booking: Create + Stripe checkout
-app.post("/api/experiences/:id/book", authMiddleware, async (req, res) => {
+app.post("/api/experiences/:id/book", authMiddleware, bookingCreateLimiter, async (req, res) => {
   const expId = __cleanId(req.params.id, 64);
   if (!expId || !/^[a-fA-F0-9]{24}$/.test(expId)) return res.status(400).json({ message: "Invalid experienceId" });
   const exp = await Experience.findById(expId);
@@ -4479,7 +4601,7 @@ app.post("/api/bookings/:id/cancel", authMiddleware, async (req, res) => {
 });
 
 // Reviews
-app.post("/api/reviews", authMiddleware, async (req, res) => {
+app.post("/api/reviews", authMiddleware, reviewLimiter, async (req, res) => {
   const body = req.body || {};
   if (__isPlainObject(body) === false) return res.status(400).json({ message: "Invalid payload" });
   if (Object.prototype.hasOwnProperty.call(body, "__proto__") || Object.prototype.hasOwnProperty.call(body, "constructor") || Object.prototype.hasOwnProperty.call(body, "prototype")) {
@@ -4525,7 +4647,7 @@ app.get("/api/experiences/:id/reviews", async (req, res) => {
 });
 
 // --- Likes --- (toggle + count)
-app.post("/api/experiences/:id/like", authMiddleware, async (req, res) => {
+app.post("/api/experiences/:id/like", authMiddleware, likeLimiter, async (req, res) => {
   try {
     const expId = __cleanId(req.params.id, 64);
     if (!expId || !/^[a-fA-F0-9]{24}$/.test(expId)) return res.status(400).json({ message: "Invalid experienceId" });
@@ -4571,7 +4693,7 @@ async function canComment(expId, userId) {
   return { ok: false, reason: "Not allowed" };
 }
 
-app.post("/api/experiences/:id/comments", authMiddleware, async (req, res) => {
+app.post("/api/experiences/:id/comments", authMiddleware, commentLimiter, async (req, res) => {
   try {
     const expId = __cleanId(req.params.id, 64);
     if (!expId || !/^[a-fA-F0-9]{24}$/.test(expId)) return res.status(400).json({ message: "Invalid experienceId" });
@@ -4692,7 +4814,7 @@ app.put("/api/bookings/:id/visibility", authMiddleware, async (req, res) => {
 });
 
 // Social: connect
-app.post("/api/social/connect", authMiddleware, async (req, res) => {
+app.post("/api/social/connect", authMiddleware, connectLimiter, async (req, res) => {
   try {
     const __toStr = (v) => String(v || "").trim();
 
@@ -4795,6 +4917,26 @@ app.post("/api/social/requests/:id/block", authMiddleware, async (req, res) => {
   try {
     const connId = __cleanId(req.params.id, 64);
     if (!connId) return res.status(400).json({ message: "Invalid requestId" });
+
+// SOCIAL_USER_BLOCK_TSTS (Batch6 G1)
+app.post("/api/social/block-user", authMiddleware, connectLimiter, async (req, res) => {
+  try {
+    const targetId = String((req.body && req.body.userId) || "").trim();
+    if (!targetId) return res.status(400).json({ message: "userId required" });
+    const me = req.user;
+    const meId = String(me._id || "");
+    if (!meId) return res.status(401).json({ message: "Unauthorized" });
+    if (targetId == meId) return res.status(400).json({ message: "Cannot block yourself" });
+    const cur = Array.isArray(me.blockedUserIds) ? me.blockedUserIds.map((x) => String(x)) : [];
+    if (!cur.includes(targetId)) cur.push(targetId);
+    me.blockedUserIds = cur.slice(0, 500);
+    await me.save();
+    return res.json({ ok: true, blockedUserIds: me.blockedUserIds });
+  } catch (e) {
+    return res.status(500).json({ message: "Server error" });
+  }
+});
+
     const c = await Connection.findById(connId);
     if (!c) return res.status(404).json({ message: "Not found" });
 
