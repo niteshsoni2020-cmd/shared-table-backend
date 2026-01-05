@@ -1,0 +1,34 @@
+name: Internal Jobs Cron
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch: {}
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Call internal jobs endpoint
+        env:
+          BASE: https://shared-table-api.onrender.com
+          TOKEN: ${{ secrets.INTERNAL_JOBS_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TOKEN:-}" ]; then
+            echo "SKIP: INTERNAL_JOBS_TOKEN not set"
+            exit 0
+          fi
+
+          code="$(curl -sS --max-time 25 -o resp.json -w "%{http_code}" \
+            -X POST "$BASE/api/internal/jobs/run" \
+            -H "X-Internal-Token: $TOKEN")"
+
+          echo "HTTP=$code"
+          cat resp.json || true
+
+          if [ "$code" -ne 200 ]; then
+            echo "WARN: non-200 response (not failing cron)"
+            exit 0
+          fi
