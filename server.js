@@ -100,6 +100,17 @@ const CATEGORY_PILLARS = ["Culture", "Food", "Nature"];
 const app = express();
 
 let __dbReady = false;
+
+function __classifyPaymentOutcome(stripeStatus, piStatus, sessionStatus) {
+  const ss = String(stripeStatus || "").toLowerCase();
+  const ps = String(piStatus || "").toLowerCase();
+  const st = String(sessionStatus || "").toLowerCase();
+  if (ss === "paid") return "paid";
+  if (st === "expired") return "abandoned";
+  if (["canceled","cancelled","requires_payment_method"].includes(ps)) return "failed";
+  return "unpaid";
+}
+
 function __shouldRunJobs() {
   const v = String(process.env.RUN_JOBS || "").toLowerCase().trim();
   return (v === "1" || v === "true" || v === "yes");
@@ -607,7 +618,11 @@ app.post(
         }
 
         // Keep paymentStatus as unpaid unless already paid/confirmed
-        if (String(booking.paymentStatus || "unpaid") !== "paid") booking.paymentStatus = "unpaid";
+        if (String(booking.paymentStatus || "unpaid") !== "paid") {
+          const __sessionStatus = String((session && session.status) ? session.status : "");
+          const __outcome = __classifyPaymentOutcome(stripeStatus, (piObj && piObj.status) ? String(piObj.status) : "", __sessionStatus);
+          booking.paymentStatus = __outcome;
+        }
 
         try {
           if (!booking.comms || typeof booking.comms !== "object") booking.comms = {};
@@ -657,8 +672,8 @@ app.post(
         if (!booking) return res.json({ received: true });
 
         if (!booking.refundDecision || typeof booking.refundDecision !== "object") booking.refundDecision = {};
-        if (__refundAmt !== null) booking.refundDecision.refundAmountCents = __refundAmt;
-        if (__refundCur) booking.refundDecision.refundCurrency = __refundCur;
+        if (__refundAmt !== null) booking.refundDecision.amountCents = __refundAmt;
+        if (__refundCur) booking.refundDecision.currency = __refundCur;
 
         if (refundId) booking.refundDecision.stripeRefundId = refundId;
         if (refundStatus) booking.refundDecision.stripeRefundStatus = refundStatus;
@@ -861,6 +876,7 @@ __dbReady = true;
   __log("info", "db_connected", { rid: undefined, path: undefined });
   try { global.__tsts_db_connected = true; } catch (_) {}
   try { startUnpaidBookingExpiryCleanupLoop_V1(); } catch (_) {}
+  try { startPaymentReconciliationLoop_V1(); } catch (_) {}
 
 
 })
@@ -1245,7 +1261,7 @@ const bookingSchema = new mongoose.Schema(
     guestNotes: { type: String, default: "" },
     status: { type: String, default: "pending_payment" },
     stripeSessionId: String,
-    paymentStatus: { type: String, default: "unpaid" },
+    paymentStatus: { type: String, enum: ["unpaid","paid","failed","abandoned"], default: "unpaid" },
 
     expiresAt: { type: Date, default: null },
     pricing: Object,
@@ -1295,7 +1311,7 @@ const bookingSchema = new mongoose.Schema(
       note: { type: String, default: "" },
     },
     refundDecision: {
-      status: { type: String, default: "" }, // none|manual|computed|refunded
+      status: { type: String, default: "none" }, // none|manual|computed|refunded
       amountCents: { type: Number, default: 0 },
       currency: { type: String, default: "aud" },
       percent: { type: Number, default: 0 },
@@ -4712,6 +4728,53 @@ app.get("/api/users/:userId/profile", async (req, res) => {
 });
 
 // UNPAID_BOOKING_EXPIRY_CLEANUP_V1
+
+// ===== PAYMENT RECONCILIATION (Stripe -> DB) =====
+// Periodically reconciles recent pending payments so bookings do not get stuck.
+async function runPaymentReconciliationOnce_V1() {
+  const now = new Date();
+  const since = new Date(Date.now() - 1000 * 60 * 60 * 48); // 48h window
+  const q = {
+    createdAt: { $gte: since },
+    stripeSessionId: { $exists: true, $ne: "" },
+    $and: [
+      { paymentStatus: { $ne: "paid" } },
+      { status: { $ne: "confirmed" } },
+    ],
+  };
+  const batch = await BookingModel.find(q).sort({ createdAt: -1 }).limit(40);
+  for (const booking of batch) {
+    try {
+      const sid = String(booking.stripeSessionId || "");
+      if (!sid) continue;
+      const session = await stripe.checkout.sessions.retrieve(sid, { expand: ["payment_intent"] });
+      const stripeStatus = String(session.payment_status || "unknown");
+      const piStatus = String((session.payment_intent && session.payment_intent.status) ? session.payment_intent.status : "");
+      const sessionStatus = String(session.status || "");
+      booking.paymentLastStripeStatus = stripeStatus;
+      booking.paymentLastPiStatus = piStatus;
+      if (session.payment_intent) booking.stripePaymentIntentId = String(session.payment_intent.id || session.payment_intent);
+      const outcome = __classifyPaymentOutcome(stripeStatus, piStatus, sessionStatus);
+      const cur = String(booking.paymentStatus || "unpaid");
+      if (cur !== outcome) {
+        booking.paymentStatus = outcome;
+        if (outcome === "paid") booking.paidAt = booking.paidAt || now;
+      }
+      await booking.save();
+    } catch (_) {
+    }
+  }
+}
+
+function startPaymentReconciliationLoop_V1() {
+  if (!__shouldRunJobs()) { __log("info", "jobs_skipped_disabled", { job: "payment_reconciliation_v1", reason: "RUN_JOBS disabled" }); return; }
+  if (global.__tsts_payment_recon_started_v1 === true) return;
+  global.__tsts_payment_recon_started_v1 = true;
+  try { __log("info", "job_runner_started", { job: "payment_reconciliation_v1" }); } catch (_) {}
+  setTimeout(() => { runPaymentReconciliationOnce_V1().catch(() => {}); }, 30 * 1000);
+  setInterval(() => { runPaymentReconciliationOnce_V1().catch(() => {}); }, 10 * 60 * 1000);
+}
+
 // Expires unpaid bookings and releases reserved capacity (idempotent + race-safe).
 async function runUnpaidBookingExpiryCleanupOnce_V1() {
   try {
