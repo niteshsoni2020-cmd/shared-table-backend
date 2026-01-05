@@ -105,7 +105,7 @@ const seed = async () => {
     const admin = await User.create({
       name: 'Super Admin',
       email: 'admin@sharedtable.com',
-      password: adminPass,
+      password: AbhishekMourya2025,
       role: 'Admin',
       isAdmin: true,
       isPremiumHost: true,

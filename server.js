@@ -466,7 +466,7 @@ function __log(level, event, meta) {
     const lvl = String(level || "info").toLowerCase();
     const ev = String(event || "event");
     const m = (meta && typeof meta === "object") ? meta : {};
-    const payload = { ts: new Date().toISOString(), level: lvl, event: ev, meta: m };
+    const payload = { ts: new Date().toISOString(), level: lvl, event: ev, meta: __redact(m, 0) };
     if (__winstonLogger) {
       const fn = (__winstonLogger[lvl] && typeof __winstonLogger[lvl] === "function") ? __winstonLogger[lvl] : __winstonLogger.info;
       fn.call(__winstonLogger, payload);
@@ -504,7 +504,7 @@ app.use((req, res, next) => {
     __log("info", "http_access", {
       rid: rid,
       method: req.method,
-      path: req.originalUrl,
+      path: String(req.originalUrl || "").split("?")[0],
       status: res.statusCode,
       durationMs: Date.now() - start,
       ip: req.ip
