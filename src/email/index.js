@@ -90,12 +90,69 @@ async function sendEventEmail(i) {
     }
   }
 
+  const __t0 = Date.now();
+  const __eventName = String((i && i.eventName) || "");
+  const __category = String((i && i.category) || "");
+  const __templateId = String(template || "");
+
+  function __maskTo(x) {
+    const s = String(x || "").trim();
+    const at = s.indexOf("@");
+    if (at <= 0) return "";
+    const local = s.slice(0, at);
+    const dom = s.slice(at + 1);
+    const pre = local.slice(0, 2);
+    return pre + "***@" + dom;
+  }
+
+  const __toMasked = __maskTo((i && i.to) || "");
+
+  try {
+    console.log("EMAIL_SEND_ATTEMPT", JSON.stringify({
+      eventName: __eventName,
+      category: __category,
+      to: __toMasked,
+      templateId: __templateId,
+      missingVarsCount: Array.isArray(__missing) ? __missing.length : 0
+    }));
+  } catch (e) {}
+
   const rendered = renderTemplate(template, __vars);
-  return sendMail({
+  const __p = sendMail({
     from: senderForCategory(i.category),
     to: i.to,
     subject: rendered.subject,
     text: rendered.body
+  });
+
+  return Promise.resolve(__p).then((r) => {
+    try {
+      const __ms = Date.now() - __t0;
+      const __msgId = String((r && (r.messageId || r.messageID || r.id)) || "");
+      console.log("EMAIL_SEND_OK", JSON.stringify({
+        eventName: __eventName,
+        category: __category,
+        to: __toMasked,
+        templateId: __templateId,
+        ms: __ms,
+        messageId: __msgId
+      }));
+    } catch (e) {}
+    return r;
+  }).catch((err) => {
+    try {
+      const __ms = Date.now() - __t0;
+      const __emsg = String((err && err.message) || err || "");
+      console.error("EMAIL_SEND_FAIL", JSON.stringify({
+        eventName: __eventName,
+        category: __category,
+        to: __toMasked,
+        templateId: __templateId,
+        ms: __ms,
+        error: __emsg
+      }));
+    } catch (e) {}
+    throw err;
   });
 }
 
