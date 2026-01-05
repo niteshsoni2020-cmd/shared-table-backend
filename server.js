@@ -5000,7 +5000,7 @@ async function runPaymentReconciliationOnce_V1() {
       { status: { $ne: "confirmed" } },
     ],
   };
-  const batch = await BookingModel.find(q).sort({ createdAt: -1 }).limit(40);
+  const batch = await Booking.find(q).sort({ createdAt: -1 }).limit(40);
   for (const booking of batch) {
     try {
       const sid = String(booking.stripeSessionId || "");
