@@ -127,6 +127,85 @@ commDeliverySchema.index({ toHash: 1, createdAt: -1 });
 
 const CommDelivery = mongoose.models.CommDelivery || mongoose.model("CommDelivery", commDeliverySchema);
 
+// ADMIN_AUDIT_TRAIL_TSTS (Batch6 E1)
+// Who + why + when + what (privacy-preserving).
+// reason is optional; can come from header x-admin-reason or body.reason
+const adminAuditSchema = new mongoose.Schema({
+  createdAt: { type: Date, default: Date.now },
+  actorId: { type: String, default: "" },
+  actorMasked: { type: String, default: "" },
+  actorHash: { type: String, default: "" },
+  isAdmin: { type: Boolean, default: false },
+  action: { type: String, default: "" },
+  method: { type: String, default: "" },
+  path: { type: String, default: "" },
+  targetType: { type: String, default: "" },
+  targetId: { type: String, default: "" },
+  reason: { type: String, default: "" },
+  ok: { type: Boolean, default: true },
+  error: { type: String, default: "" },
+  meta: { type: Object, default: {} }
+}, { minimize: false });
+adminAuditSchema.index({ createdAt: -1 });
+adminAuditSchema.index({ actorId: 1, createdAt: -1 });
+adminAuditSchema.index({ action: 1, createdAt: -1 });
+
+const AdminAudit = mongoose.models.AdminAudit || mongoose.model("AdminAudit", adminAuditSchema);
+
+function __adminReason(req) {
+  try {
+    const h = (req && req.headers) ? req.headers : {};
+    const v = (h && (h["x-admin-reason"] || h["X-Admin-Reason"])) ? String(h["x-admin-reason"] || h["X-Admin-Reason"]) : "";
+    if (v && v.trim()) return v.trim().slice(0, 240);
+  } catch (_) {}
+  try {
+    const b = (req && req.body && typeof req.body === "object") ? req.body : {};
+    const r = (b && (b.reason || b.adminReason)) ? String(b.reason || b.adminReason) : "";
+    if (r && r.trim()) return r.trim().slice(0, 240);
+  } catch (_) {}
+  return "";
+}
+
+async function __auditAdmin(req, action, meta, outcome) {
+  try {
+    const u = (req && req.user) ? req.user : null;
+    const actorId = u && (u._id || u.id) ? String(u._id || u.id) : "";
+    const email = u && u.email ? String(u.email) : "";
+    const actorMasked = (typeof __maskEmail === "function") ? __maskEmail(email) : "";
+    const actorHash = (typeof __hashEmail === "function") ? __hashEmail(email) : "";
+    const isAdmin = !!(u && (u.isAdmin || u.admin === true));
+
+    const out = (outcome && typeof outcome === "object") ? outcome : {};
+    const ok = (out.ok === false) ? false : true;
+    const err = out.error ? String(out.error) : "";
+
+    const m = (meta && typeof meta === "object") ? meta : {};
+    const targetType = m.targetType ? String(m.targetType) : "";
+    const targetId = m.targetId ? String(m.targetId) : "";
+
+    const path = (req && (req.originalUrl || req.path)) ? String(req.originalUrl || req.path) : "";
+    const method = (req && req.method) ? String(req.method) : "";
+    const reason = __adminReason(req);
+
+    await AdminAudit.create({
+      actorId: actorId,
+      actorMasked: actorMasked,
+      actorHash: actorHash,
+      isAdmin: isAdmin,
+      action: String(action || ""),
+      method: method,
+      path: path,
+      targetType: targetType,
+      targetId: targetId,
+      reason: reason,
+      ok: ok,
+      error: err.slice(0, 800),
+      meta: m
+    });
+  } catch (_) {}
+}
+
+
 function __emailTimeoutMs() {
   const v = Number.parseInt(String(process.env.EMAIL_TIMEOUT_MS || "6000"), 10);
   return (Number.isFinite(v) && v > 1000) ? v : 6000;
@@ -4846,6 +4925,8 @@ app.get("/api/social/user/:userId/visible-bookings", authMiddleware, async (req,
 
 // Admin stats
 app.get("/api/admin/stats", adminMiddleware, async (req, res) => {
+  try { await __auditAdmin(req, "admin_stats", {}, { ok: true }); } catch (_) {}
+
   const revenueDocs = await Booking.find({ status: "confirmed" }, "pricing");
   res.json({
     userCount: await User.countDocuments(),
@@ -4857,6 +4938,8 @@ app.get("/api/admin/stats", adminMiddleware, async (req, res) => {
 
 // Admin bookings
 app.get("/api/admin/bookings", adminMiddleware, async (req, res) => {
+  try { await __auditAdmin(req, "admin_bookings_list", {}, { ok: true }); } catch (_) {}
+
   try {
     const bookings = await Booking.find()
       .populate("experience")
@@ -4889,6 +4972,8 @@ app.get("/api/recommendations", authMiddleware, async (req, res) => {
 
 // Admin users
 app.get("/api/admin/users", adminMiddleware, async (req, res) => {
+  try { await __auditAdmin(req, "admin_users_list", {}, { ok: true }); } catch (_) {}
+
   try {
     const users = await User.find().sort({ createdAt: -1 });
     return res.json((users || []).map(u => adminSafeUser(u)));
@@ -4898,6 +4983,8 @@ app.get("/api/admin/users", adminMiddleware, async (req, res) => {
 });
 
 app.delete("/api/admin/users/:id", adminMiddleware, async (req, res) => {
+  try { await __auditAdmin(req, "admin_user_delete", { targetType: "user", targetId: String(req.params.id || "" ) }, { ok: true }); } catch (_) {}
+
   try {
     const userIdParam = __cleanId(req.params.id, 64);
     if (!userIdParam) return res.status(400).json({ message: "Invalid userId" });
@@ -4909,6 +4996,8 @@ app.delete("/api/admin/users/:id", adminMiddleware, async (req, res) => {
 });
 
 app.get("/api/admin/experiences", adminMiddleware, async (req, res) => {
+  try { await __auditAdmin(req, "admin_experiences_list", {}, { ok: true }); } catch (_) {}
+
   try {
     const exps = await Experience.find().sort({ createdAt: -1 });
     res.json(exps);
@@ -4918,6 +5007,8 @@ app.get("/api/admin/experiences", adminMiddleware, async (req, res) => {
 });
 
 app.patch("/api/admin/experiences/:id/toggle", adminMiddleware, async (req, res) => {
+  try { await __auditAdmin(req, "admin_experience_toggle", { targetType: "experience", targetId: String(req.params.id || "" ) }, { ok: true }); } catch (_) {}
+
   try {
     const expId = __cleanId(req.params.id, 64);
     if (!expId || !/^[a-fA-F0-9]{24}$/.test(expId)) return res.status(400).json({ message: "Invalid experienceId" });
