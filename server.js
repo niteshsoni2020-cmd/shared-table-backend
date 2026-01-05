@@ -2452,6 +2452,15 @@ async function authMiddleware(req, res, next) {
     const user = await User.findById(userId);
     if (!user) return res.status(401).json({ message: "User not found" });
 
+    if (user && user.isDeleted === true) {
+      return res.status(403).json({ message: "Account deleted" });
+    }
+
+    const __stDel = String(user.accountStatus || "active");
+    if (__stDel === "deleted") {
+      return res.status(403).json({ message: "Account deleted" });
+    }
+
     if (user.emailVerified !== true) {
       return res.status(403).json({ message: "Email not verified" });
     }
@@ -2975,7 +2984,13 @@ app.post("/api/auth/register", registerLimiter, async (req, res) => {
     if (pwRaw !== pwConf) return res.status(400).json({ message: "Passwords do not match", code: "password_confirm_register" });
     const __pp = __passwordPolicyOk(pwRaw);
     if (!__pp.ok) return res.status(400).json({ message: __pp.reason, code: "password_policy_register" });
-    if (await User.findOne({ email: emailNorm })) return res.status(400).json({ message: "Taken" });
+    const __existing = await User.findOne({ email: emailNorm });
+    if (__existing) {
+      if (__existing.isDeleted === true) {
+        return res.status(409).json({ message: "Account deleted", code: "account_deleted" });
+      }
+      return res.status(400).json({ message: "Taken" });
+    }
 
     const hashedPassword = await bcrypt.hash(String(pwRaw), 10);
     clean.email = emailNorm;
@@ -3163,18 +3178,19 @@ app.post("/api/auth/login", loginLimiter, async (req, res) => {
 
     const user = await User.findOne({ email: String(email).toLowerCase().trim() });
     if (!user) return res.status(401).json({ message: "Invalid credentials" });
-      if (user.emailVerified !== true) {
-        return res.status(403).json({ message: "Email not verified" });
 
-      const st = String(user.accountStatus || "active");
-      if (st && st !== "active") {
-        return res.status(403).json({ message: "Account not active" });
-      }
-      }
+    if (user && user.isDeleted === true) {
+      return res.status(403).json({ message: "Account deleted" });
+    }
+    const st = String(user.accountStatus || "active");
+    if (st && st !== "active") {
+      return res.status(403).json({ message: "Account not active" });
+    }
 
-    if (user && user.emailVerified !== true) {
+    if (user.emailVerified !== true) {
       return res.status(403).json({ message: "Please verify your email.", code: "email_not_verified" });
     }
+
 
     const ok = await bcrypt.compare(String(password), String(user.password || ""));
     if (!ok) return res.status(401).json({ message: "Invalid credentials" });
