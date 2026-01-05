@@ -1,5 +1,11 @@
 const nodemailer = require("nodemailer");
 
+
+// RETURN_PROMISE_ENFORCED
+function __ensurePromise(p) {
+  if (p && typeof p.then === "function") return p;
+  return Promise.resolve(p);
+}
 let __mailer = null;
 function getMailer() {
   const host = String(process.env.SMTP_HOST || "");
