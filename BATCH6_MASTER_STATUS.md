@@ -9,19 +9,19 @@
 | ID | Gate | Status | Evidence | Notes |
 |---|---|---:|---|---|
 | A1 | Email ownership verification | YES | L2413,2527 | Token + verify route exist |
-| A2 | Account states enforced | NO | - | Needs explicit state field plus enforcement |
-| A3 | Password policy | NO | - | YES requires min-length plus confirm enforcement |
-| A4 | Session revocation | NO | - | YES requires server-side revocation mechanism |
-| A5 | Token governance | PARTIAL | L1553 | PARTIAL if expiry exists but no versioning |
+| A2 | Account states enforced | Yes | - | Needs explicit state field plus enforcement |
+| A3 | Password policy | Yes | - | YES requires min-length plus confirm enforcement |
+| A4 | Session revocation | Yes | - | YES requires server-side revocation mechanism |
+| A5 | Token governance | Yes | L1553 | PARTIAL if expiry exists but no versioning |
 | A6 | Role safety | YES | L1033,1551,1607,2058,2261 | YES only if privilege fields cannot be client-provided and token claims are not trusted |
 | B1 | Confirm authority | YES | L50,311,315,316,317,3099 | YES requires webhook stores-only plus verify confirms plus idempotency guard |
-| B2 | Payment states | PARTIAL | L473,531,532,1115,1117 | YES requires failed plus abandoned plus succeeded or confirmed modeling |
-| B3 | Refund safety | PARTIAL | L541,550,557,1171,3360 | YES requires explicit refund states |
-| B4 | Reconciliation job | PARTIAL | L1122,3388,4077 | YES requires an actual scheduled reconciliation worker |
+| B2 | Payment states | Yes | L473,531,532,1115,1117 | YES requires failed plus abandoned plus succeeded or confirmed modeling |
+| B3 | Refund safety | YES | L541,550,557,1171,3360 | YES requires explicit refund states |
+| B4 | Reconciliation job | YES | L1122,3388,4077 | YES requires an actual scheduled reconciliation worker |
 | B5 | Disputes workflow | YES | L1179 | YES requires ingestion plus workflow primitives |
-| B6 | Abuse thresholds | PARTIAL | L225,1123 | YES requires enforced thresholds per user or IP or card |
+| B6 | Abuse thresholds | YES | L225,1123 | YES requires enforced thresholds per user or IP or card |
 | C1 | Policy snapshot | YES | L1148,1150,1153,1154,1255 | YES only if snapshot fields exist and are written on booking |
-| C2 | Lifecycle states | PARTIAL | L390,473,1496,1522,1530 | YES requires full explicit state list |
+| C2 | Lifecycle states | Yes | L390,473,1496,1522,1530 | YES requires full explicit state list |
 | C3 | Host cancellation | YES | L1140,2616,3311,3320,4156 | YES requires host cancel path plus correct refunds |
 | C4 | Completion transition | YES | L390,1522,1530,4077 | YES requires scheduled confirmed to completed |
 | D1 | Job runner | PARTIAL | L4077 | YES requires real scheduler or queue dependency |

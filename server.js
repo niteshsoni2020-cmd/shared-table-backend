@@ -53,7 +53,7 @@ const { sendEventEmail } = require("./src/email");
 
 function __fireAndForgetEmail(payload) {
   try {
-    const p = sendEventEmail(payload);
+    const p = __sendEventEmailTracked(payload, { rid: "" });
     if (p && typeof p.catch === "function") {
       p.catch(function(e) {
         try {
@@ -75,6 +75,221 @@ const rateLimit = require("express-rate-limit");
 const helmet = require("helmet");
 const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
+
+// EMAIL_DELIVERY_TRACKING_TSTS (Batch6 D5)
+// Persist delivery attempts (privacy-preserving) and retry failures in a bounded way.
+// Controlled via env: EMAIL_RETRY_MAX (default 1), EMAIL_RETRY_DELAY_MS (default 30000), EMAIL_TIMEOUT_MS (default 6000).
+
+function __maskEmail(x) {
+  try {
+    const s = String(x || "").trim();
+    const at = s.indexOf("@");
+    if (at <= 0) return "";
+    const local = s.slice(0, at);
+    const dom = s.slice(at + 1);
+    const pre = local.slice(0, 2);
+    return pre + "***@" + dom;
+  } catch (_) {
+    return "";
+  }
+}
+
+function __hashEmail(x) {
+  try {
+    const s = String(x || "").trim().toLowerCase();
+    if (!s) return "";
+    return crypto.createHash("sha256").update(s).digest("hex");
+  } catch (_) {
+    return "";
+  }
+}
+
+const commDeliverySchema = new mongoose.Schema({
+  rid: { type: String, default: "" },
+  eventName: { type: String, default: "" },
+  category: { type: String, default: "" },
+  templateId: { type: String, default: "" },
+  toMasked: { type: String, default: "" },
+  toHash: { type: String, default: "" },
+  ok: { type: Boolean, default: false },
+  provider: { type: String, default: "" },
+  providerMessageId: { type: String, default: "" },
+  ms: { type: Number, default: 0 },
+  error: { type: String, default: "" },
+  attempt: { type: Number, default: 1 },
+  parentId: { type: String, default: "" },
+  createdAt: { type: Date, default: Date.now }
+}, { minimize: false });
+commDeliverySchema.index({ createdAt: -1 });
+commDeliverySchema.index({ eventName: 1, createdAt: -1 });
+commDeliverySchema.index({ toHash: 1, createdAt: -1 });
+
+const CommDelivery = mongoose.models.CommDelivery || mongoose.model("CommDelivery", commDeliverySchema);
+
+function __emailTimeoutMs() {
+  const v = Number.parseInt(String(process.env.EMAIL_TIMEOUT_MS || "6000"), 10);
+  return (Number.isFinite(v) && v > 1000) ? v : 6000;
+}
+function __emailRetryMax() {
+  const v = Number.parseInt(String(process.env.EMAIL_RETRY_MAX || "1"), 10);
+  return (Number.isFinite(v) && v >= 0 && v <= 3) ? v : 1;
+}
+function __emailRetryDelayMs() {
+  const v = Number.parseInt(String(process.env.EMAIL_RETRY_DELAY_MS || "30000"), 10);
+  return (Number.isFinite(v) && v >= 1000 && v <= 10 * 60 * 1000) ? v : 30000;
+}
+
+async function __sendEventEmailTracked(payload, meta) {
+  const p = (payload && typeof payload === "object") ? payload : {};
+  const m = (meta && typeof meta === "object") ? meta : {};
+
+  const rid = String(m.rid || "");
+  const toRaw = String(p.to || "");
+  const eventName = String(p.eventName || "");
+  const category = String(p.category || "");
+  const templateId = String(p.templateId || "");
+
+  const toMasked = __maskEmail(toRaw);
+  const toHash = __hashEmail(toRaw);
+
+const providerGuess = String(
+  (p && (p.provider || p.emailProvider)) ||
+  (m && (m.provider || m.emailProvider)) ||
+  process.env.EMAIL_PROVIDER ||
+  process.env.MAIL_PROVIDER ||
+  process.env.EMAIL_TRANSPORT ||
+  ""
+);
+
+function __pickStatusCode(x) {
+  try {
+    const v = (x && (x.statusCode || x.responseCode || x.status)) || "";
+    const n = Number.parseInt(String(v), 10);
+    return Number.isFinite(n) ? n : null;
+  } catch (_) { return null; }
+}
+
+function __pickMessageId(x) {
+  try {
+    return String(
+      (x && (x.providerMessageId || x.messageId || x.messageID)) ||
+      (x && x.info && (x.info.messageId || x.info.messageID)) ||
+      (x && x.response && (x.response.messageId || x.response.messageID)) ||
+      ""
+    );
+  } catch (_) { return ""; }
+}
+
+function __errDetails(e) {
+  try {
+    const msg = String((e && e.message) || e || "");
+    const code = String((e && (e.code || e.errno)) || "");
+    const syscall = String((e && e.syscall) || "");
+    const hostname = String((e && e.hostname) || "");
+    const command = String((e && e.command) || "");
+    const response = String((e && (e.response || e.responseText)) || "");
+    const __msgLower = msg.toLowerCase();
+    const __msgHasBody = (__msgLower.indexOf(" body=") >= 0);
+    const __msgHasStatus = (__msgLower.indexOf("statuscode=") >= 0);
+    const status = __pickStatusCode(e);
+    const parts = [];
+    if (msg) parts.push(msg);
+    if (status !== null) parts.push("statusCode=" + String(status));
+    if (code) parts.push("code=" + code);
+    if (syscall) parts.push("syscall=" + syscall);
+    if (hostname) parts.push("host=" + hostname);
+    if (command) parts.push("cmd=" + command);
+    if (response && !(__msgHasBody && __msgHasStatus)) /* resp suppressed: message already contains body/statusCode */;
+    const out = parts.join(" | ").trim();
+    return out || "send_failed";
+  } catch (_) {
+    return "send_failed";
+  }
+}
+
+
+  let doc = null;
+  try {
+    doc = await CommDelivery.create({
+      rid: rid,
+      eventName: eventName,
+      category: category,
+      templateId: templateId,
+      toMasked: toMasked,
+      toHash: toHash,
+      ok: false,
+      provider: providerGuess || "",
+      providerMessageId: "",
+      ms: 0,
+      error: "",
+      attempt: Number.parseInt(String(m.attempt || "1"), 10) || 1,
+      parentId: String(m.parentId || "")
+    });
+  } catch (_) {}
+
+  const t0 = Date.now();
+  const timeoutMs = __emailTimeoutMs();
+
+  try {
+    const t = new Promise(function(_, rej) { setTimeout(function() { rej(new Error("EMAIL_TIMEOUT_MS_EXCEEDED ms=" + String(timeoutMs))); }, timeoutMs); });
+    const r = await Promise.race([ Promise.resolve(sendEventEmail(p)), t ]);
+
+    const ms = Date.now() - t0;
+    const ok = (r === true) || (Boolean(r && r.ok === true));
+    const provider = String((r && r.provider) || providerGuess || "");
+    const mid = String((r && (r.providerMessageId || r.id || r.messageId || r.messageID)) || "");
+const statusCode = __pickStatusCode(r);
+    const err = ok ? "" : __errDetails((r && (r.error || r.err || r.message)) ? { message: String((r.error || r.err || r.message)) } : r);
+
+    if (doc) {
+      try {
+        doc.ok = ok;
+        doc.provider = provider;
+        doc.providerMessageId = mid;
+          if (statusCode !== null) doc.statusCode = statusCode;
+        doc.ms = ms;
+        doc.error = err.slice(0, 800);
+        await doc.save();
+      } catch (_) {}
+    }
+
+    if (!ok) throw new Error(err || "send_failed");
+    return r;
+  } catch (e) {
+    const ms = Date.now() - t0;
+    const emsg = __errDetails(e);
+      const mid2 = __pickMessageId(e);
+      const statusCode2 = __pickStatusCode(e);
+      const provider2 = String((e && e.provider) || providerGuess || "");
+    if (doc) {
+      try {
+        doc.ok = false;
+          if (!doc.provider) doc.provider = provider2;
+          if (!doc.providerMessageId && mid2) doc.providerMessageId = mid2;
+          if (statusCode2 !== null) doc.statusCode = statusCode2;
+        doc.ms = ms;
+        doc.error = emsg.slice(0, 800);
+        await doc.save();
+      } catch (_) {}
+    }
+
+    // bounded retry (non-blocking)
+    const attempt = Number.parseInt(String(m.attempt || "1"), 10) || 1;
+    const maxRetry = __emailRetryMax();
+    if (attempt <= maxRetry) {
+      const delay = __emailRetryDelayMs();
+      setTimeout(function() {
+        try {
+          __sendEventEmailTracked(p, { rid: rid, attempt: attempt + 1, parentId: doc ? String(doc._id || "") : String(m.parentId || "") })
+            .catch(function() {});
+        } catch (_) {}
+      }, delay);
+    }
+
+    throw e;
+  }
+}
+
 
 
 // WINSTON_LOGGER_TSTS
@@ -2598,12 +2813,12 @@ app.post("/api/auth/register", registerLimiter, async (req, res) => {
       __verifyUrl = String(verifyUrlFrontend || "");
 
       const __need = ["Name", "VERIFY_EMAIL_URL"];
-      const __p = sendEventEmail({
+      const __p = __sendEventEmailTracked({
         eventName: "EMAIL_VERIFICATION",
         category: "SECURITY",
         to: String(user.email || ""),
         vars: { Name: String(user.name || "there"), VERIFY_EMAIL_URL: String(verifyUrlFrontend || "") }
-      });
+      }, { rid: __ridFromReq(req), source: "auth_register" });
       const __t = new Promise((_, rej) => setTimeout(() => rej(new Error("email_timeout")), 6000));
 
       const __vdbgSecretPre = String(process.env.VERIFY_DEBUG_SECRET || "").trim();
@@ -2686,12 +2901,12 @@ app.get("/api/auth/verify-email", async (req, res) => {
     let __welcomeEmail = "";
     try {
       const __need = ["Name", "DASHBOARD_URL"];
-      const __p = sendEventEmail({
+      const __p = __sendEventEmailTracked({
         eventName: "WELCOME_POST_VERIFICATION",
         category: "NOTIFICATIONS",
         to: String(user.email || ""),
         vars: { Name: String(user.name || "there"), DASHBOARD_URL: __dashboardUrl() }
-      });
+      }, { rid: __ridFromReq(req), source: "auth_verify_email" });
       const __t = new Promise((_, rej) => setTimeout(() => rej(new Error("email_timeout")), 6000));
 
       const __vdbgSecret = String(process.env.VERIFY_DEBUG_SECRET || "").trim();

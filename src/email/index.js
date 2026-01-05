@@ -11,6 +11,57 @@ async function sendEventEmail(i) {
   const __varsIn = (i && i.vars && typeof i.vars === "object") ? i.vars : {};
   const __vars = Object.assign({}, __varsIn);
 
+  const __providerGuess = String(
+    (i && (i.provider || i.emailProvider)) ||
+    process.env.EMAIL_PROVIDER ||
+    process.env.MAIL_PROVIDER ||
+    process.env.EMAIL_TRANSPORT ||
+    ""
+  );
+
+  function __pickStatusCode(x) {
+    try {
+      const v = (x && (x.statusCode || x.responseCode || x.status)) || "";
+      const n = Number.parseInt(String(v), 10);
+      return Number.isFinite(n) ? n : null;
+    } catch (_) { return null; }
+  }
+
+  function __pickMessageId(x) {
+    try {
+      return String(
+        (x && (x.providerMessageId || x.messageId || x.messageID || x.id)) ||
+        (x && x.info && (x.info.messageId || x.info.messageID)) ||
+        (x && x.response && (x.response.messageId || x.response.messageID)) ||
+        ""
+      );
+    } catch (_) { return ""; }
+  }
+
+  function __errDetails(e) {
+    try {
+      const msg = String((e && e.message) || e || "");
+      const code = String((e && (e.code || e.errno)) || "");
+      const syscall = String((e && e.syscall) || "");
+      const hostname = String((e && e.hostname) || "");
+      const command = String((e && e.command) || "");
+      const response = String((e && (e.response || e.responseText)) || "");
+      const status = __pickStatusCode(e);
+      const parts = [];
+      if (msg) parts.push(msg);
+      if (status !== null) parts.push("statusCode=" + String(status));
+      if (code) parts.push("code=" + code);
+      if (syscall) parts.push("syscall=" + syscall);
+      if (hostname) parts.push("host=" + hostname);
+      if (command) parts.push("cmd=" + command);
+      if (response) parts.push("resp=" + response);
+      const out = parts.join(" | ").trim();
+      return out || "send_failed";
+    } catch (_) {
+      return "send_failed";
+    }
+  }
+
   const __req = requiredVarsForTemplateId(template) || [];
 
   function __has(k) { return Object.prototype.hasOwnProperty.call(__vars, k); }
@@ -119,7 +170,7 @@ async function sendEventEmail(i) {
 
   const rendered = renderTemplate(template, __vars);
   const __p = sendMail({
-    from: senderForCategory(i.category),
+    from: (String(process.env.FROM_EMAIL || process.env.EMAIL_FROM || "").trim() || (senderForCategory(i.category))),
     to: i.to,
     subject: rendered.subject,
     text: rendered.body
@@ -138,7 +189,10 @@ async function sendEventEmail(i) {
         messageId: __msgId
       }));
     } catch (e) {}
-    return r;
+    const __provOk = String((r && r.provider) || __providerGuess || "");
+    const __midOk = __pickMessageId(r);
+    const __scOk = __pickStatusCode(r);
+    return { ok: true, provider: __provOk, statusCode: __scOk, providerMessageId: __midOk };
   }).catch((err) => {
     try {
       const __ms = Date.now() - __t0;
@@ -152,7 +206,11 @@ async function sendEventEmail(i) {
         error: __emsg
       }));
     } catch (e) {}
-    throw err;
+    const __prov = String((err && err.provider) || __providerGuess || "");
+    const __mid = __pickMessageId(err);
+    const __sc = __pickStatusCode(err);
+    const __err = __errDetails(err);
+    return { ok: false, provider: __prov, messageId: __mid, statusCode: __sc, error: String(__err || "send_failed") };
   });
 }
 

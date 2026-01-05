@@ -1,23 +1,38 @@
 const https = require("https");
 
-function hasResend() {
-  return String(process.env.RESEND_API_KEY || "").trim().length > 0;
+function __norm(x) {
+  return String(x == null ? "" : x).trim();
+}
+
+function __hasResend() {
+  return __norm(process.env.RESEND_API_KEY).length > 0;
+}
+
+function __jsonSafeParse(s) {
+  try { return JSON.parse(String(s || "")); } catch (_) { return null; }
 }
 
 function sendViaResend(p) {
-  return new Promise((resolve) => {
-    const key = String(process.env.RESEND_API_KEY || "").trim();
-    if (!key) return resolve(false);
+  return new Promise((resolve, reject) => {
+    const key = __norm(process.env.RESEND_API_KEY);
+    if (!key) return reject(new Error("EMAIL_PROVIDER_NOT_CONFIGURED"));
 
-    const from = String(process.env.FROM_EMAIL || (p && p.from) || "").trim();
-    if (!from) throw new Error("MAIL_FROM_REQUIRED");
+    const from = __norm((p && p.from) || process.env.FROM_EMAIL);
+    if (!from) return reject(new Error("MAIL_FROM_REQUIRED"));
 
-    const payload = JSON.stringify({
-      from: from,
-      to: String((p && p.to) || ""),
-      subject: String((p && p.subject) || ""),
-      text: String((p && p.text) || "")
-    });
+    const to = __norm(p && p.to);
+    const subject = __norm(p && p.subject);
+    const text = __norm(p && p.text);
+    const html = __norm(p && p.html);
+
+    if (!to) return reject(new Error("MAIL_TO_REQUIRED"));
+    if (!subject) return reject(new Error("MAIL_SUBJECT_REQUIRED"));
+    if (!text && !html) return reject(new Error("MAIL_TEXT_OR_HTML_REQUIRED"));
+
+    const obj = { from, to, subject };
+    if (text) obj.text = text;
+    if (html) obj.html = html;
+    const payload = JSON.stringify(obj);
 
     const req = https.request(
       "https://api.resend.com/emails",
@@ -33,20 +48,34 @@ function sendViaResend(p) {
         let data = "";
         res.on("data", (c) => { data += c; });
         res.on("end", () => {
-          const ok = res.statusCode >= 200 && res.statusCode < 300;
+          const statusCode = Number(res.statusCode || 0);
+          const ok = statusCode >= 200 && statusCode < 300;
+
           if (!ok) {
-            const body = String(data || "").slice(0, 500);
-            console.error("RESEND_SEND_FAIL", JSON.stringify({ status: res.statusCode, body: body }));
-            return resolve(false);
+            const body = String(data || "").slice(0, 800);
+            const e = new Error("RESEND_SEND_FAIL statusCode=" + String(statusCode) + " body=" + body);
+            e.statusCode = statusCode;
+            e.response = body;
+            e.provider = "resend";
+            return reject(e);
           }
-          return resolve(true);
+
+          const j = __jsonSafeParse(data) || {};
+          const id = __norm(j.id || j.messageId || j.messageID);
+          return resolve({
+            provider: "resend",
+            statusCode: statusCode,
+            providerMessageId: id
+          });
         });
       }
     );
 
     req.on("error", (e) => {
-      console.error("RESEND_SEND_FAIL", JSON.stringify({ err: String(e || "").slice(0, 200) }));
-      resolve(false);
+      const msg = (e && e.message) ? e.message : String(e || "");
+      const err = new Error("RESEND_SEND_FAIL " + msg);
+      err.provider = "resend";
+      return reject(err);
     });
 
     req.write(payload);
@@ -55,13 +84,9 @@ function sendViaResend(p) {
 }
 
 async function sendMail(p) {
-  if (!p || !p.to) throw new Error("MAIL_TO_REQUIRED");
-  if (!p.subject) throw new Error("MAIL_SUBJECT_REQUIRED");
-  if (!p.text) throw new Error("MAIL_TEXT_REQUIRED");
-
-  if (!hasResend()) return false;
-  const ok = await sendViaResend(p);
-  return ok === true;
+  if (!p || typeof p !== "object") throw new Error("MAIL_PAYLOAD_REQUIRED");
+  if (!__hasResend()) throw new Error("EMAIL_PROVIDER_NOT_CONFIGURED");
+  return await sendViaResend(p);
 }
 
 module.exports = { sendMail };
