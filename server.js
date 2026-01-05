@@ -425,6 +425,9 @@ const CATEGORY_PILLARS = ["Culture", "Food", "Nature"];
 // 1. Initialize App
 const app = express();
 
+
+// TRUST_PROXY_TSTS
+app.set("trust proxy", 1);
 let __dbReady = false;
 
 function __classifyPaymentOutcome(stripeStatus, piStatus, sessionStatus) {
@@ -552,8 +555,6 @@ app.use((req, res, next) => {
 app.get("/", (req, res) => {
   res.status(200).json({ service: "shared-table-api", status: "ok" });
 });
-
-app.set("trust proxy", 1);
 const PORT = process.env.PORT || 4000;
 
 function __validateEnvOrExit() {
