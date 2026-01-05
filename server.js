@@ -1489,6 +1489,9 @@ const userSchema = new mongoose.Schema(
     accountStatus: { type: String, default: "active" }, // active|disabled|suspended|banned|locked|deleted
     accountStatusChangedAt: { type: Date, default: null },
     accountStatusReason: { type: String, default: "" },
+    isDeleted: { type: Boolean, default: false },
+    deletedAt: { type: Date, default: null },
+    deletedBy: { type: String, default: "" },
     tokenVersion: { type: Number, default: 0 },
     emailVerificationTokenHash: { type: String, default: "" },
     emailVerificationRequestedAt: { type: Date, default: null },
@@ -1528,6 +1531,9 @@ const experienceSchema = new mongoose.Schema(
     blockedDates: [String],
     availableDays: { type: [String], default: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"] },
     isPaused: { type: Boolean, default: false },
+    isDeleted: { type: Boolean, default: false },
+    deletedAt: { type: Date, default: null },
+    deletedBy: { type: String, default: "" },
     tags: [String],
     timeSlots: [String],
     imageUrl: String,
@@ -3467,6 +3473,7 @@ app.put("/api/experiences/:id", authMiddleware, async (req, res) => {
     if (!expId || !/^[a-fA-F0-9]{24}$/.test(expId)) return res.status(400).json({ message: "Invalid experienceId" });
     const exp = await Experience.findById(expId);
     if (!exp) return res.status(404).json({ message: "Not found" });
+    if (exp.isDeleted) return res.status(404).json({ message: "Not found" });
     const isOwner = (String(exp.hostId || "") === String(req.user._id || ""));
     const isAdmin = Boolean(req.user && req.user.isAdmin);
     if (!(isOwner || isAdmin)) return res.status(403).json({ message: "No" });
@@ -3658,14 +3665,18 @@ app.delete("/api/experiences/:id", authMiddleware, async (req, res) => {
     }
   } catch (_) {}
 
-  await Experience.findByIdAndDelete(expId);
+  exp.isDeleted = true;
+  exp.deletedAt = new Date();
+  exp.deletedBy = String((req.user && (req.user._id || req.user.id)) || "");
+  exp.isPaused = true;
+  await exp.save();
   res.json({ message: "Deleted" });
 });
 
 // Experiences: Search (filters + pillars)
 app.get("/api/experiences", async (req, res) => {
   const { city, q, sort, date, minPrice, maxPrice, category } = req.query;
-  let query = { isPaused: false };
+  let query = { isPaused: false, isDeleted: false };
 
   if (city) query.city = { $regex: city, $options: "i" };
   if (q) query.title = { $regex: q, $options: "i" };
@@ -3724,6 +3735,7 @@ app.get("/api/experiences/:id/similar", async (req, res) => {
     const similar = await Experience.find({
       _id: { $ne: currentExp._id },
       isPaused: false,
+      isDeleted: false,
       $or: [{ tags: { $in: currentExp.tags } }, { city: currentExp.city }],
     })
       .limit(3)
@@ -3790,6 +3802,7 @@ app.post("/api/experiences/:id/book", authMiddleware, async (req, res) => {
   if (!expId || !/^[a-fA-F0-9]{24}$/.test(expId)) return res.status(400).json({ message: "Invalid experienceId" });
   const exp = await Experience.findById(expId);
   if (!exp) return res.status(404).json({ message: "Experience not found" });
+  if (exp.isDeleted) return res.status(404).json({ message: "Experience not found" });
   if (exp.isPaused) return res.status(400).json({ message: "Host is paused." });
   const meId = String(((req.user && (req.user._id || req.user.id)) || (req.user && req.user.userId) || ""));
   const hostId = String(exp.hostId || "");
@@ -4988,7 +5001,20 @@ app.delete("/api/admin/users/:id", adminMiddleware, async (req, res) => {
   try {
     const userIdParam = __cleanId(req.params.id, 64);
     if (!userIdParam) return res.status(400).json({ message: "Invalid userId" });
-    await User.findByIdAndDelete(userIdParam);
+    const user = await User.findById(userIdParam);
+    if (!user) return res.status(404).json({ message: "User not found." });
+    user.isDeleted = true;
+    user.deletedAt = new Date();
+    user.deletedBy = String((req.user && (req.user._id || req.user.id)) || "");
+    try {
+      const cur = Number.isFinite(Number(user.tokenVersion)) ? Number(user.tokenVersion) : 0;
+      user.tokenVersion = cur + 1;
+    } catch (_) {}
+    try {
+      user.accountStatusChangedAt = new Date();
+      user.accountStatusReason = String(__adminReason(req) || "admin_soft_delete").slice(0, 240);
+    } catch (_) {}
+    await user.save();
     res.json({ message: "User banned/deleted." });
   } catch (err) {
     res.status(500).json({ message: "Server error" });
@@ -5047,7 +5073,8 @@ app.get("/api/users/:userId/profile", async (req, res) => {
     if (isHostProfile) {
       experiences = await Experience.find({
         hostId: String(user._id),
-        isPaused: false
+        isPaused: false,
+        isDeleted: false
       }).sort({ averageRating: -1, createdAt: -1 });
 
       const expIds = experiences.map(e => String(e._id));
