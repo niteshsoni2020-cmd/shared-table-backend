@@ -700,6 +700,16 @@ const reviewLimiter = rateLimit({
   handler: __rlHandler("review")
 });
 
+const reportLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  limit: 6,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: __rlKey,
+  handler: __rlHandler("report")
+});
+
+
 
 // ABUSE_CONTROLS_TSTS (Batch6 G1)
 function __abuseMuteMinutes() {
@@ -4773,7 +4783,7 @@ app.post("/api/experiences/:id/comments", authMiddleware, commentLimiter, async 
 });
 
 // Moderation: user reports (triage workflow)
-app.post("/api/moderation/report", authMiddleware, async (req, res) => {
+app.post("/api/moderation/report", authMiddleware, reportLimiter, async (req, res) => {
   try {
     const body = (req && req.body && typeof req.body === "object") ? req.body : {};
     const targetType = String(body.targetType || "").trim().toLowerCase();
