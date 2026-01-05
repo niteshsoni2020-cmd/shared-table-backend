@@ -5132,6 +5132,81 @@ app.get("/version", (req, res) => {
   return res.json({ service: "shared-table-api", sha });
 });
 
+
+
+// INTERNAL_JOBS_ENDPOINT_TSTS (Batch6 D1)
+// Trigger idempotent job runs via scheduler (Render Cron / trusted caller).
+// Security: requires env INTERNAL_JOBS_TOKEN and header X-Internal-Token to match.
+// Note: This endpoint runs functions that are already safe/idempotent by design.
+app.post("/api/internal/jobs/run", async (req, res) => {
+
+  // Guard 1: do not run until DB is ready
+  if (typeof __dbReady !== "undefined" && __dbReady !== true) {
+    try { __log("error", "internal_jobs_db_not_ready", { rid: undefined, path: "/api/internal/jobs/run" }); } catch (_) {}
+    return res.status(503).json({ ok: false, error: "DB_NOT_READY" });
+  }
+
+  const expected = String(process.env.INTERNAL_JOBS_TOKEN || "").trim();
+  if (expected.length === 0) {
+    try { __log("error", "internal_jobs_token_missing", { rid: undefined, path: "/api/internal/jobs/run" }); } catch (_) {}
+    return res.status(503).json({ ok: false, error: "INTERNAL_JOBS_TOKEN_MISSING" });
+  }
+
+  const got = String(
+    (req && req.headers && (req.headers["x-internal-token"] || req.headers["X-Internal-Token"])) || ""
+  ).trim();
+
+  if (got.length === 0 || got !== expected) {
+    try { __log("error", "internal_jobs_unauthorized", { rid: undefined, path: "/api/internal/jobs/run" }); } catch (_) {}
+    return res.status(401).json({ ok: false, error: "UNAUTHORIZED" });
+  }
+
+  // Guard 2: prevent overlapping runs in this process (set after auth)
+  try {
+    if (global && global.__tsts_internal_jobs_running === true) {
+      try { __log("error", "internal_jobs_busy", { rid: undefined, path: "/api/internal/jobs/run" }); } catch (_) {}
+      return res.status(409).json({ ok: false, error: "BUSY" });
+    }
+    if (global) global.__tsts_internal_jobs_running = true;
+  } catch (_) {}
+
+  try {
+    const ran = [];
+    const errors = [];
+
+    try {
+      await runUnpaidBookingExpiryCleanupOnce_V1();
+      ran.push("unpaid_booking_expiry_cleanup_v1");
+    } catch (e) {
+      const msg = (e && e.message) ? String(e.message) : String(e);
+      errors.push({ job: "unpaid_booking_expiry_cleanup_v1", error: msg });
+    }
+
+    try {
+      await runPaymentReconciliationOnce_V1();
+      ran.push("payment_reconciliation_v1");
+    } catch (e) {
+      const msg = (e && e.message) ? String(e.message) : String(e);
+      errors.push({ job: "payment_reconciliation_v1", error: msg });
+    }
+
+    const ok = errors.length === 0;
+    try {
+      __log(ok ? "info" : "error",
+        ok ? "internal_jobs_ok" : "internal_jobs_partial_fail",
+        { rid: undefined, path: "/api/internal/jobs/run", ran: ran, errors: errors }
+      );
+    } catch (_) {}
+
+    return res.status(ok ? 200 : 500).json({ ok: ok, ran: ran, errors: errors });
+
+  } finally {
+    try { if (global) global.__tsts_internal_jobs_running = false; } catch (_) {}
+  }
+});
+
+
+
 // STARTUP: do not accept traffic until DB is ready (avoid mongoose buffering dead-hangs)
 async function __startServerAfterDb() {
   try {
