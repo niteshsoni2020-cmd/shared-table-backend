@@ -8,6 +8,21 @@ require('dotenv').config();
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 
+const __IS_PROD = String(process.env.NODE_ENV || "").toLowerCase() === "production";
+const __ALLOW_SEED_PROD = String(process.env.ALLOW_SEED_PROD || "").trim();
+const __SEED_ADMIN_PASSWORD = String(process.env.SEED_ADMIN_PASSWORD || "").trim();
+
+if (__IS_PROD && __ALLOW_SEED_PROD !== "YES_I_KNOW_WHAT_I_AM_DOING") {
+  console.error("SEED_BLOCKED_IN_PROD");
+  process.exit(1);
+}
+
+if (!__SEED_ADMIN_PASSWORD) {
+  console.error("SEED_ADMIN_PASSWORD_MISSING");
+  process.exit(1);
+}
+
+
 // --- 1. CONFIG ---
 mongoose
   .connect(process.env.MONGO_URI)
@@ -92,20 +107,21 @@ const Review = mongoose.model('Review', reviewSchema);
 const seed = async () => {
   try {
     console.log('🧹 Clearing old data...');
+    console.log("SEED_MODE", { prod: __IS_PROD, allowProd: (__ALLOW_SEED_PROD === "YES_I_KNOW_WHAT_I_AM_DOING") });
     await User.deleteMany({});
     await Experience.deleteMany({});
     await Review.deleteMany({});
 
     console.log('🌱 Seeding Users...');
 
-    const adminPass = await bcrypt.hash('Admin1234', 10);
+    const adminPass = await bcrypt.hash(__SEED_ADMIN_PASSWORD, 10);
     const userPass = await bcrypt.hash('Test1234', 10);
 
     // Admin account (not shown as a host card)
     const admin = await User.create({
       name: 'Super Admin',
       email: 'admin@sharedtable.com',
-      password: AbhishekMourya2025,
+      password: adminPass,
       role: 'Admin',
       isAdmin: true,
       isPremiumHost: true,
