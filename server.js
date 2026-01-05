@@ -152,6 +152,36 @@ adminAuditSchema.index({ action: 1, createdAt: -1 });
 
 const AdminAudit = mongoose.models.AdminAudit || mongoose.model("AdminAudit", adminAuditSchema);
 
+const reportSchema = new mongoose.Schema({
+  createdAt: { type: Date, default: Date.now },
+
+  reporterId: { type: String, default: "" },
+  reporterMasked: { type: String, default: "" },
+  reporterHash: { type: String, default: "" },
+
+  targetType: { type: String, default: "" }, // user|experience|booking|review|comment
+  targetId: { type: String, default: "" },
+
+  category: { type: String, default: "" }, // spam|harassment|fraud|safety|other
+  message: { type: String, default: "" },
+
+  status: { type: String, default: "open" }, // open|triaged|actioned|closed
+  adminActorId: { type: String, default: "" },
+  adminReason: { type: String, default: "" },
+  adminAction: { type: String, default: "" }, // none|mute_user|delete_user|pause_experience
+  adminMeta: { type: Object, default: {} },
+
+  resolvedAt: { type: Date, default: null }
+}, { minimize: false });
+
+reportSchema.index({ createdAt: -1 });
+reportSchema.index({ status: 1, createdAt: -1 });
+reportSchema.index({ targetType: 1, targetId: 1, createdAt: -1 });
+reportSchema.index({ reporterId: 1, createdAt: -1 });
+
+const Report = mongoose.models.Report || mongoose.model("Report", reportSchema);
+
+
 function __adminReason(req) {
   try {
     const h = (req && req.headers) ? req.headers : {};
@@ -4741,6 +4771,48 @@ app.post("/api/experiences/:id/comments", authMiddleware, commentLimiter, async 
   }
 });
 
+// Moderation: user reports (triage workflow)
+app.post("/api/moderation/report", authMiddleware, async (req, res) => {
+  try {
+    const body = (req && req.body && typeof req.body === "object") ? req.body : {};
+    const targetType = String(body.targetType || "").trim().toLowerCase();
+    const targetId = String(body.targetId || "").trim();
+    const category = String(body.category || "").trim().toLowerCase();
+    const message = String(body.message || "").trim();
+
+    const allowedTargets = { user: true, experience: true, booking: true, review: true, comment: true };
+    const allowedCats = { spam: true, harassment: true, fraud: true, safety: true, other: true };
+
+    if (!allowedTargets[targetType]) return res.status(400).json({ message: "Invalid targetType" });
+    if (!targetId) return res.status(400).json({ message: "targetId required" });
+    if (!allowedCats[category]) return res.status(400).json({ message: "Invalid category" });
+
+    const msg = message.slice(0, 1200);
+    const u = (req && req.user) ? req.user : null;
+    const reporterId = u && (u._id || u.id) ? String(u._id || u.id) : "";
+    const reporterEmail = u && u.email ? String(u.email) : "";
+    const reporterMasked = (typeof __maskEmail === "function") ? __maskEmail(reporterEmail) : "";
+    const reporterHash = (typeof __hashEmail === "function") ? __hashEmail(reporterEmail) : "";
+
+    const r = await Report.create({
+      reporterId,
+      reporterMasked,
+      reporterHash,
+      targetType,
+      targetId,
+      category,
+      message: msg,
+      status: "open"
+    });
+
+    return res.status(201).json({ ok: true, id: String(r._id) });
+  } catch (e) {
+    __log("error", "moderation_report_error", { rid: __ridFromReq(req) });
+    return res.status(500).json({ message: "Report failed" });
+  }
+});
+
+
 app.get("/api/experiences/:id/comments", authMiddleware, async (req, res) => {
   try {
     const expId = __cleanId(req.params.id, 64);
@@ -5095,6 +5167,114 @@ app.get("/api/social/user/:userId/visible-bookings", authMiddleware, async (req,
 });
 
 // Admin stats
+
+
+// Admin: moderation triage (reports)
+app.get("/api/admin/reports", adminMiddleware, async (req, res) => {
+  try {
+    const q = (req && req.query && typeof req.query === "object") ? req.query : {};
+    const status = String(q.status || "").trim().toLowerCase();
+    const limitRaw = Number.parseInt(String(q.limit || "50"), 10);
+    const skipRaw = Number.parseInt(String(q.skip || "0"), 10);
+    const limit = (Number.isFinite(limitRaw) && limitRaw > 0 && limitRaw <= 200) ? limitRaw : 50;
+    const skip = (Number.isFinite(skipRaw) && skipRaw >= 0 && skipRaw <= 200000) ? skipRaw : 0;
+
+    const filter = {};
+    if (status) filter.status = status;
+
+    const items = await Report.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit).lean();
+    const total = await Report.countDocuments(filter);
+
+    await __auditAdmin(req, "admin_reports_list", { targetType: "report", targetId: "", reason: __adminReason(req), meta: { status, limit, skip } }, { ok: true });
+    return res.json({ ok: true, total, items });
+  } catch (e) {
+    await __auditAdmin(req, "admin_reports_list", { targetType: "report", targetId: "", reason: __adminReason(req) }, { ok: false, error: "admin_reports_list_failed" });
+    return res.status(500).json({ message: "Failed" });
+  }
+});
+
+app.patch("/api/admin/reports/:id", adminMiddleware, async (req, res) => {
+  try {
+    const id = String((req && req.params && req.params.id) ? req.params.id : "").trim();
+    if (!id) return res.status(400).json({ message: "id required" });
+
+    const body = (req && req.body && typeof req.body === "object") ? req.body : {};
+    const status = String(body.status || "").trim().toLowerCase();
+    const action = String(body.action || "none").trim().toLowerCase();
+    const reason = String(body.reason || __adminReason(req) || "").trim().slice(0, 240);
+
+    const allowedStatus = { open: true, triaged: true, actioned: true, closed: true };
+    const allowedAction = { none: true, mute_user: true, delete_user: true, pause_experience: true };
+
+    if (status && !allowedStatus[status]) return res.status(400).json({ message: "Invalid status" });
+    if (!allowedAction[action]) return res.status(400).json({ message: "Invalid action" });
+    if (action !== "none" && !reason) return res.status(400).json({ message: "reason required for action" });
+
+    const r = await Report.findById(id);
+    if (!r) return res.status(404).json({ message: "Not found" });
+
+    const actorId = (req && req.user && (req.user._id || req.user.id)) ? String(req.user._id || req.user.id) : "";
+
+    // Apply action
+    if (action === "mute_user") {
+      const minsRaw = Number.parseInt(String(body.muteMinutes || "15"), 10);
+      const mins = (Number.isFinite(minsRaw) && minsRaw > 0 && minsRaw <= 43200) ? minsRaw : 15;
+      if (String(r.targetType || "") !== "user") return res.status(400).json({ message: "mute_user requires targetType=user" });
+
+      const UserModel = mongoose.model("User");
+      const u = await UserModel.findById(String(r.targetId));
+      if (!u) return res.status(404).json({ message: "Target user not found" });
+      u.mutedUntil = new Date(Date.now() + mins * 60 * 1000);
+      await u.save();
+      r.adminMeta = { ...(r.adminMeta || {}), muteMinutes: mins };
+    }
+
+    if (action === "delete_user") {
+      if (String(r.targetType || "") !== "user") return res.status(400).json({ message: "delete_user requires targetType=user" });
+
+      const UserModel = mongoose.model("User");
+      const u = await UserModel.findById(String(r.targetId));
+      if (!u) return res.status(404).json({ message: "Target user not found" });
+      u.isDeleted = true;
+      u.accountStatus = "deleted";
+      u.deletedAt = new Date();
+      await u.save();
+    }
+
+    if (action === "pause_experience") {
+      if (String(r.targetType || "") !== "experience") return res.status(400).json({ message: "pause_experience requires targetType=experience" });
+
+      const ExperienceModel = mongoose.model("Experience");
+      const exp = await ExperienceModel.findById(String(r.targetId));
+      if (!exp) return res.status(404).json({ message: "Target experience not found" });
+      exp.isPaused = true;
+      await exp.save();
+    }
+
+    if (status) r.status = status;
+    r.adminAction = action;
+    if (reason) r.adminReason = reason;
+    r.adminActorId = actorId;
+
+    if (r.status === "closed" || r.status === "actioned") {
+      r.resolvedAt = new Date();
+    }
+
+    await r.save();
+
+    await __auditAdmin(
+      req,
+      "admin_report_update",
+      { targetType: "report", targetId: String(r._id), reason, meta: { status: r.status, action: r.adminAction, reportTargetType: r.targetType, reportTargetId: r.targetId } },
+      { ok: true }
+    );
+
+    return res.json({ ok: true, id: String(r._id), status: r.status, action: r.adminAction });
+  } catch (e) {
+    await __auditAdmin(req, "admin_report_update", { targetType: "report", targetId: "", reason: __adminReason(req) }, { ok: false, error: "admin_report_update_failed" });
+    return res.status(500).json({ message: "Failed" });
+  }
+});
 app.get("/api/admin/stats", adminMiddleware, async (req, res) => {
   try { await __auditAdmin(req, "admin_stats", {}, { ok: true }); } catch (_) {}
 
