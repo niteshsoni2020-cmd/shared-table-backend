@@ -2510,6 +2510,7 @@ app.post("/api/auth/register", registerLimiter, async (req, res) => {
 
     let __verifyUrl = "";
 
+    let __emailVerificationEmail = "";
     // Send verification email via templates (non-blocking)
     try {
       const __apiBase = (() => {
@@ -2528,6 +2529,7 @@ app.post("/api/auth/register", registerLimiter, async (req, res) => {
       const verifyUrlBackend = (__apiBase || "") + "/api/auth/verify-email?email=" + encodeURIComponent(String(user.email || "")) + "&token=" + encodeURIComponent(String(vtoken || ""));
       const verifyUrlFrontend = __frontendBaseUrl() + "/verify-email?email=" + encodeURIComponent(String(user.email || "")) + "&token=" + encodeURIComponent(String(vtoken || ""));
       __verifyUrl = String(verifyUrlBackend || "");
+
       const __need = ["Name", "VERIFY_EMAIL_URL"];
       const __p = sendEventEmail({
         eventName: "EMAIL_VERIFICATION",
@@ -2536,7 +2538,21 @@ app.post("/api/auth/register", registerLimiter, async (req, res) => {
         vars: { Name: String(user.name || "there"), VERIFY_EMAIL_URL: String(verifyUrlFrontend || "") }
       });
       const __t = new Promise((_, rej) => setTimeout(() => rej(new Error("email_timeout")), 6000));
-      Promise.race([__p, __t]).catch(() => {});
+
+      const __vdbgSecretPre = String(process.env.VERIFY_DEBUG_SECRET || "").trim();
+      const __vdbgHeaderPre = String((req.headers && (req.headers["x-verify-debug-secret"] || req.headers["X-Verify-Debug-Secret"])) || "").trim();
+      const __wantDbg = (__vdbgSecretPre.length >= 24 && !!__vdbgHeaderPre);
+
+      if (__wantDbg) {
+        try {
+          await Promise.race([__p, __t]);
+          __emailVerificationEmail = "EMAIL_SEND_OK";
+        } catch (_) {
+          __emailVerificationEmail = "EMAIL_SEND_FAIL";
+        }
+      } else {
+        Promise.race([__p, __t]).catch(() => {});
+      }
     } catch (_) {}
 
     const __resp = { success: true, token: signToken(user), user: sanitizeUser(user) };
@@ -2555,7 +2571,7 @@ app.post("/api/auth/register", registerLimiter, async (req, res) => {
         acc = acc | (ca ^ cb);
       }
       if (acc === 0 && __verifyUrl) {
-        __resp.dev = { verifyUrl: String(__verifyUrl) };
+        __resp.dev = { verifyUrl: String(__verifyUrl), emailVerificationEmail: String(__emailVerificationEmail || "") };
       }
     }
 
@@ -2598,6 +2614,7 @@ app.get("/api/auth/verify-email", async (req, res) => {
     user.emailVerificationExpiresAt = null;
     await user.save();
 
+    let __welcomeEmail = "";
     try {
       const __need = ["Name", "DASHBOARD_URL"];
       const __p = sendEventEmail({
@@ -2607,7 +2624,37 @@ app.get("/api/auth/verify-email", async (req, res) => {
         vars: { Name: String(user.name || "there"), DASHBOARD_URL: __dashboardUrl() }
       });
       const __t = new Promise((_, rej) => setTimeout(() => rej(new Error("email_timeout")), 6000));
-      Promise.race([__p, __t]).catch(() => {});
+
+      const __vdbgSecret = String(process.env.VERIFY_DEBUG_SECRET || "").trim();
+      const __vdbgHeader = String((req.headers && (req.headers["x-verify-debug-secret"] || req.headers["X-Verify-Debug-Secret"])) || "").trim();
+      let __dbgOk = false;
+      if (__vdbgSecret.length >= 24 && __vdbgHeader) {
+        const a = __vdbgSecret;
+        const b = __vdbgHeader;
+        const n = (a.length > b.length) ? a.length : b.length;
+        let acc = 0;
+        for (let idx = 0; idx < n; idx++) {
+          const ca = (idx < a.length) ? a.charCodeAt(idx) : 0;
+          const cb = (idx < b.length) ? b.charCodeAt(idx) : 0;
+          acc = acc | (ca ^ cb);
+        }
+        __dbgOk = (acc === 0);
+      }
+
+      if (__dbgOk) {
+        try {
+          await Promise.race([__p, __t]);
+          __welcomeEmail = "EMAIL_SEND_OK";
+        } catch (_) {
+          __welcomeEmail = "EMAIL_SEND_FAIL";
+        }
+      } else {
+        Promise.race([__p, __t]).catch(() => {});
+      }
+
+      if (__dbgOk) {
+        return res.json({ ok: true, dev: { welcomeEmail: String(__welcomeEmail || "") } });
+      }
     } catch (_) {}
 
     return res.json({ ok: true });
