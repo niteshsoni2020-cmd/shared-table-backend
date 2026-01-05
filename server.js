@@ -99,6 +99,13 @@ const CATEGORY_PILLARS = ["Culture", "Food", "Nature"];
 // 1. Initialize App
 const app = express();
 
+let __dbReady = false;
+function __shouldRunJobs() {
+  const v = String(process.env.RUN_JOBS || "").toLowerCase().trim();
+  return (v === "1" || v === "true" || v === "yes");
+}
+
+
 
 // REQUEST_ID_MIDDLEWARE_TSTS
 // Structured logging + request correlation + redaction (audit-grade)
@@ -850,6 +857,7 @@ mongoose
   .then(async () => {
   try { await ensureDefaultPolicyExists(); } catch (_) {}
   try { await __ensureStripeWebhookIndex(); } catch (_) {}
+__dbReady = true;
   __log("info", "db_connected", { rid: undefined, path: undefined });
   try { global.__tsts_db_connected = true; } catch (_) {}
   try { startUnpaidBookingExpiryCleanupLoop_V1(); } catch (_) {}
@@ -2609,6 +2617,8 @@ app.get("/api/auth/verify-email", async (req, res) => {
     }
 
     user.emailVerified = true;
+    user.tokenVersion = Number(user.tokenVersion || 0) + 1;
+
     user.emailVerificationTokenHash = "";
     user.emailVerificationRequestedAt = null;
     user.emailVerificationExpiresAt = null;
@@ -4755,6 +4765,8 @@ async function runUnpaidBookingExpiryCleanupOnce_V1() {
 }
 
 function startUnpaidBookingExpiryCleanupLoop_V1() {
+  if (!__shouldRunJobs()) { __log("info", "jobs_skipped_disabled", { job: "unpaid_booking_expiry_cleanup_v1", reason: "RUN_JOBS disabled" }); return; }
+
   if (global.__tsts_unpaid_cleanup_started_v1 === true) return;
   global.__tsts_unpaid_cleanup_started_v1 = true;
 
@@ -4816,44 +4828,27 @@ async function __startServerAfterDb() {
     // jobs start after db_connected
 
 
-    app.listen(PORT, () => {
-      try { __log("info", "server_listen", { rid: undefined, path: undefined }); } catch (_) {}
-    });
+
   } catch (e) {
     console.error("STARTUP_FATAL", (e && e.message) ? e.message : String(e));
     process.exit(1);
   }
 }
 
-app.get("/health", (req, res) => {
-  try {
-    const uptime = process.uptime();
+app.get("/health", (req, res) => res.status(200).json({ ok: true, dbReady: __dbReady }));
+app.get("/ready", (req, res) => (__dbReady ? res.status(200).json({ ok: true }) : res.status(503).json({ ok: false })));
 
-    let dbReady = false;
-    try {
-      dbReady = !!(mongoose && mongoose.connection && mongoose.connection.readyState === 1);
-    } catch (e) {
-      dbReady = false;
-    }
 
-    const stripeReady = !!process.env.STRIPE_SECRET_KEY && !!process.env.STRIPE_WEBHOOK_SECRET;
-    const mailReady = !!process.env.SMTP_HOST && !!process.env.SMTP_USER && !!process.env.SMTP_PASS;
 
-    const ok = dbReady && stripeReady && mailReady;
-
-    return res.status(ok ? 200 : 503).json({
-      status: ok ? "ok" : "degraded",
-      uptime,
-      deps: {
-        db: dbReady ? "ok" : "down",
-        stripe: stripeReady ? "ok" : "missing_env",
-        mail: mailReady ? "ok" : "missing_env"
-      }
-    });
-  } catch (e) {
-    return res.status(500).json({ status: "error" });
-  }
-});
+let __httpServerStarted = false;
+function __startHttpServerOnce() {
+  if (__httpServerStarted) return;
+  __httpServerStarted = true;
+      app.listen(PORT, () => {
+        try { __log("info", "server_listen", { rid: undefined, path: undefined }); } catch (_) {}
+      });
+}
+__startHttpServerOnce();
 
 __startServerAfterDb();
 
