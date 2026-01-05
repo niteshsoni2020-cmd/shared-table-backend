@@ -46,7 +46,7 @@ const { start: startJobs, registerInterval } = require("./src/jobs");
   }
 })();
 
-const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
+const stripe = require("stripe")(String(process.env.STRIPE_SECRET_KEY || "").trim());
 const STRIPE_WEBHOOK_SECRET = String(process.env.STRIPE_WEBHOOK_SECRET || "");
 const nodemailer = require("nodemailer");
 const { sendEventEmail } = require("./src/email");
@@ -555,6 +555,73 @@ app.get("/", (req, res) => {
 
 app.set("trust proxy", 1);
 const PORT = process.env.PORT || 4000;
+
+function __validateEnvOrExit() {
+  try {
+    const isProd = String(process.env.NODE_ENV || "").toLowerCase() === "production";
+    const missing = [];
+
+    function req(name) {
+      const v = String(process.env[name] || "").trim();
+      if (v.length === 0) missing.push(name);
+      return v;
+    }
+
+    function anySet(names) {
+      for (const n of names) {
+        if (String(process.env[n] || "").trim().length > 0) return true;
+      }
+      return false;
+    }
+
+    req("MONGO_URI");
+    req("JWT_SECRET");
+
+    if (isProd || anySet(["STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET"])) {
+      req("STRIPE_SECRET_KEY");
+      req("STRIPE_WEBHOOK_SECRET");
+    }
+
+    if (isProd || anySet(["CLOUDINARY_CLOUD_NAME", "CLOUDINARY_API_KEY", "CLOUDINARY_API_SECRET"])) {
+      req("CLOUDINARY_CLOUD_NAME");
+      req("CLOUDINARY_API_KEY");
+      req("CLOUDINARY_API_SECRET");
+    }
+
+    if (anySet(["SMTP_HOST", "SMTP_USER", "SMTP_PASS"])) {
+      req("SMTP_HOST");
+      req("SMTP_USER");
+      req("SMTP_PASS");
+    }
+
+    try {
+      const runJobs = String(process.env.RUN_JOBS || "").toLowerCase().trim();
+      const jobsOn = (runJobs === "1" || runJobs === "true" || runJobs === "yes" || runJobs === "on");
+      if (jobsOn) req("INTERNAL_JOBS_TOKEN");
+    } catch (_) {}
+
+    if (isProd) req("FRONTEND_BASE_URL");
+
+    if (missing.length > 0) {
+      const uniq = Array.from(new Set(missing));
+      if (isProd) {
+        console.error("ENV_GUARD_FAIL_MISSING", uniq.join(","));
+        process.exit(1);
+      } else {
+        try { console.warn("ENV_GUARD_WARN_MISSING", uniq.join(",")); } catch (_) {}
+      }
+    }
+  } catch (e) {
+    const isProd = String(process.env.NODE_ENV || "").toLowerCase() === "production";
+    if (isProd) {
+      try { console.error("ENV_GUARD_FATAL", (e && e.message) ? String(e.message) : String(e)); } catch (_) {}
+      process.exit(1);
+    }
+  }
+}
+
+__validateEnvOrExit();
+
 
 function __isProdEnv() {
   return String(process.env.NODE_ENV || "").toLowerCase() === "production";
