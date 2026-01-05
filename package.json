@@ -5,7 +5,8 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "node --check server.js && node tests/smoke.test.js"
+    "test": "node --check server.js && node tests/smoke.test.js",
+    "migrate": "node src/migrate.js"
   },
   "keywords": [],
   "author": "",
