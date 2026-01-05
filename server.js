@@ -249,6 +249,7 @@ const statusCode = __pickStatusCode(r);
           if (statusCode !== null) doc.statusCode = statusCode;
         doc.ms = ms;
         doc.error = err.slice(0, 800);
+                // COMMDELIVERY_OUTCOME_PATCH_TSTS_FINAL
         await doc.save();
       } catch (_) {}
     }
@@ -4990,6 +4991,8 @@ app.get("/api/users/:userId/profile", async (req, res) => {
 // ===== PAYMENT RECONCILIATION (Stripe -> DB) =====
 // Periodically reconciles recent pending payments so bookings do not get stuck.
 async function runPaymentReconciliationOnce_V1() {
+  const BookingModel = mongoose.model("Booking");
+
   const now = new Date();
   const since = new Date(Date.now() - 1000 * 60 * 60 * 48); // 48h window
   const q = {
@@ -5174,31 +5177,43 @@ app.post("/api/internal/jobs/run", async (req, res) => {
     const ran = [];
     const errors = [];
 
+    // Respond immediately so cron callers never time out.
+    const queued = ["unpaid_booking_expiry_cleanup_v1", "payment_reconciliation_v1"];
     try {
-      await runUnpaidBookingExpiryCleanupOnce_V1();
-      ran.push("unpaid_booking_expiry_cleanup_v1");
-    } catch (e) {
-      const msg = (e && e.message) ? String(e.message) : String(e);
-      errors.push({ job: "unpaid_booking_expiry_cleanup_v1", error: msg });
-    }
-
-    try {
-      await runPaymentReconciliationOnce_V1();
-      ran.push("payment_reconciliation_v1");
-    } catch (e) {
-      const msg = (e && e.message) ? String(e.message) : String(e);
-      errors.push({ job: "payment_reconciliation_v1", error: msg });
-    }
-
-    const ok = errors.length === 0;
-    try {
-      __log(ok ? "info" : "error",
-        ok ? "internal_jobs_ok" : "internal_jobs_partial_fail",
-        { rid: undefined, path: "/api/internal/jobs/run", ran: ran, errors: errors }
-      );
+      res.status(202).json({ ok: true, accepted: true, queued: queued });
     } catch (_) {}
 
-    return res.status(ok ? 200 : 500).json({ ok: ok, ran: ran, errors: errors });
+    // Fire-and-forget background run; results go to logs.
+    setTimeout(async () => {
+      const ran = [];
+      const errors = [];
+
+      try {
+        await runUnpaidBookingExpiryCleanupOnce_V1();
+        ran.push("unpaid_booking_expiry_cleanup_v1");
+      } catch (e) {
+        const msg = (e && e.message) ? String(e.message) : String(e);
+        errors.push({ job: "unpaid_booking_expiry_cleanup_v1", error: msg });
+      }
+
+      try {
+        await runPaymentReconciliationOnce_V1();
+        ran.push("payment_reconciliation_v1");
+      } catch (e) {
+        const msg = (e && e.message) ? String(e.message) : String(e);
+        errors.push({ job: "payment_reconciliation_v1", error: msg });
+      }
+
+      const ok = errors.length == 0;
+      try {
+        __log(ok ? "info" : "error",
+          ok ? "internal_jobs_async_ok" : "internal_jobs_async_fail",
+          { rid: undefined, path: "/api/internal/jobs/run", ran: ran, errors: errors }
+        );
+      } catch (_) {}
+    }, 0);
+
+    return;
 
   } finally {
     try { if (global) global.__tsts_internal_jobs_running = false; } catch (_) {}
