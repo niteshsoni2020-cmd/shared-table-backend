@@ -2528,7 +2528,7 @@ app.post("/api/auth/register", registerLimiter, async (req, res) => {
       })();
       const verifyUrlBackend = (__apiBase || "") + "/api/auth/verify-email?email=" + encodeURIComponent(String(user.email || "")) + "&token=" + encodeURIComponent(String(vtoken || ""));
       const verifyUrlFrontend = __frontendBaseUrl() + "/verify-email?email=" + encodeURIComponent(String(user.email || "")) + "&token=" + encodeURIComponent(String(vtoken || ""));
-      __verifyUrl = String(verifyUrlBackend || "");
+      __verifyUrl = String(verifyUrlFrontend || "");
 
       const __need = ["Name", "VERIFY_EMAIL_URL"];
       const __p = sendEventEmail({
