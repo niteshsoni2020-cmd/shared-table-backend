@@ -71,6 +71,7 @@ function __fireAndForgetEmail(payload) {
 }
 
 const bcrypt = require("bcryptjs");
+const { ipKeyGenerator } = require("express-rate-limit");
 const rateLimit = require("express-rate-limit");
 const helmet = require("helmet");
 const jwt = require("jsonwebtoken");
@@ -640,7 +641,7 @@ const adminLimiter = rateLimit({
 function __rlKey(req) {
   try {
     if (req && req.user && (req.user._id || req.user.id)) return String(req.user._id || req.user.id);
-    if (req && req.ip) return String(req.ip);
+    if (req) return String(ipKeyGenerator(req));
     return "";
   } catch (_) {
     return "";
