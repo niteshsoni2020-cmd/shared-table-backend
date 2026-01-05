@@ -545,15 +545,12 @@ app.use((req, res, next) => {
   });
 
   return next();
-});
 
 
 
 
 
-// ROOT_SERVICE_MARKER_TSTS
-app.get("/", (req, res) => {
-  res.status(200).json({ service: "shared-table-api", status: "ok" });
+
 });
 const PORT = process.env.PORT || 4000;
 
@@ -654,6 +651,11 @@ app.use(
     crossOriginResourcePolicy: false,
   })
 );
+
+// ROOT_SERVICE_MARKER_TSTS
+app.get("/", (req, res) => {
+  res.status(200).json({ service: "shared-table-api", status: "ok" });
+});
 
 // Rate limiting (basic abuse protection)
 const apiLimiter = rateLimit({
