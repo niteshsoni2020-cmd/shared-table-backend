@@ -1703,6 +1703,7 @@ async function maybeSendBookingCancelledComms(booking) {
 
 
 async function maybeSendBookingExpiredComms(booking) {
+  // claim-before-send enabled
   try {
     if (!booking) return;
     try {
@@ -1757,23 +1758,29 @@ async function maybeSendBookingExpiredComms(booking) {
       if (Object.prototype.hasOwnProperty.call(__ctx, k) && String(__ctx[k] || "").trim().length > 0) __vars[k] = String(__ctx[k]).trim();
       else __vars[k] = "—";
     }
+    // claim-before-send (prevents duplicates under concurrent runners)
     if (guestEmail.length > 0 && __expiredGuestAlready == false) {
-      await sendEventEmail({
-        eventName: "BOOKING_EXPIRED",
-        category: "NOTIFICATIONS",
-        to: guestEmail,
-        vars: { DASHBOARD_URL: __vars["DASHBOARD_URL"], Name: __vars["Name"] }
-      });
+      let __claimed = false;
       try {
-        if (!booking.comms || typeof booking.comms !== "object") booking.comms = {};
-        booking.comms.bookingExpiredGuestSentAt = new Date();
-        try {
-          const D = String.fromCharCode(36);
-          const upd = {};
-          upd[D + "set"] = { "comms.bookingExpiredGuestSentAt": booking.comms.bookingExpiredGuestSentAt };
-          await Booking.updateOne({ _id: booking._id }, upd);
-        } catch (_) {}
+        const D = String.fromCharCode(36);
+        const EXISTS = D + "exists";
+        const SET = D + "set";
+        const q = { _id: booking._id };
+        q["comms.bookingExpiredGuestSentAt"] = {};
+        q["comms.bookingExpiredGuestSentAt"][EXISTS] = false;
+        const upd = {};
+        upd[SET] = { "comms.bookingExpiredGuestSentAt": new Date() };
+        const r = await Booking.updateOne(q, upd);
+        __claimed = Boolean((r && (r.modifiedCount == 1)) || (r && (r.nModified == 1)));
       } catch (_) {}
+      if (__claimed) {
+        await sendEventEmail({
+          eventName: "BOOKING_EXPIRED",
+          category: "NOTIFICATIONS",
+          to: guestEmail,
+          vars: { DASHBOARD_URL: __vars["DASHBOARD_URL"], Name: __vars["Name"] }
+        });
+      }
     }
 
     const __ctx2 = Object.assign({}, __ctx);
@@ -1784,23 +1791,29 @@ async function maybeSendBookingExpiredComms(booking) {
       if (Object.prototype.hasOwnProperty.call(__ctx2, k) && String(__ctx2[k] || "").trim().length > 0) __vars[k] = String(__ctx2[k]).trim();
       else __vars[k] = "—";
     }
+    // claim-before-send (prevents duplicates under concurrent runners)
     if (hostEmail.length > 0 && __expiredHostAlready == false) {
-      await sendEventEmail({
-        eventName: "BOOKING_EXPIRED_HOST",
-        category: "NOTIFICATIONS",
-        to: hostEmail,
-        vars: { BOOKING_DATE: __vars["BOOKING_DATE"], DASHBOARD_URL: __vars["DASHBOARD_URL"], EXPERIENCE_TITLE: __vars["EXPERIENCE_TITLE"], GUEST_NAME: __vars["GUEST_NAME"], HOST_NAME: __vars["HOST_NAME"], TIME_SLOT: __vars["TIME_SLOT"] }
-      });
+      let __claimed2 = false;
       try {
-        if (!booking.comms || typeof booking.comms !== "object") booking.comms = {};
-        booking.comms.bookingExpiredHostSentAt = new Date();
-        try {
-          const D = String.fromCharCode(36);
-          const upd = {};
-          upd[D + "set"] = { "comms.bookingExpiredHostSentAt": booking.comms.bookingExpiredHostSentAt };
-          await Booking.updateOne({ _id: booking._id }, upd);
-        } catch (_) {}
+        const D = String.fromCharCode(36);
+        const EXISTS = D + "exists";
+        const SET = D + "set";
+        const q = { _id: booking._id };
+        q["comms.bookingExpiredHostSentAt"] = {};
+        q["comms.bookingExpiredHostSentAt"][EXISTS] = false;
+        const upd = {};
+        upd[SET] = { "comms.bookingExpiredHostSentAt": new Date() };
+        const r = await Booking.updateOne(q, upd);
+        __claimed2 = Boolean((r && (r.modifiedCount == 1)) || (r && (r.nModified == 1)));
       } catch (_) {}
+      if (__claimed2) {
+        await sendEventEmail({
+          eventName: "BOOKING_EXPIRED_HOST",
+          category: "NOTIFICATIONS",
+          to: hostEmail,
+          vars: { BOOKING_DATE: __vars["BOOKING_DATE"], DASHBOARD_URL: __vars["DASHBOARD_URL"], EXPERIENCE_TITLE: __vars["EXPERIENCE_TITLE"], GUEST_NAME: __vars["GUEST_NAME"], HOST_NAME: __vars["HOST_NAME"], TIME_SLOT: __vars["TIME_SLOT"] }
+        });
+      }
     }
   } catch (e) {
     console.error("COMMS_EXPIRED_ERR", (e && e.message) ? e.message : String(e));
