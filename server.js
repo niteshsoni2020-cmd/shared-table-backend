@@ -7,6 +7,10 @@ require("dotenv").config();
 function __tstsValidateEnv() {
   const env = String(process.env.NODE_ENV || "").toLowerCase();
   const isProd = env === "production";
+  const allowed = new Set(["production", "development", "test", "staging", "preview"]);
+  if (!allowed.has(env)) {
+    try { console.warn("[TSTS][ENV] unexpected NODE_ENV=" + env + " (allowed: production|development|test|staging|preview)"); } catch (e) {}
+  }
 
   const requiredProd = [
     "JWT_SECRET",
