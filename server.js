@@ -3391,7 +3391,9 @@ app.post("/api/auth/forgot-password", forgotPasswordLimiter, async (req, res) =>
       await user.save();
 
       // Email is optional (backend-ready even before official email is configured)
-      const canEmail = !!process.env.SMTP_HOST && !!process.env.SMTP_USER && !!process.env.SMTP_PASS;
+      const hasSmtp = !!process.env.SMTP_HOST && !!process.env.SMTP_USER && !!process.env.SMTP_PASS;
+      const hasResend = String(process.env.RESEND_API_KEY || "").trim().length > 0;
+      const canEmail = hasSmtp || hasResend;
       const frontendBase = String(process.env.FRONTEND_BASE_URL || "http://localhost:3000").replace(/\/$/, "");
       const resetUrl = `${frontendBase}/reset-password?email=${encodeURIComponent(email)}&token=${encodeURIComponent(token)}`;
       if (canEmail) {
