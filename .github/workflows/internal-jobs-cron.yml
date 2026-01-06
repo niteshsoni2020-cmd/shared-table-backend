@@ -28,7 +28,7 @@ jobs:
           echo "HTTP=$code"
           cat resp.json || true
 
-          if [ "$code" -ne 200 ]; then
+          if [ "$code" -ne 200 ] && [ "$code" -ne 202 ]; then
             echo "WARN: non-200 response (not failing cron)"
             exit 0
           fi
