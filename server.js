@@ -2,6 +2,50 @@
 
 require("dotenv").config();
 
+
+// TSTS_ENV_VALIDATION (Batch0 L0-6) — fail-fast in production, warn in dev
+function __tstsValidateEnv() {
+  const env = String(process.env.NODE_ENV || "").toLowerCase();
+  const isProd = env === "production";
+
+  const requiredProd = [
+    "JWT_SECRET",
+    "MONGO_URI",
+    "STRIPE_SECRET_KEY",
+    "STRIPE_WEBHOOK_SECRET",
+  ];
+
+  const missing = [];
+  for (const k of requiredProd) {
+    const v = String(process.env[k] || "").trim();
+    if (!v) missing.push(k);
+  }
+
+  if (isProd) {
+    if (missing.length) {
+      throw new Error("ENV_MISSING_REQUIRED: " + missing.join(","));
+    }
+  } else {
+    if (missing.length) {
+      try { console.warn("[TSTS][ENV] missing (dev allowed): " + missing.join(",")); } catch (e) {}
+    }
+  }
+
+  if (isProd) {
+    const corsRaw = String(process.env.CORS_ORIGINS || "").toLowerCase();
+    if (corsRaw.includes("localhost") || corsRaw.includes("127.0.0.1")) {
+      throw new Error("ENV_INVALID_CORS_ORIGINS_LOCALHOST_IN_PROD");
+    }
+  }
+}
+
+try {
+  __tstsValidateEnv();
+} catch (e) {
+  console.error("[TSTS][BOOT] env validation failed:", (e && e.message) || String(e));
+  process.exit(1);
+}
+
 // ENV_ALIAS_SMTP_FROM_EMAIL_KEYS
 // Accept legacy EMAIL_USER/EMAIL_PASS while code expects SMTP_USER/SMTP_PASS.
 // Provide safe defaults for SMTP_* if not set.
@@ -834,15 +878,21 @@ async function __maybeStrikeAndMute(req, reason) {
 // CORS (locked allowlist)
 // Set CORS_ORIGINS as comma-separated list
 // Example: "https://thesharedtablestory.com,https://www.thesharedtablestory.com,http://localhost:3000"
-const DEFAULT_CORS_ORIGINS = [
-  "http://localhost:3000",
-  "http://127.0.0.1:3000",
-  "http://localhost:5173",
-  "http://127.0.0.1:5173",
-  "https://shared-table-frontend.onrender.com",
-  "https://thesharedtablestory.com",
-  "https://www.thesharedtablestory.com"
-];
+const DEFAULT_CORS_ORIGINS = (String(process.env.NODE_ENV || "").toLowerCase() === "production")
+  ? [
+      "https://shared-table-frontend.onrender.com",
+      "https://thesharedtablestory.com",
+      "https://www.thesharedtablestory.com",
+    ]
+  : [
+      "http://localhost:3000",
+      "http://127.0.0.1:3000",
+      "http://localhost:5173",
+      "http://127.0.0.1:5173",
+      "https://shared-table-frontend.onrender.com",
+      "https://thesharedtablestory.com",
+      "https://www.thesharedtablestory.com",
+    ];
 
 const ENV_CORS_ORIGINS = String(process.env.CORS_ORIGINS || "")
   .split(",")
