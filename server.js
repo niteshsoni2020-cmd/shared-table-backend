@@ -3231,8 +3231,9 @@ app.post("/api/auth/register", registerLimiter, async (req, res) => {
 
     const __vdbgSecret = String(process.env.VERIFY_DEBUG_SECRET || "").trim();
     const __vdbgHeader = String((req.headers && (req.headers["x-verify-debug-secret"] || req.headers["X-Verify-Debug-Secret"])) || "").trim();
+    const __isProd = (String(process.env.NODE_ENV || "").toLowerCase() == "production");
 
-    if (__vdbgSecret.length >= 24 && __vdbgHeader) {
+    if (!__isProd && __vdbgSecret.length >= 24 && __vdbgHeader) {
       const a = __vdbgSecret;
       const b = __vdbgHeader;
       const n = (a.length > b.length) ? a.length : b.length;
@@ -3418,7 +3419,8 @@ app.post("/api/auth/forgot-password", forgotPasswordLimiter, async (req, res) =>
       // Normal clients never receive tokens/links.
       const __dbgSecret = String(process.env.RESET_DEBUG_SECRET || "").trim();
       const __dbgHeader = String((req.headers && (req.headers["x-reset-debug-secret"] || req.headers["X-Reset-Debug-Secret"])) || "").trim();
-      if (__dbgSecret.length >= 24 && __dbgHeader) {
+      const __isProd = (String(process.env.NODE_ENV || "").toLowerCase() == "production");
+      if (!__isProd && __dbgSecret.length >= 24 && __dbgHeader) {
         const a = __dbgSecret;
         const b = __dbgHeader;
         const n = (a.length > b.length) ? a.length : b.length;
@@ -3438,7 +3440,8 @@ app.post("/api/auth/forgot-password", forgotPasswordLimiter, async (req, res) =>
       // Helps verify Render env + header wiring without leaking secrets.
       try {
         const __hdrPresent = !!(req.headers && (req.headers["x-reset-debug-secret"] || req.headers["X-Reset-Debug-Secret"]));
-        if (__hdrPresent) {
+        const __isProdDbg = (String(process.env.NODE_ENV || "").toLowerCase() == "production");
+        if (!__isProdDbg && __hdrPresent) {
           const __s0 = String(process.env.RESET_DEBUG_SECRET || "").trim();
           const __h0 = String((req.headers && (req.headers["x-reset-debug-secret"] || req.headers["X-Reset-Debug-Secret"])) || "").trim();
           const __minLenOk = (__s0.length >= 24);
