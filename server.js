@@ -9,7 +9,7 @@ function __tstsValidateEnv() {
   const isProd = env === "production";
   const allowed = new Set(["production", "development", "test", "staging", "preview"]);
   if (!allowed.has(env)) {
-    try { console.warn("[TSTS][ENV] unexpected NODE_ENV=" + env + " (allowed: production|development|test|staging|preview)"); } catch (e) {}
+    throw new Error("ENV_INVALID_NODE_ENV: " + env);
   }
 
   const requiredProd = [
@@ -17,6 +17,7 @@ function __tstsValidateEnv() {
     "MONGO_URI",
     "STRIPE_SECRET_KEY",
     "STRIPE_WEBHOOK_SECRET",
+    "FRONTEND_BASE_URL",
   ];
 
   const missing = [];
