@@ -26,5 +26,8 @@
     "nodemailer": "^7.0.12",
     "stripe": "^14.10.0",
     "winston": "^3.19.0"
+  },
+  "engines": {
+    "node": "24.11.1"
   }
 }
