@@ -6161,7 +6161,12 @@ async function transitionBooking(booking, nextStatus, meta = {}) {
   if (nextStatus === "expired") {
     updates.expiredAt = booking.expiredAt || now;
   }
-  // L2_STATE_MACHINE_V1
+    // L2_GUEST_CANCEL_COMMS_IDEMPOTENCY_V1
+  // Cancel comms exactly once using guestCancelledAt as idempotency key.
+  const L2_IS_GUEST_CANCEL_TRANSITION = (nextStatus === "cancelled");
+  const L2_SHOULD_SEND_GUEST_CANCEL_COMMS = (L2_IS_GUEST_CANCEL_TRANSITION && !booking.guestCancelledAt);
+
+// L2_STATE_MACHINE_V1
   // Refunded is terminal in practice. Make the transition idempotent and explicitly detectable.
   const L2_IS_REFUND_TRANSITION = (nextStatus === "refunded");
   const L2_SHOULD_SEND_REFUND_COMMS = (L2_IS_REFUND_TRANSITION && !booking.refundedAt);
@@ -6185,7 +6190,7 @@ async function transitionBooking(booking, nextStatus, meta = {}) {
       if (nextStatus === "confirmed") {
         await maybeSendBookingConfirmedComms(booking);
       }
-      if (nextStatus === "cancelled") {
+      if (L2_SHOULD_SEND_GUEST_CANCEL_COMMS) {
         await maybeSendBookingCancelledComms(booking);
       }
       if (nextStatus === "expired") {
