@@ -759,6 +759,25 @@ const adminLimiter = rateLimit({
 });
 
 // PER_ACTION_LIMITERS_TSTS (Batch6 G1)
+// Per-route limiters (explicit attachments)
+const promoCreateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: __rlKey,
+  handler: __rlHandler("promo_admin")
+});
+
+const bookingVerifyLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  limit: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: __rlKey,
+  handler: __rlHandler("booking_verify")
+});
+
 function __rlKey(req) {
   try {
     if (req && req.user && (req.user._id || req.user.id)) return String(req.user._id || req.user.id);
@@ -2860,7 +2879,7 @@ function __promoGenerateCode(prefix) {
 }
 
 // Create promo
-app.post("/api/admin/promo-codes", adminMiddleware, async (req, res) => {
+app.post("/api/admin/promo-codes", adminMiddleware, promoCreateLimiter, async (req, res) => {
   try {
     const body = (req && req.body) ? req.body : {};
     const now = new Date();
@@ -5127,7 +5146,7 @@ app.post("/api/experiences/:id/book", authMiddleware, bookingCreateLimiter, asyn
 });
 
 // Booking verify
-app.post("/api/bookings/verify", async (req, res) => {
+app.post("/api/bookings/verify", bookingVerifyLimiter, async (req, res) => {
   const bid = __cleanId(((req.body || {}).bookingId), 80);
   const sid = __cleanId(((req.body || {}).sessionId), 120);
   if (bid.length === 0) return res.status(400).json({ status: "invalid_booking_id" });
