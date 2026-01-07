@@ -4537,12 +4537,20 @@ app.post("/api/experiences/:id/book", authMiddleware, bookingCreateLimiter, asyn
         }
 
         for (const sl of slots) {
-          const sl2 = String(sl || "").trim();
-          if (!sl2) continue;
-          const cur = await CapacitySlot.findOne({ experienceId: String(exp._id), bookingDate: d2, timeSlot: sl2 }).lean();
+          const slRaw = String(sl || "").trim();
+          if (!slRaw) continue;
+
+          const slKey = __normalizeTimeSlotKey(slRaw);
+          const slCanon = slKey || slRaw;
+
+          let cur = await CapacitySlot.findOne({ experienceId: String(exp._id), bookingDate: d2, timeSlot: slCanon }).lean();
+          if (cur == null && slKey && slKey != slRaw) {
+            cur = await CapacitySlot.findOne({ experienceId: String(exp._id), bookingDate: d2, timeSlot: slRaw }).lean();
+          }
+
           const rsv = (cur && typeof cur.reservedGuests === "number") ? Number(cur.reservedGuests) : 0;
           if (rsv === 0) {
-            next = { bookingDate: d2, timeSlot: sl2 };
+            next = { bookingDate: d2, timeSlot: slCanon };
             break;
           }
         }
