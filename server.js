@@ -5711,7 +5711,7 @@ app.get("/api/admin/bookings", adminMiddleware, async (req, res) => {
   try {
     const bookings = await Booking.find()
       .populate("experience")
-      .populate({ path: "user", select: "-password -email" })
+      .populate({ path: "guestId", select: "-password -email" })
       .sort({ createdAt: -1 })
       .limit(50);
 
