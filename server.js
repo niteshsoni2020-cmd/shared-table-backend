@@ -6132,7 +6132,34 @@ async function transitionBooking(booking, nextStatus, meta = {}) {
 
   if (booking.status === nextStatus) return booking;
 
-  // L2_EXPIRED_SAFE_NOOP_V1
+    // L2_BOOKING_STATE_MACHINE_V1
+  // Enforce allowed transitions and terminal states. Fail loud on invalid transitions.
+  const curStatus = String(booking.status || "");
+  const next = String(nextStatus || "");
+  const TERMINAL = new Set(["refunded", "cancelled", "cancelled_by_host", "expired", "completed"]);
+  const ALLOWED = {
+    pending: ["confirmed", "cancelled", "cancelled_by_host", "expired"],
+    confirmed: ["cancelled", "cancelled_by_host", "refunded", "completed"],
+    cancelled: [],
+    cancelled_by_host: ["refunded"],
+    refunded: [],
+    expired: [],
+    completed: []
+  };
+
+  if (TERMINAL.has(curStatus)) {
+    if (curStatus === next) {
+      return booking;
+    }
+    throw new Error("BOOKING_INVALID_TRANSITION_TERMINAL:" + curStatus + "->" + next);
+  }
+
+  const allowedNext = Array.isArray(ALLOWED[curStatus]) ? ALLOWED[curStatus] : [];
+  if (allowedNext.indexOf(next) === -1) {
+    throw new Error("BOOKING_INVALID_TRANSITION:" + curStatus + "->" + next);
+  }
+
+// L2_EXPIRED_SAFE_NOOP_V1
   // Expiry is a cleanup sink. Never throw, never corrupt terminal/paid-path bookings if called accidentally.
   if (nextStatus === "expired") {
     const cur = String(booking.status || "");
