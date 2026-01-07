@@ -21,7 +21,7 @@ jobs:
             exit 0
           fi
 
-          code="$(curl -sS --max-time 25 -o resp.json -w "%{http_code}" \
+          code="$(curl -sS --max-time 300 -o resp.json -w "%{http_code}" \
             -X POST "$BASE/api/internal/jobs/run" \
             -H "X-Internal-Token: $TOKEN")"
 
