@@ -3068,8 +3068,7 @@ async function releaseCapacitySlot(experienceId, dateStr, timeSlot, guests) {
 
   const q = { experienceId: String(expId), bookingDate: d, timeSlot: slot };
   q[OR] = [
-    { reservedGuests: (function(){ const x={}; x[EXISTS]=true; x[GTE]=g; return x; })() },
-    { reservedGuests: (function(){ const x={}; x[EXISTS]=true; return x; })() }
+    { reservedGuests: (function(){ const x={}; x[EXISTS]=true; x[GTE]=g; return x; })() }
   ];
 
   const upd = {};
@@ -3082,6 +3081,7 @@ async function releaseCapacitySlot(experienceId, dateStr, timeSlot, guests) {
 if (slotAlt && slot && slotAlt !== slot) {
   try {
     const qLegacy = { experienceId: String(expId), bookingDate: d, timeSlot: slotAlt };
+    qLegacy[OR] = q[OR];
     await CapacitySlot.updateOne(qLegacy, upd);
   } catch (_) {}
 }
