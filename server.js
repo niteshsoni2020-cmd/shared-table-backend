@@ -1,3 +1,4 @@
+
 // server.js - FULL VERSION (Privacy-first attendee discovery + Like/Comment + Public profile hardening)
 
 require("dotenv").config();
@@ -5739,7 +5740,7 @@ app.get("/version", (req, res) => {
 // Trigger idempotent job runs via scheduler (Render Cron / trusted caller).
 // Security: requires env INTERNAL_JOBS_TOKEN and header X-Internal-Token to match.
 // Note: This endpoint runs functions that are already safe/idempotent by design.
-app.post("/api/internal/jobs/run", async (req, res) => {
+app.all("/api/internal/jobs/run", async (req, res) => {
 
   // Guard 1: do not run until DB is ready
   if (typeof __dbReady !== "undefined" && __dbReady !== true) {
