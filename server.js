@@ -4639,6 +4639,7 @@ app.post("/api/experiences/:id/book", authMiddleware, bookingCreateLimiter, asyn
   const promoRaw = String(promoCode || "").trim();
   let promoApplied = null;
   let promoOffCents = 0;
+  let promoRedemptionPending = null;
 
   if (promoRaw) {
     const code = promoRaw.toUpperCase();
@@ -4697,22 +4698,22 @@ app.post("/api/experiences/:id/book", authMiddleware, bookingCreateLimiter, asyn
       promoOffCents = Math.max(0, Math.min(base, Math.max(pctOff, fixed)));
 
       totalCents = Math.max(0, base - promoOffCents);
-      hostPayoutCents = Math.max(0, totalCents - adminSubsidyCents);
+
+      adminSubsidyCents = Math.max(0, Number(adminSubsidyCents) + Number(promoOffCents));
+
+      hostPayoutCents = Math.max(0, Number(hostPayoutCents));
 
       promoApplied = { code: code, percentOff: pct, fixedOffCents: fixed, amountOffCents: promoOffCents, appliedAt: new Date() };
     }
 
-    try {
-      await PromoRedemption.create({
-        promoCode: code,
-        userId: meId,
-        bookingId: "",
-        ok: Boolean(ok),
-        reason: String(reason || ""),
-        amountOffCents: Number(promoOffCents) || 0,
-        createdAt: new Date()
-      });
-    } catch (_) {}
+    promoRedemptionPending = {
+      promoCode: code,
+      userId: meId,
+      ok: Boolean(ok),
+      reason: String(reason || ""),
+      amountOffCents: Number(promoOffCents) || 0,
+      createdAt: new Date()
+    };
   }
 
   const pricingSnapshot = {
@@ -4794,12 +4795,16 @@ app.post("/api/experiences/:id/book", authMiddleware, bookingCreateLimiter, asyn
   }
 
   try {
-    if (promoApplied && booking && booking._id) {
-      const __D = String.fromCharCode(36);
-      await PromoRedemption.updateMany(
-        { promoCode: String(promoApplied.code || ""), userId: String(((req.user && (req.user._id || req.user.id)) || "")), bookingId: "" },
-        { [__D + "set"]: { bookingId: String(booking._id) } }
-      );
+    if (promoRedemptionPending && booking && booking._id) {
+      await PromoRedemption.create({
+        promoCode: String(promoRedemptionPending.promoCode || ""),
+        userId: String(promoRedemptionPending.userId || ""),
+        bookingId: String(booking._id),
+        ok: Boolean(promoRedemptionPending.ok),
+        reason: String(promoRedemptionPending.reason || ""),
+        amountOffCents: Number(promoRedemptionPending.amountOffCents) || 0,
+        createdAt: promoRedemptionPending.createdAt ? new Date(promoRedemptionPending.createdAt) : new Date()
+      });
     }
   } catch (_) {}
   // Comms: booking request submitted (guest)
@@ -5129,7 +5134,10 @@ app.post("/api/bookings/:id/cancel", authMiddleware, async (req, res) => {
 
 
     const totalCents =
-      booking.pricing && Number.isFinite(booking.pricing.totalCents) ? Number(booking.pricing.totalCents) : null;
+      (booking.pricingSnapshot && Number.isFinite(booking.pricingSnapshot.totalCents)) ? Number(booking.pricingSnapshot.totalCents)
+      : (booking.feeBreakdown && Number.isFinite(booking.feeBreakdown.totalCents)) ? Number(booking.feeBreakdown.totalCents)
+      : (booking.pricing && Number.isFinite(booking.pricing.totalCents)) ? Number(booking.pricing.totalCents)
+      : null;
 
     const snap = booking.policySnapshot || null;
     const rules = (snap && snap.rules && typeof snap.rules === "object") ? snap.rules : null;
