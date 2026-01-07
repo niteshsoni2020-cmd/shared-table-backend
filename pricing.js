@@ -205,10 +205,98 @@ function computeRefundCents(args) {
   };
 }
 
+function computeBookingPricingSnapshot(args) {
+  // Authoritative kernel: compute all cents here (caller supplies inputs/policy only).
+  const unitCents = _requireInt("unitCents", args.unitCents);
+  const guests = _requireInt("guests", args.guests);
+
+  const isPrivate = Boolean(args.isPrivate);
+  const privateHostBaseCents = (args.privateHostBaseCents != null) ? _round(Number(args.privateHostBaseCents)) : null;
+
+  const hostPctRequested = _round(Number(args.hostPctRequested) || 0);
+  const adminPctRequested = _round(Number(args.adminPctRequested) || 0);
+
+  const promoPercentOff = _round(Number(args.promoPercentOff) || 0);
+  const promoFixedOffCents = _round(Number(args.promoFixedOffCents) || 0);
+
+  const platformFeePolicy = (args.platformFeePolicy && typeof args.platformFeePolicy === "object") ? args.platformFeePolicy : null;
+
+  const rawSubtotalCents = _requireInt("subtotalCents", _round(unitCents * guests));
+
+  // Host base (what discounts are applied to). Private bookings override host base.
+  let hostBasePriceCents = rawSubtotalCents;
+  if (isPrivate && privateHostBaseCents != null) {
+    hostBasePriceCents = _requireInt("privateHostBaseCents", privateHostBaseCents);
+  }
+
+  const disc = computeDiscountsAndPromo({
+    hostBasePriceCents: hostBasePriceCents,
+    hostPct: hostPctRequested,
+    adminPct: adminPctRequested,
+    // Promo is treated as an admin subsidy applied AFTER platform fee (matches current server behavior).
+    promoPctRequested: 0
+  });
+
+  const pf = computePlatformFeeCentsGross({
+    hostBasePriceCents: hostBasePriceCents,
+    platformFeePolicy: platformFeePolicy
+  });
+
+  const guestDisplayedPriceCents = computeGuestDisplayedPriceCents({
+    finalHostChargeCents: disc.finalHostChargeCents,
+    platformFeeCentsGross: pf.platformFeeCentsGross
+  });
+
+  const acct = computeHostPayoutAndSubsidy({
+    hostBasePriceCents: hostBasePriceCents,
+    hostPctApplied: disc.hostPctApplied,
+    finalHostChargeCents: disc.finalHostChargeCents
+  });
+
+  // Invariant: finalHostCharge + baseAdminSubsidy must equal hostPayout.
+  const baseAdminSubsidyCents = _requireInt("baseAdminSubsidyCents", _round(Number(acct.adminSubsidyCents) || 0));
+  const hostPayoutCents = _requireInt("hostPayoutCents", _round(Number(acct.hostPayoutCents) || 0));
+  const finalHostChargeCents = _requireInt("finalHostChargeCents", _round(Number(disc.finalHostChargeCents) || 0));
+  if ((finalHostChargeCents + baseAdminSubsidyCents) !== hostPayoutCents) {
+    throw new Error("PRICING_INVARIANT_HOSTPAYOUT_MISMATCH");
+  }
+
+  // Promo subsidy applies to the guest displayed price (post platform fee).
+  const baseForPromoCents = _requireInt("baseForPromoCents", guestDisplayedPriceCents);
+  const pctOffCents = (promoPercentOff > 0) ? _round(baseForPromoCents * (promoPercentOff / 100)) : 0;
+  const promoOffCents = _requireInt("promoOffCents", _clamp(_round(Math.max(pctOffCents, promoFixedOffCents)), 0, baseForPromoCents));
+
+  const totalCents = _requireInt("totalCents", _round(baseForPromoCents - promoOffCents));
+  const adminSubsidyCents = _requireInt("adminSubsidyCents", _round(baseAdminSubsidyCents + promoOffCents));
+
+  const preDiscountCents = _requireInt("preDiscountCents", hostBasePriceCents);
+  const discountSource = disc.discountSource != null ? String(disc.discountSource) : "";
+  const discountPct = _requireInt("discountPct", _round(Number(disc.priceDiscountPctApplied) || 0));
+  const discountMinGuests = _requireInt("discountMinGuests", _round(Number(disc.minGuestsApplied) || 0));
+
+  const description = args.description != null ? String(args.description) : "";
+
+  return {
+    unitCents: unitCents,
+    guests: guests,
+    subtotalCents: rawSubtotalCents,
+    hostBasePriceCents: hostBasePriceCents,
+    preDiscountCents: preDiscountCents,
+    discount: { source: discountSource, percent: discountPct, minGuests: discountMinGuests },
+    platformFeeCentsGross: _requireInt("platformFeeCentsGross", _round(Number(pf.platformFeeCentsGross) || 0)),
+    promoOffCents: promoOffCents,
+    totalCents: totalCents,
+    hostPayoutCents: hostPayoutCents,
+    adminSubsidyCents: adminSubsidyCents,
+    description: description
+  };
+}
+
 module.exports = {
   computePlatformFeeCentsGross,
   computeDiscountsAndPromo,
   computeGuestDisplayedPriceCents,
   computeHostPayoutAndSubsidy,
+  computeBookingPricingSnapshot,
   computeRefundCents
 };

@@ -2044,6 +2044,83 @@ policySchema.index({ active: 1, effectiveFrom: -1 });
 
 const Policy = mongoose.models.Policy || mongoose.model("Policy", policySchema);
 
+// --- ADMIN PRICING POLICY (platform fee + admin pct defaults/caps) ---
+const adminPricingPolicySchema = new mongoose.Schema(
+  {
+    version: { type: String, default: "" },
+    status: { type: String, enum: ["draft", "published"], default: "published" },
+    active: { type: Boolean, default: true },
+    effectiveFrom: { type: Date, default: Date.now },
+    publishedAt: { type: Date, default: Date.now },
+
+    rules: {
+      // platform fee policy object passed into pricing.js
+      platformFeePolicy: { type: Object, default: null },
+
+      // admin discount tier defaults/caps (percentage points, 0..50)
+      adminPctDefault: { type: Number, default: 0 },
+      adminPctCap: { type: Number, default: 0 },
+    },
+  },
+  schemaOpts
+);
+adminPricingPolicySchema.index({ active: 1, effectiveFrom: -1 });
+
+const AdminPricingPolicy =
+  mongoose.models.AdminPricingPolicy || mongoose.model("AdminPricingPolicy", adminPricingPolicySchema);
+
+async function getActiveAdminPricingPolicyDoc() {
+  const now = new Date();
+  return await AdminPricingPolicy.findOne({ active: true, effectiveFrom: { $lte: now } })
+    .sort({ effectiveFrom: -1 })
+    .lean();
+}
+
+function adminPricingPolicySnapshotFromDoc(doc) {
+  if (!doc) return null;
+  const r = (doc.rules && typeof doc.rules === "object") ? doc.rules : {};
+  const pfp = (r.platformFeePolicy && typeof r.platformFeePolicy === "object") ? r.platformFeePolicy : null;
+
+  const dfltRaw = Number(r.adminPctDefault);
+  const capRaw = Number(r.adminPctCap);
+
+  const dflt = Number.isFinite(dfltRaw) ? dfltRaw : 0;
+  const cap = Number.isFinite(capRaw) ? capRaw : 0;
+
+  return {
+    version: String(doc.version || ""),
+    effectiveFrom: doc.effectiveFrom || null,
+    publishedAt: doc.publishedAt || null,
+    rules: {
+      platformFeePolicy: pfp,
+      adminPctDefault: dflt,
+      adminPctCap: cap,
+    },
+  };
+}
+
+async function ensureDefaultAdminPricingPolicyExists() {
+  const any = await AdminPricingPolicy.findOne({}).select("_id").lean();
+  if (any) return;
+
+  const now = new Date();
+  const ver = now.toISOString();
+
+  await AdminPricingPolicy.create({
+    version: ver,
+    status: "published",
+    active: true,
+    effectiveFrom: now,
+    publishedAt: now,
+    rules: {
+      platformFeePolicy: null,
+      adminPctDefault: 0,
+      adminPctCap: 0,
+    },
+  });
+}
+
+
 async function getActivePolicyDoc() {
   const now = new Date();
   return await Policy.findOne({ active: true, effectiveFrom: { $lte: now } })
@@ -2748,6 +2825,153 @@ function adminMiddleware(req, res, next) {
     next();
   });
 }
+
+
+// --- ADMIN: PROMO CODES ---
+// Universal promo: appliesToExperienceIds=[] and appliesToHostIds=[].
+// Experience-specific (including multi-experience): appliesToExperienceIds=[...]
+// Host-specific: appliesToHostIds=[...]
+// Can combine both (host + experience scoping).
+function __promoNormIdArray(v) {
+  if (!Array.isArray(v)) return [];
+  const out = [];
+  for (const x of v) {
+    const t = String(x || "").trim();
+    if (t) out.push(t);
+  }
+  const seen = new Set();
+  const uniq = [];
+  for (const t of out) {
+    if (seen.has(t)) continue;
+    seen.add(t);
+    uniq.push(t);
+  }
+  return uniq;
+}
+
+function __promoCodeClean(v) {
+  return String(v || "").trim().toUpperCase().replace(/[^A-Z0-9_-]/g, "").slice(0, 40);
+}
+
+function __promoGenerateCode(prefix) {
+  const pre = String(prefix || "PROMO").trim().toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 12) || "PROMO";
+  const rnd = require("crypto").randomBytes(6).toString("hex").toUpperCase();
+  return (pre + "-" + rnd).slice(0, 40);
+}
+
+// Create promo
+app.post("/api/admin/promo-codes", adminMiddleware, async (req, res) => {
+  try {
+    const body = (req && req.body) ? req.body : {};
+    const now = new Date();
+
+    const pct = Number(body.percentOff) || 0;
+    const fixed = Number(body.fixedOffCents) || 0;
+
+    if (pct < 0 || pct > 100) return res.status(400).json({ message: "percentOff must be 0..100" });
+    if (fixed < 0) return res.status(400).json({ message: "fixedOffCents must be >= 0" });
+    if (pct <= 0 && fixed <= 0) return res.status(400).json({ message: "Provide percentOff or fixedOffCents" });
+
+    const codeIn = __promoCodeClean(body.code);
+    const code = codeIn || __promoGenerateCode(body.prefix);
+
+    const minSubtotalCents = Math.max(0, Number(body.minSubtotalCents) || 0);
+    const minGuests = Math.max(0, Number(body.minGuests) || 0);
+
+    const maxUsesTotal = Math.max(0, Number(body.maxUsesTotal) || 0);
+    const maxUsesPerUser = Math.max(0, Number(body.maxUsesPerUser) || 0);
+
+    const validFrom = body.validFrom ? new Date(body.validFrom) : null;
+    if (validFrom && Number.isNaN(validFrom.getTime())) return res.status(400).json({ message: "Invalid validFrom" });
+
+    const validTo = body.validTo ? new Date(body.validTo) : null;
+    if (validTo && Number.isNaN(validTo.getTime())) return res.status(400).json({ message: "Invalid validTo" });
+
+    if (validFrom && validTo && validTo.getTime() < validFrom.getTime()) {
+      return res.status(400).json({ message: "validTo must be >= validFrom" });
+    }
+
+    const appliesToExperienceIds = __promoNormIdArray(body.appliesToExperienceIds);
+    const appliesToHostIds = __promoNormIdArray(body.appliesToHostIds);
+
+    const exists = await PromoCode.findOne({ code: code }).lean();
+    if (exists) return res.status(409).json({ message: "Promo code already exists", code: code });
+
+    const doc = await PromoCode.create({
+      code: code,
+      active: (typeof body.active === "boolean") ? Boolean(body.active) : true,
+
+      percentOff: pct,
+      fixedOffCents: Math.floor(fixed),
+
+      currency: String(body.currency || "aud").toLowerCase(),
+
+      minSubtotalCents: Math.floor(minSubtotalCents),
+      minGuests: Math.floor(minGuests),
+
+      validFrom: validFrom,
+      validTo: validTo,
+
+      maxUsesTotal: Math.floor(maxUsesTotal),
+      maxUsesPerUser: Math.floor(maxUsesPerUser),
+
+      appliesToExperienceIds: appliesToExperienceIds,
+      appliesToHostIds: appliesToHostIds,
+
+      note: String(body.note || ""),
+      createdAt: now,
+      updatedAt: now
+    });
+
+    return res.json({ ok: true, promo: doc });
+  } catch (e) {
+    return res.status(500).json({ message: "Server error" });
+  }
+});
+
+// List promos (latest 200)
+app.get("/api/admin/promo-codes", adminMiddleware, async (req, res) => {
+  try {
+    const q = (req && req.query) ? req.query : {};
+    const activeRaw = (typeof q.active === "string") ? String(q.active).trim().toLowerCase() : "";
+    const codeRaw = (typeof q.code === "string") ? __promoCodeClean(q.code) : "";
+    const filt = {};
+    if (activeRaw == "true") filt["active"] = true;
+    if (activeRaw == "false") filt["active"] = false;
+    if (codeRaw) filt["code"] = codeRaw;
+
+    const docs = await PromoCode.find(filt).sort({ createdAt: -1 }).limit(200).lean();
+    return res.json({ ok: true, promos: docs });
+  } catch (e) {
+    return res.status(500).json({ message: "Server error" });
+  }
+});
+
+// Toggle active
+app.put("/api/admin/promo-codes/:code/active", adminMiddleware, async (req, res) => {
+  try {
+    const code = __promoCodeClean((req && req.params && req.params.code) ? req.params.code : "");
+    if (!code) return res.status(400).json({ message: "code required" });
+
+    const body = (req && req.body) ? req.body : {};
+    const active = (typeof body.active === "boolean") ? Boolean(body.active) : Boolean(body && body.active);
+
+    const __D = String.fromCharCode(36);
+    const upd = { };
+    upd[__D + "set"] = { active: active, updatedAt: new Date() };
+
+    const doc = await PromoCode.findOneAndUpdate(
+      { code: code },
+      upd,
+      { new: true }
+    ).lean();
+
+    if (!doc) return res.status(404).json({ message: "Promo not found" });
+    return res.json({ ok: true, promo: doc });
+  } catch (e) {
+    return res.status(500).json({ message: "Server error" });
+  }
+});
 
 
 // --- AUTH SESSION CONTROL (REVOCATION) ---
@@ -4470,7 +4694,21 @@ app.post("/api/experiences/:id/book", authMiddleware, bookingCreateLimiter, asyn
   const adminTier = adminEnabled ? __pickTier(adminCfg.tiers, guests) : null;
 
   const hostPctRequested = hostTier ? (Number(hostTier.percent) || 0) : 0;
-  const adminPctRequested = adminTier ? (Number(adminTier.percent) || 0) : 0;
+  const adminPricingDoc = await getActiveAdminPricingPolicyDoc();
+  const adminPricingSnap = adminPricingPolicySnapshotFromDoc(adminPricingDoc);
+
+  const adminPctDefault =
+    (adminPricingSnap && adminPricingSnap.rules && Number.isFinite(Number(adminPricingSnap.rules.adminPctDefault)))
+      ? Number(adminPricingSnap.rules.adminPctDefault)
+      : 0;
+
+  const adminPctCap =
+    (adminPricingSnap && adminPricingSnap.rules && Number.isFinite(Number(adminPricingSnap.rules.adminPctCap)))
+      ? Number(adminPricingSnap.rules.adminPctCap)
+      : 0;
+
+  const adminPctRaw = adminTier ? (Number(adminTier.percent) || 0) : adminPctDefault;
+  const adminPctRequested = Math.max(0, Math.min(50, Math.min(adminPctCap > 0 ? adminPctCap : 50, adminPctRaw)));
 
   let hostBasePriceCents = totalCents;
   let preDiscountCents = hostBasePriceCents;
@@ -4492,10 +4730,9 @@ app.post("/api/experiences/:id/book", authMiddleware, bookingCreateLimiter, asyn
     promoPctRequested: 0
   });
 
-  // Platform fee policy wiring will come from admin policy later; default none for now.
   const pf = pricing.computePlatformFeeCentsGross({
     hostBasePriceCents: hostBasePriceCents,
-    platformFeePolicy: null
+    platformFeePolicy: (adminPricingSnap && adminPricingSnap.rules) ? adminPricingSnap.rules.platformFeePolicy : null
   });
 
   const guestDisplayedPriceCents = pricing.computeGuestDisplayedPriceCents({
@@ -4693,17 +4930,9 @@ app.post("/api/experiences/:id/book", authMiddleware, bookingCreateLimiter, asyn
     if (ok) {
       const pct = Number(promo.percentOff) || 0;
       const fixed = Number(promo.fixedOffCents) || 0;
-      const base = Number(totalCents) || 0;
-      const pctOff = pct > 0 ? Math.floor(base * (pct / 100)) : 0;
-      promoOffCents = Math.max(0, Math.min(base, Math.max(pctOff, fixed)));
 
-      totalCents = Math.max(0, base - promoOffCents);
-
-      adminSubsidyCents = Math.max(0, Number(adminSubsidyCents) + Number(promoOffCents));
-
-      hostPayoutCents = Math.max(0, Number(hostPayoutCents));
-
-      promoApplied = { code: code, percentOff: pct, fixedOffCents: fixed, amountOffCents: promoOffCents, appliedAt: new Date() };
+      // Kernel owns totals; this block only records promo intent.
+      promoApplied = { code: code, percentOff: pct, fixedOffCents: fixed, amountOffCents: 0, appliedAt: new Date() };
     }
 
     promoRedemptionPending = {
@@ -4716,17 +4945,37 @@ app.post("/api/experiences/:id/book", authMiddleware, bookingCreateLimiter, asyn
     };
   }
 
-  const pricingSnapshot = {
+  const pricingSnapshot = pricing.computeBookingPricingSnapshot({
     unitCents: unitCents,
     guests: guests,
-    subtotalCents: unitCents * guests,
-    preDiscountCents: preDiscountCents,
-    discount: { source: discountSource, percent: discountPct, minGuests: discountMinGuests },
-    totalCents: totalCents,
-    hostPayoutCents: hostPayoutCents,
-    adminSubsidyCents: adminSubsidyCents,
+
+    isPrivate: Boolean(__isPrivate),
+    privateHostBaseCents: (__isPrivate && exp && exp.privatePrice) ? toCents(exp.privatePrice) : null,
+
+    hostPctRequested: hostPctRequested,
+    adminPctRequested: adminPctRequested,
+
+    promoPercentOff: (promoApplied && promoApplied.percentOff != null) ? Number(promoApplied.percentOff) : 0,
+    promoFixedOffCents: (promoApplied && promoApplied.fixedOffCents != null) ? Number(promoApplied.fixedOffCents) : 0,
+
+    platformFeePolicy: (adminPricingSnap && adminPricingSnap.rules) ? adminPricingSnap.rules.platformFeePolicy : null,
+
     description: String(description || "")
-  };
+  });
+
+  // Canonicalize legacy locals from kernel (single source of truth)
+  preDiscountCents = Number(pricingSnapshot.preDiscountCents) || 0;
+  discountSource = (pricingSnapshot.discount && pricingSnapshot.discount.source != null) ? String(pricingSnapshot.discount.source) : "";
+  discountPct = (pricingSnapshot.discount && pricingSnapshot.discount.percent != null) ? Number(pricingSnapshot.discount.percent) : 0;
+  discountMinGuests = (pricingSnapshot.discount && pricingSnapshot.discount.minGuests != null) ? Number(pricingSnapshot.discount.minGuests) : 0;
+
+  promoOffCents = Number(pricingSnapshot.promoOffCents) || 0;
+  totalCents = Number(pricingSnapshot.totalCents) || 0;
+  hostPayoutCents = Number(pricingSnapshot.hostPayoutCents) || 0;
+  adminSubsidyCents = Number(pricingSnapshot.adminSubsidyCents) || 0;
+
+  try { if (promoApplied && typeof promoApplied === "object") promoApplied.amountOffCents = promoOffCents; } catch (_) {}
+  try { if (promoRedemptionPending && typeof promoRedemptionPending === "object") promoRedemptionPending.amountOffCents = promoOffCents; } catch (_) {}
 
   const pricingHash = require("crypto").createHash("sha256").update(JSON.stringify(pricingSnapshot)).digest("hex");
 
@@ -4741,17 +4990,21 @@ app.post("/api/experiences/:id/book", authMiddleware, bookingCreateLimiter, asyn
     timeSlot: timeSlotStr,
     guestNotes: guestNotes || "",
 
-    // pricing breakdown (DYNAMIC_DISCOUNTS_V1)
+    // pricing breakdown (KERNEL_CANON_V1)
     pricing: {
-      unitCents: unitCents,
-      guests: guests,
-      subtotalCents: unitCents * guests,
-      preDiscountCents: preDiscountCents,
-      discount: { source: discountSource, percent: discountPct, minGuests: discountMinGuests },
-      totalCents: totalCents,
-      hostPayoutCents: hostPayoutCents,
-      adminSubsidyCents: adminSubsidyCents,
-      description: String(description || "")
+      currency: "aud",
+      unitCents: Number(pricingSnapshot.unitCents) || 0,
+      guests: Number(pricingSnapshot.guests) || 0,
+      subtotalCents: Number(pricingSnapshot.subtotalCents) || 0,
+      hostBasePriceCents: Number(pricingSnapshot.hostBasePriceCents) || 0,
+      preDiscountCents: Number(pricingSnapshot.preDiscountCents) || 0,
+      platformFeeCentsGross: Number(pricingSnapshot.platformFeeCentsGross) || 0,
+      promoOffCents: Number(pricingSnapshot.promoOffCents) || 0,
+      discount: (pricingSnapshot.discount && typeof pricingSnapshot.discount === "object") ? pricingSnapshot.discount : { source: "", percent: 0, minGuests: 0 },
+      totalCents: Number(pricingSnapshot.totalCents) || 0,
+      hostPayoutCents: Number(pricingSnapshot.hostPayoutCents) || 0,
+      adminSubsidyCents: Number(pricingSnapshot.adminSubsidyCents) || 0,
+      description: String(pricingSnapshot.description || "")
     },
 
     pricingSnapshot: pricingSnapshot,
@@ -4764,7 +5017,7 @@ app.post("/api/experiences/:id/book", authMiddleware, bookingCreateLimiter, asyn
       guests: guests,
       subtotalCents: unitCents * guests,
       preDiscountCents: preDiscountCents,
-      discountCents: Math.max(0, Number(preDiscountCents) - Number(totalCents) - Number(promoOffCents)),
+      discountCents: Math.max(0, Number(preDiscountCents) - Math.max(0, (Number(totalCents) + Number(promoOffCents)) - Number((pricingSnapshot && pricingSnapshot.platformFeeCentsGross) || 0))),
       promoOffCents: Number(promoOffCents) || 0,
       totalCents: totalCents,
       hostPayoutCents: hostPayoutCents,
@@ -4940,7 +5193,11 @@ app.post("/api/bookings/verify", async (req, res) => {
     const currency = String(session.currency || "aud").toLowerCase();
     const amountTotal = Number.isFinite(session.amount_total) ? Number(session.amount_total) : null;
 
-    const expectedCents = booking.pricing && Number.isFinite(booking.pricing.totalCents) ? Number(booking.pricing.totalCents) : null;
+    const expectedCents =
+      (booking.feeBreakdown && Number.isFinite(booking.feeBreakdown.totalCents)) ? Number(booking.feeBreakdown.totalCents)
+      : (booking.pricingSnapshot && Number.isFinite(booking.pricingSnapshot.totalCents)) ? Number(booking.pricingSnapshot.totalCents)
+      : (booking.pricing && Number.isFinite(booking.pricing.totalCents)) ? Number(booking.pricing.totalCents)
+      : null;
 
     if (expectedCents !== null && amountTotal !== null && amountTotal !== expectedCents) return res.status(400).json({ status: "mismatch", error: "amount mismatch" });
 
