@@ -3701,6 +3701,13 @@ app.post("/api/experiences", authMiddleware, async (req, res) => {
     }
     const __toStr = (v) => String(v || "").trim();
 
+    const __toArrStr = (v) => {
+      let a = [];
+      if (Array.isArray(v)) a = v;
+      else if (typeof v !== "undefined" && v !== null) a = [v];
+      return a.map((x) => __toStr(x)).filter((x) => x);
+    };
+
     let tags = [];
     if (Array.isArray(body.tags)) tags = body.tags;
     else if (body.tags) tags = [body.tags];
@@ -3733,6 +3740,7 @@ app.post("/api/experiences", authMiddleware, async (req, res) => {
       "startTime",
       "endTime",
       "availableDays",
+      "timeSlots",
       "itinerary",
       "requirements",
       "cancellationPolicy",
@@ -3752,6 +3760,10 @@ app.post("/api/experiences", authMiddleware, async (req, res) => {
     expData.imageUrl = imageUrl;
     expData.tags = tags;
 
+
+    if (typeof expData.timeSlots !== "undefined") {
+      expData.timeSlots = __toArrStr(expData.timeSlots);
+    }
     expData.hostId = String(req.user._id);
     expData.hostName = req.user.name;
     expData.hostPic = req.user.profilePic || "";
@@ -4706,6 +4718,30 @@ app.post("/api/bookings/:id/cancel", authMiddleware, async (req, res) => {
 
     // Idempotent: if already cancelled, return existing decision
     if (booking.status === "cancelled" || booking.status === "cancelled_by_host") {
+      // L2_CANCEL_RELEASE_CAPACITY_ALREADY_CANCELLED
+      // L2_CANCEL_RELEASE_CAPACITY: release reserved capacity once (idempotent)
+      if (!booking.capacityReleasedAt) {
+        try {
+          const expId = String((booking && (booking.experienceId || booking.experience)) || "");
+          const dateStr = String((booking && (booking.bookingDate || "")) || "");
+          const slot = String((booking && (booking.timeSlot || "")) || "");
+          const g = Number.parseInt(String((booking && (booking.guests || 0)) || "0"), 10) || 0;
+          if (expId && dateStr && slot && g > 0) {
+            let cur = null;
+            try { cur = await CapacitySlot.findOne({ experienceId: expId, bookingDate: dateStr, timeSlot: slot }).lean(); } catch (_) { cur = null; }
+            const curR = (cur && typeof cur.reservedGuests === "number") ? Number(cur.reservedGuests) : 0;
+            if (curR >= g) {
+              try { await releaseCapacitySlot(expId, dateStr, slot, g); } catch (_) {}
+            }
+            booking.capacityReleasedAt = new Date();
+          } else {
+            booking.capacityReleasedAt = new Date();
+          }
+        } catch (_) {
+          try { booking.capacityReleasedAt = new Date(); } catch (_) {}
+        }
+      }
+      try { await booking.save(); } catch (_) {}
       return res.json({
         message: "Already cancelled",
         refund: booking.refundDecision || { status: "none", amountCents: 0, currency: "aud", percent: 0 },
@@ -4717,6 +4753,31 @@ app.post("/api/bookings/:id/cancel", authMiddleware, async (req, res) => {
     await transitionBooking(booking, "cancelled");
     booking.cancellationReason = "User requested cancellation";
     booking.cancellation = { by: "guest", at: new Date(), reasonCode: "guest_cancel", note: "" };
+
+    // L2_CANCEL_RELEASE_CAPACITY_NORMAL
+      // L2_CANCEL_RELEASE_CAPACITY: release reserved capacity once (idempotent)
+      if (!booking.capacityReleasedAt) {
+        try {
+          const expId = String((booking && (booking.experienceId || booking.experience)) || "");
+          const dateStr = String((booking && (booking.bookingDate || "")) || "");
+          const slot = String((booking && (booking.timeSlot || "")) || "");
+          const g = Number.parseInt(String((booking && (booking.guests || 0)) || "0"), 10) || 0;
+          if (expId && dateStr && slot && g > 0) {
+            let cur = null;
+            try { cur = await CapacitySlot.findOne({ experienceId: expId, bookingDate: dateStr, timeSlot: slot }).lean(); } catch (_) { cur = null; }
+            const curR = (cur && typeof cur.reservedGuests === "number") ? Number(cur.reservedGuests) : 0;
+            if (curR >= g) {
+              try { await releaseCapacitySlot(expId, dateStr, slot, g); } catch (_) {}
+            }
+            booking.capacityReleasedAt = new Date();
+          } else {
+            booking.capacityReleasedAt = new Date();
+          }
+        } catch (_) {
+          try { booking.capacityReleasedAt = new Date(); } catch (_) {}
+        }
+      }
+
 
     const totalCents =
       booking.pricing && Number.isFinite(booking.pricing.totalCents) ? Number(booking.pricing.totalCents) : null;
