@@ -5878,10 +5878,11 @@ app.all("/api/internal/jobs/run", async (req, res) => {
     } catch (_) {}
 
     // Fire-and-forget background run; results go to logs.
-    setTimeout(async () => {
-      const ran = [];
-      const errors = [];
+  setTimeout(async () => {
+    const ran = [];
+    const errors = [];
 
+    try {
       try {
         await runUnpaidBookingExpiryCleanupOnce_V1();
         ran.push("unpaid_booking_expiry_cleanup_v1");
@@ -5905,11 +5906,16 @@ app.all("/api/internal/jobs/run", async (req, res) => {
           { rid: undefined, path: "/api/internal/jobs/run", ran: ran, errors: errors }
         );
       } catch (_) {}
-    }, 0);
+    } finally {
+      // IMPORTANT: keep BUSY=true until async jobs finish
+      try { if (global) global.__tsts_internal_jobs_running = false; } catch (_) {}
+    }
+  }, 0);
 
-    return;
+  return;
 
-  } finally {
+  } catch (e) {
+    // Safety: release BUSY only if handler fails before async scheduling
     try { if (global) global.__tsts_internal_jobs_running = false; } catch (_) {}
   }
 });
