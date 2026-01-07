@@ -4342,7 +4342,9 @@ app.post("/api/experiences/:id/book", authMiddleware, bookingCreateLimiter, asyn
 
 
   const bookingDateStr = String(bookingDate || "").trim();
-  const timeSlotStr = String(timeSlot || "").trim();
+  const timeSlotRaw = String(timeSlot || "").trim();
+  const timeSlotKey = __normalizeTimeSlotKey(timeSlotRaw);
+  const timeSlotStr = timeSlotKey || timeSlotRaw;
 
   if (!/^\d{4}-\d{2}-\d{2}$/.test(bookingDateStr)) return res.status(400).json({ message: "bookingDate required (YYYY-MM-DD)." });
   if (!timeSlotStr) return res.status(400).json({ message: "timeSlot is required." });
