@@ -1852,7 +1852,23 @@ const bookingSchema = new mongoose.Schema(
     expiresAt: { type: Date, default: null },
     // Capacity release idempotency marker
     capacityReleasedAt: { type: Date, default: null },
+
     pricing: Object,
+
+    // L3: immutable-ish pricing snapshot (stored at booking time)
+    pricingSnapshot: { type: Object, default: null },
+    pricingLockedAt: { type: Date, default: null },
+    pricingHash: { type: String, default: "" },
+
+    // L3: fee components (all cents)
+    feeBreakdown: { type: Object, default: {} },
+
+    // L3: promo applied snapshot (if any)
+    promoApplied: { type: Object, default: null },
+
+    // L3: cancellation audit trail (append-only events)
+    cancellationAudit: { type: Array, default: [] },
+
     comms: { type: Object, default: {} },
 
     // Payment reconciliation
@@ -1940,6 +1956,52 @@ const capacitySlotSchema = new mongoose.Schema(
 capacitySlotSchema.index({ experienceId: 1, bookingDate: 1, timeSlot: 1 }, { unique: true });
 
 const CapacitySlot = mongoose.models.CapacitySlot || mongoose.model("CapacitySlot", capacitySlotSchema);
+
+
+const promoCodeSchema = new mongoose.Schema(
+  {
+    code: { type: String, required: true, unique: true, index: true },
+    active: { type: Boolean, default: true },
+
+    percentOff: { type: Number, default: 0 },
+    fixedOffCents: { type: Number, default: 0 },
+
+    currency: { type: String, default: "aud" },
+
+    minSubtotalCents: { type: Number, default: 0 },
+    minGuests: { type: Number, default: 0 },
+
+    validFrom: { type: Date, default: null },
+    validTo: { type: Date, default: null },
+
+    maxUsesTotal: { type: Number, default: 0 },
+    maxUsesPerUser: { type: Number, default: 0 },
+
+    appliesToExperienceIds: { type: Array, default: [] },
+    appliesToHostIds: { type: Array, default: [] },
+
+    note: { type: String, default: "" },
+    createdAt: { type: Date, default: Date.now },
+    updatedAt: { type: Date, default: Date.now }
+  },
+  { minimize: false }
+);
+
+const promoRedemptionSchema = new mongoose.Schema(
+  {
+    promoCode: { type: String, required: true, index: true },
+    userId: { type: String, default: "", index: true },
+    bookingId: { type: String, default: "" },
+    ok: { type: Boolean, default: false },
+    reason: { type: String, default: "" },
+    amountOffCents: { type: Number, default: 0 },
+    createdAt: { type: Date, default: Date.now }
+  },
+  { minimize: false }
+);
+
+const PromoCode = mongoose.models.PromoCode || mongoose.model("PromoCode", promoCodeSchema);
+const PromoRedemption = mongoose.models.PromoRedemption || mongoose.model("PromoRedemption", promoRedemptionSchema);
 
 
 // Virtuals
@@ -4307,7 +4369,7 @@ app.post("/api/experiences/:id/book", authMiddleware, bookingCreateLimiter, asyn
     return res.status(403).json({ message: "Hosts cannot book their own experience." });
   }
 
-  const { numGuests, isPrivate, bookingDate, timeSlot, guestNotes } = req.body || {};
+  const { numGuests, isPrivate, bookingDate, timeSlot, guestNotes, promoCode } = req.body || {};
   let guests = Number.parseInt(numGuests, 10) || 1;
 
   // Booking caps (non-negotiable):
@@ -4572,6 +4634,99 @@ app.post("/api/experiences/:id/book", authMiddleware, bookingCreateLimiter, asyn
   if (holdOk == false) return res.status(400).json({ message: String(hold.message || "Fully booked.") });
 
 
+  const promoRaw = String(promoCode || "").trim();
+  let promoApplied = null;
+  let promoOffCents = 0;
+
+  if (promoRaw) {
+    const code = promoRaw.toUpperCase();
+    const now = new Date();
+    const meId = String(((req.user && (req.user._id || req.user.id)) || ""));
+
+    let ok = true;
+    let reason = "";
+
+    const promo = await PromoCode.findOne({ code: code, active: true }).lean();
+    if (!promo) {
+      ok = false;
+      reason = "not_found";
+    }
+
+    if (ok) {
+      const vf = promo.validFrom ? new Date(promo.validFrom) : null;
+      const vt = promo.validTo ? new Date(promo.validTo) : null;
+      if (vf && now < vf) { ok = false; reason = "outside_window"; }
+      if (vt && now > vt) { ok = false; reason = "outside_window"; }
+    }
+
+    if (ok && promo.minGuests && Number(promo.minGuests) > 0) {
+      if (Number(guests) < Number(promo.minGuests)) { ok = false; reason = "min_guests"; }
+    }
+
+    if (ok && promo.minSubtotalCents && Number(promo.minSubtotalCents) > 0) {
+      if (Number(totalCents) < Number(promo.minSubtotalCents)) { ok = false; reason = "min_subtotal"; }
+    }
+
+    if (ok && promo.maxUsesTotal && Number(promo.maxUsesTotal) > 0) {
+      const used = await PromoRedemption.countDocuments({ promoCode: code, ok: true });
+      if (used >= Number(promo.maxUsesTotal)) { ok = false; reason = "max_total_reached"; }
+    }
+
+    if (ok && promo.maxUsesPerUser && Number(promo.maxUsesPerUser) > 0 && meId) {
+      const usedU = await PromoRedemption.countDocuments({ promoCode: code, ok: true, userId: meId });
+      if (usedU >= Number(promo.maxUsesPerUser)) { ok = false; reason = "max_user_reached"; }
+    }
+
+    if (ok && promo.appliesToExperienceIds && Array.isArray(promo.appliesToExperienceIds) && promo.appliesToExperienceIds.length > 0) {
+      const okExp = promo.appliesToExperienceIds.map((x) => String(x)).includes(String(exp._id));
+      if (!okExp) { ok = false; reason = "not_eligible_experience"; }
+    }
+
+    if (ok && promo.appliesToHostIds && Array.isArray(promo.appliesToHostIds) && promo.appliesToHostIds.length > 0) {
+      const okHost = promo.appliesToHostIds.map((x) => String(x)).includes(String(exp.hostId || ""));
+      if (!okHost) { ok = false; reason = "not_eligible_host"; }
+    }
+
+    if (ok) {
+      const pct = Number(promo.percentOff) || 0;
+      const fixed = Number(promo.fixedOffCents) || 0;
+      const base = Number(totalCents) || 0;
+      const pctOff = pct > 0 ? Math.floor(base * (pct / 100)) : 0;
+      promoOffCents = Math.max(0, Math.min(base, Math.max(pctOff, fixed)));
+
+      totalCents = Math.max(0, base - promoOffCents);
+      hostPayoutCents = Math.max(0, totalCents - adminSubsidyCents);
+
+      promoApplied = { code: code, percentOff: pct, fixedOffCents: fixed, amountOffCents: promoOffCents, appliedAt: new Date() };
+    }
+
+    try {
+      await PromoRedemption.create({
+        promoCode: code,
+        userId: meId,
+        bookingId: "",
+        ok: Boolean(ok),
+        reason: String(reason || ""),
+        amountOffCents: Number(promoOffCents) || 0,
+        createdAt: new Date()
+      });
+    } catch (_) {}
+  }
+
+  const pricingSnapshot = {
+    unitCents: unitCents,
+    guests: guests,
+    subtotalCents: unitCents * guests,
+    preDiscountCents: preDiscountCents,
+    discount: { source: discountSource, percent: discountPct, minGuests: discountMinGuests },
+    totalCents: totalCents,
+    hostPayoutCents: hostPayoutCents,
+    adminSubsidyCents: adminSubsidyCents,
+    description: String(description || "")
+  };
+
+  const pricingHash = require("crypto").createHash("sha256").update(JSON.stringify(pricingSnapshot)).digest("hex");
+
   const booking = new Booking({
     experienceId: String(exp._id),
     guestId: req.user._id,
@@ -4596,6 +4751,26 @@ app.post("/api/experiences/:id/book", authMiddleware, bookingCreateLimiter, asyn
       description: String(description || "")
     },
 
+    pricingSnapshot: pricingSnapshot,
+    pricingLockedAt: new Date(),
+    pricingHash: pricingHash,
+
+    feeBreakdown: {
+      currency: "aud",
+      unitCents: unitCents,
+      guests: guests,
+      subtotalCents: unitCents * guests,
+      preDiscountCents: preDiscountCents,
+      discountCents: Math.max(0, Number(preDiscountCents) - Number(totalCents) - Number(promoOffCents)),
+      promoOffCents: Number(promoOffCents) || 0,
+      totalCents: totalCents,
+      hostPayoutCents: hostPayoutCents,
+      adminSubsidyCents: adminSubsidyCents
+    },
+
+    promoApplied: promoApplied,
+    cancellationAudit: [],
+
     expiresAt: new Date(Date.now() + (15 * 60 * 1000)),
 
 
@@ -4608,12 +4783,23 @@ app.post("/api/experiences/:id/book", authMiddleware, bookingCreateLimiter, asyn
     termsVersionAccepted: termsVersionAccepted,
     termsAcceptedAt: new Date(),
   });
+
   try {
     await booking.save();
   } catch (e) {
     try { await releaseCapacitySlot(String(exp._id), bookingDateStr, timeSlotStr, guests); } catch (_) {}
     throw e;
   }
+
+  try {
+    if (promoApplied && booking && booking._id) {
+      const __D = String.fromCharCode(36);
+      await PromoRedemption.updateMany(
+        { promoCode: String(promoApplied.code || ""), userId: String(((req.user && (req.user._id || req.user.id)) || "")), bookingId: "" },
+        { [__D + "set"]: { bookingId: String(booking._id) } }
+      );
+    }
+  } catch (_) {}
   // Comms: booking request submitted (guest)
   try {
     const __guestEmail = (req.user && req.user.email) ? String(req.user.email).trim() : "";
