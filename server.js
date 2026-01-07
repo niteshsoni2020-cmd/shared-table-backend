@@ -957,6 +957,101 @@ const corsOptions = {
 app.use(cors(corsOptions));
 app.options("*", cors(corsOptions));
 
+// L3_ADMIN_PARTIAL_REFUND_TRIGGER_ROUTE_V1
+// Admin-only trigger: create a partial refund in Stripe.
+// IMPORTANT: This route is placed before global express.json(), so it includes its own JSON parser.
+// Webhooks (already partial-safe) decide whether to transition to terminal "refunded".
+app.post(
+  "/api/admin/bookings/:id/refund-partial",
+  express.json({ limit: "200kb" }),
+  authMiddleware,
+  adminMiddleware,
+  async (req, res) => {
+    try {
+      const bookingId = String((req.params && req.params.id) ? req.params.id : "");
+      if (!bookingId) return res.status(400).json({ message: "bookingId required" });
+
+      const rawAmt = req.body && req.body.amountCents;
+      const amountCents = Number.isFinite(Number(rawAmt)) ? Math.max(0, Math.floor(Number(rawAmt))) : 0;
+      if (amountCents <= 0) return res.status(400).json({ message: "amountCents must be > 0" });
+
+      const BookingModel = mongoose.model("Booking");
+      const booking = await BookingModel.findById(bookingId);
+      if (!booking) return res.status(404).json({ message: "Booking not found" });
+
+      const pi = String(booking.stripePaymentIntentId || "");
+      if (!pi) return res.status(400).json({ message: "Booking has no stripePaymentIntentId" });
+
+      // Safety: best-effort cap so admins cannot refund above total.
+      const totalCents = Number(
+        (((booking.feeBreakdown && booking.feeBreakdown.totalCents) != null) ? booking.feeBreakdown.totalCents :
+        (((booking.pricingSnapshot && booking.pricingSnapshot.totalCents) != null) ? booking.pricingSnapshot.totalCents : 0))
+      ) || 0;
+
+      if (!Number.isFinite(Number(booking.totalRefundedCents))) booking.totalRefundedCents = 0;
+      const alreadyRefunded = Math.max(0, Math.floor(Number(booking.totalRefundedCents) || 0));
+
+      if (totalCents > 0 && (alreadyRefunded + amountCents) > totalCents) {
+        return res.status(400).json({ message: "Refund exceeds booking total" });
+      }
+
+      // Stripe reason whitelist
+      const reasonRaw = String((req.body && req.body.reason) ? req.body.reason : "");
+      const reason = (reasonRaw === "duplicate" || reasonRaw === "fraudulent" || reasonRaw === "requested_by_customer")
+        ? reasonRaw
+        : "requested_by_customer";
+
+      const note = String((req.body && req.body.note) ? req.body.note : "");
+
+      // Trigger refund (partial). Webhook will update totals/status and decide terminal transition.
+      const refund = await stripe.refunds.create({
+        payment_intent: pi,
+        amount: amountCents,
+        reason: reason,
+        metadata: {
+          bookingId: String(booking._id),
+          trigger: "admin_partial_refund",
+        },
+      });
+
+      if (!booking.refundDecision || typeof booking.refundDecision !== "object") booking.refundDecision = {};
+      booking.refundDecision.status = "partial_refund_requested";
+      booking.refundDecision.amountCents = amountCents;
+      if (!booking.refundDecision.currency) booking.refundDecision.currency = "aud";
+      booking.refundDecision.stripeRefundId = String((refund && refund.id) ? refund.id : "");
+      booking.refundDecision.stripeRefundStatus = String((refund && refund.status) ? refund.status : "created");
+
+      if (!Array.isArray(booking.refundEvents)) booking.refundEvents = [];
+      booking.refundEvents.push({
+        at: new Date(),
+        by: "admin",
+        event: "partial_refund_requested",
+        stripeRefundId: booking.refundDecision.stripeRefundId,
+        amountCents: amountCents,
+        status: booking.refundDecision.stripeRefundStatus,
+        note: note,
+      });
+
+      booking.partialRefund = true;
+      booking.partialRefundCents = Math.max(0, Math.floor(Number(booking.totalRefundedCents) || 0));
+
+      await booking.save();
+
+      return res.json({
+        ok: true,
+        bookingId: String(booking._id),
+        stripeRefundId: booking.refundDecision.stripeRefundId,
+        stripeRefundStatus: booking.refundDecision.stripeRefundStatus,
+      });
+    } catch (e) {
+      return res.status(500).json({
+        message: "Admin refund-partial failed",
+        error: String((e && e.message) ? e.message : e),
+      });
+    }
+  }
+);
+
 app.post(
   "/api/stripe/webhook",
   express.raw({ type: "application/json" }),
@@ -1275,8 +1370,47 @@ app.post(
         if (refundStatus) booking.refundDecision.stripeRefundStatus = refundStatus;
 
         if (refundStatus === "succeeded") {
-          booking.refundDecision.status = "refunded";
-          await transitionBooking(booking, "refunded");
+          // L3_PARTIAL_REFUND_SAFE_WEBHOOK_V1
+          // Do NOT force terminal "refunded" unless the booking is fully refunded.
+          try {
+            const amt = Number.isFinite(Number(__refundAmt)) ? Math.max(0, Math.floor(Number(__refundAmt))) : 0;
+            const rid = String(refundId || "");
+
+            if (!Number.isFinite(Number(booking.totalRefundedCents))) booking.totalRefundedCents = 0;
+            if (!Array.isArray(booking.refundEvents)) booking.refundEvents = [];
+
+            const already = (rid && booking.refundEvents.some((e) => e && typeof e === "object" && String(e.stripeRefundId || "") === rid));
+            if (already == false && (rid || amt > 0)) {
+              booking.refundEvents.push({
+                at: new Date(),
+                by: "stripe_webhook",
+                event: "refund_succeeded",
+                stripeRefundId: rid,
+                amountCents: amt,
+                status: "succeeded",
+              });
+              if (amt > 0) {
+                booking.totalRefundedCents = Math.max(0, Math.floor(Number(booking.totalRefundedCents) || 0) + amt);
+              }
+            }
+
+            const totalCents = Number(
+              (((booking.feeBreakdown && booking.feeBreakdown.totalCents) != null) ? booking.feeBreakdown.totalCents :
+              (((booking.pricingSnapshot && booking.pricingSnapshot.totalCents) != null) ? booking.pricingSnapshot.totalCents : 0))
+            ) || 0;
+
+            if (totalCents > 0 && Number(booking.totalRefundedCents) >= Number(totalCents)) {
+              booking.refundDecision.status = "refunded";
+              await transitionBooking(booking, "refunded");
+            } else {
+              booking.refundDecision.status = "partially_refunded";
+              booking.partialRefund = true;
+              booking.partialRefundCents = Math.max(0, Math.floor(Number(booking.totalRefundedCents) || 0));
+            }
+          } catch (_) {
+            // Fallback: record success without forcing terminal transition.
+            booking.refundDecision.status = "refund_succeeded";
+          }
         } else if (refundStatus === "failed" || refundStatus === "canceled" || refundStatus === "cancelled") {
           booking.refundDecision.status = "refund_failed";
         }
@@ -1294,8 +1428,27 @@ app.post(
 
         if (!booking.refundDecision || typeof booking.refundDecision !== "object") booking.refundDecision = {};
         booking.refundDecision.stripeRefundStatus = "succeeded";
-        booking.refundDecision.status = "refunded";
-        await transitionBooking(booking, "refunded");
+        // L3_PARTIAL_REFUND_SAFE_CHARGE_REFUNDED_V1
+        // charge.refunded can fire for partial refunds; only transition to refunded if fully refunded.
+        try {
+          if (!Number.isFinite(Number(booking.totalRefundedCents))) booking.totalRefundedCents = 0;
+
+          const totalCents = Number(
+            (((booking.feeBreakdown && booking.feeBreakdown.totalCents) != null) ? booking.feeBreakdown.totalCents :
+            (((booking.pricingSnapshot && booking.pricingSnapshot.totalCents) != null) ? booking.pricingSnapshot.totalCents : 0))
+          ) || 0;
+
+          if (totalCents > 0 && Number(booking.totalRefundedCents) >= Number(totalCents)) {
+            booking.refundDecision.status = "refunded";
+            await transitionBooking(booking, "refunded");
+          } else {
+            booking.refundDecision.status = "partially_refunded";
+            booking.partialRefund = true;
+            booking.partialRefundCents = Math.max(0, Math.floor(Number(booking.totalRefundedCents) || 0));
+          }
+        } catch (_) {
+          booking.refundDecision.status = "refund_succeeded";
+        }
         await booking.save();
       }
 
@@ -1946,6 +2099,16 @@ const bookingSchema = new mongoose.Schema(
       lastAttemptAt: { type: Date, default: null },
       lastError: { type: String, default: "" },
     },
+
+    // Partial + multi-stage refund support (deterministic + auditable)
+    partialRefund: { type: Boolean, default: false },
+    partialRefundCents: { type: Number, default: 0 },
+    partialRefundReason: { type: String, default: "" },
+
+    // Cumulative refunded cents + append-only event trail (paper trail)
+    totalRefundedCents: { type: Number, default: 0 },
+    refundEvents: { type: Array, default: [] },
+
     refundAmount: Number,
     cancellationReason: String,
     dispute: {
@@ -2037,6 +2200,18 @@ bookingSchema.virtual("user", {
   foreignField: "_id",
   justOne: true,
 });
+
+// Deterministic partial refund calculator.
+// Inputs are integer cents only. Output is integer cents only.
+// Does NOT call Stripe; it only computes the refund amount for later execution/audit.
+function __computePartialRefundCents(totalCents, percent) {
+  const t = Number.isFinite(Number(totalCents)) ? Math.floor(Number(totalCents)) : 0;
+  const p = Number.isFinite(Number(percent)) ? Number(percent) : 0;
+  if (!(t > 0)) return 0;
+  const pct = Math.max(0, Math.min(100, p));
+  const out = Math.floor((t * pct) / 100);
+  return Math.max(0, Math.min(t, out));
+}
 
 // --- Policy (AU cancellation/refund rules) ---
 // Draft -> Publish -> Active, with effectiveFrom. Bookings store immutable snapshots.
