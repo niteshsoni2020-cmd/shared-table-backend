@@ -1016,7 +1016,9 @@ app.post(
 
       if (!booking.refundDecision || typeof booking.refundDecision !== "object") booking.refundDecision = {};
       booking.refundDecision.status = "partial_refund_requested";
-      booking.refundDecision.amountCents = amountCents;
+      booking.refundDecision.requestedAmountCents = amountCents;
+      booking.refundDecision.requestedReason = reason;
+      if (note) booking.refundDecision.requestedNote = note;
       if (!booking.refundDecision.currency) booking.refundDecision.currency = "aud";
       booking.refundDecision.stripeRefundId = String((refund && refund.id) ? refund.id : "");
       booking.refundDecision.stripeRefundStatus = String((refund && refund.status) ? refund.status : "created");
@@ -1033,7 +1035,8 @@ app.post(
       });
 
       booking.partialRefund = true;
-      booking.partialRefundCents = Math.max(0, Math.floor(Number(booking.totalRefundedCents) || 0));
+      // Semantics: confirmed refunded so far (not the amount just requested). Webhook is authoritative for totals.
+      booking.partialRefundCents = alreadyRefunded;
 
       await booking.save();
 
@@ -5624,7 +5627,7 @@ app.post("/api/bookings/:id/cancel", authMiddleware, async (req, res) => {
       }
 
       decisionStatus = "computed";
-      booking.refundAmount = Number((refundCents / 100).toFixed(2)); // keep legacy UI field
+      booking.refundAmount = Number((refundCents / 100).toFixed(2)); // LEGACY UI MIRROR ONLY (do not use for logic)
     } else {
       booking.refundAmount = 0;
     }
