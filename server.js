@@ -97,6 +97,7 @@ const { start: startJobs, registerInterval } = require("./src/jobs");
 })();
 
 const stripe = require("stripe")(String(process.env.STRIPE_SECRET_KEY || "").trim());
+const pricing = require("./pricing");
 const STRIPE_WEBHOOK_SECRET = String(process.env.STRIPE_WEBHOOK_SECRET || "");
 const nodemailer = require("nodemailer");
 const { sendEventEmail } = require("./src/email");
@@ -4454,6 +4455,8 @@ app.post("/api/experiences/:id/book", authMiddleware, bookingCreateLimiter, asyn
     }
   };
 
+    // FINAL LOCKED MARKETPLACE PRICING (pricing.js)
+  // Discounts apply ONLY to host base. Platform fee is computed on host base and never discounted.
   const dd = (exp && exp.dynamicDiscounts && typeof exp.dynamicDiscounts === "object") ? exp.dynamicDiscounts : {};
   const ddGroup = (dd && dd.group && typeof dd.group === "object") ? dd.group : {};
 
@@ -4466,55 +4469,54 @@ app.post("/api/experiences/:id/book", authMiddleware, bookingCreateLimiter, asyn
   const hostTier = hostEnabled ? __pickTier(hostCfg.tiers, guests) : null;
   const adminTier = adminEnabled ? __pickTier(adminCfg.tiers, guests) : null;
 
-  // Choose the best customer discount. If both exist, pick higher percent; tie -> prefer host (avoids admin subsidy).
-  let chosen = null;
-  if (hostTier && adminTier) {
-    if (Number(adminTier.percent) > Number(hostTier.percent)) chosen = { source: "admin", tier: adminTier };
-    else chosen = { source: "host", tier: hostTier };
-  }
-  else if (adminTier) chosen = { source: "admin", tier: adminTier };
-  else if (hostTier) chosen = { source: "host", tier: hostTier };
+  const hostPctRequested = hostTier ? (Number(hostTier.percent) || 0) : 0;
+  const adminPctRequested = adminTier ? (Number(adminTier.percent) || 0) : 0;
 
-  let preDiscountCents = totalCents;
+  let hostBasePriceCents = totalCents;
+  let preDiscountCents = hostBasePriceCents;
   let discountSource = "";
   let discountPct = 0;
   let discountMinGuests = 0;
 
-  if (chosen && !__isPrivate) {
-    discountSource = String(chosen.source || "");
-    discountPct = Number(chosen.tier && chosen.tier.percent) || 0;
-    discountMinGuests = Number(chosen.tier && chosen.tier.minGuests) || 0;
-    const factor = (100 - discountPct) / 100;
-    totalCents = Math.round(totalCents * factor);
-    if (discountPct > 0) {
-      description += " (" + String(discountPct) + "% Group Discount Applied)";
-    }
-  }
-
-  // Marketplace accounting:
-  // - host discount => host payout == customer pays
-  // - admin discount => host payout == pre-discount; admin absorbs difference
-  let hostPayoutCents = totalCents;
-  let adminSubsidyCents = 0;
-  if (discountSource === "admin") {
-    hostPayoutCents = preDiscountCents;
-    adminSubsidyCents = Math.max(0, preDiscountCents - totalCents);
-  }
-
-
+  // Private booking: fixed host base, no discounts/promos/subsidy mechanics
   if (__isPrivate && exp.privatePrice) {
-    totalCents = toCents(exp.privatePrice);
+    hostBasePriceCents = toCents(exp.privatePrice);
+    preDiscountCents = hostBasePriceCents;
     description = "Private Booking";
-    // Private booking: fixed total, no group discount mechanics, no admin subsidy
-    discountSource = "";
-    discountPct = 0;
-    discountMinGuests = 0;
-    // Align accounting fields to the fixed private total
-    try {
-      preDiscountCents = totalCents;
-    } catch (_) { }
-    hostPayoutCents = totalCents;
-    adminSubsidyCents = 0;
+  }
+
+  const disc = pricing.computeDiscountsAndPromo({
+    hostBasePriceCents: hostBasePriceCents,
+    hostPct: hostPctRequested,
+    adminPct: adminPctRequested,
+    promoPctRequested: 0
+  });
+
+  // Platform fee policy wiring will come from admin policy later; default none for now.
+  const pf = pricing.computePlatformFeeCentsGross({
+    hostBasePriceCents: hostBasePriceCents,
+    platformFeePolicy: null
+  });
+
+  const guestDisplayedPriceCents = pricing.computeGuestDisplayedPriceCents({
+    finalHostChargeCents: disc.finalHostChargeCents,
+    platformFeeCentsGross: pf.platformFeeCentsGross
+  });
+
+  const acct = pricing.computeHostPayoutAndSubsidy({
+    hostBasePriceCents: hostBasePriceCents,
+    hostPctApplied: disc.hostPctApplied,
+    finalHostChargeCents: disc.finalHostChargeCents
+  });
+
+  // Map to legacy locals used downstream
+  totalCents = guestDisplayedPriceCents;
+  hostPayoutCents = acct.hostPayoutCents;
+  adminSubsidyCents = acct.adminSubsidyCents;
+
+  discountPct = Number(disc.priceDiscountPctApplied) || 0;
+  if (discountPct > 0) {
+    description += " (" + String(discountPct) + "% Discount Applied)";
   }
   // Capacity hold must happen AFTER policy/terms acceptance, and BEFORE booking save (race-safe)
   let hold = null;
