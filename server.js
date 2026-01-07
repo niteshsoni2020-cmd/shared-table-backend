@@ -6123,6 +6123,16 @@ async function transitionBooking(booking, nextStatus, meta = {}) {
 
   if (booking.status === nextStatus) return booking;
 
+  // L2_EXPIRED_SAFE_NOOP_V1
+  // Expiry is a cleanup sink. Never throw, never corrupt terminal/paid-path bookings if called accidentally.
+  if (nextStatus === "expired") {
+    const cur = String(booking.status || "");
+    const protectedStates = new Set(["confirmed", "refunded", "cancelled", "cancelled_by_host", "completed"]);
+    if (protectedStates.has(cur)) {
+      return booking;
+    }
+  }
+
   const updates = {
     status: nextStatus,
     updatedAt: now
@@ -6142,7 +6152,13 @@ async function transitionBooking(booking, nextStatus, meta = {}) {
   if (nextStatus === "expired") {
     updates.expiredAt = booking.expiredAt || now;
   }
-  if (nextStatus === "refunded") {
+  // L2_STATE_MACHINE_V1
+  // Refunded is terminal in practice. Make the transition idempotent and explicitly detectable.
+  const L2_IS_REFUND_TRANSITION = (nextStatus === "refunded");
+  const L2_SHOULD_SEND_REFUND_COMMS = (L2_IS_REFUND_TRANSITION && !booking.refundedAt);
+
+  if (L2_IS_REFUND_TRANSITION) {
+    // Unique-by-refundedAt: once set, keep the original timestamp forever.
     updates.refundedAt = booking.refundedAt || now;
   }
 
@@ -6169,7 +6185,7 @@ async function transitionBooking(booking, nextStatus, meta = {}) {
       if (nextStatus === "cancelled_by_host") {
         await maybeSendBookingCancelledByHostComms(booking);
       }
-      if (nextStatus === "refunded") {
+      if (L2_SHOULD_SEND_REFUND_COMMS) {
         await maybeSendRefundProcessedComms(booking);
       }
     } catch (e) {
