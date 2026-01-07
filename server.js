@@ -4908,7 +4908,7 @@ app.post("/api/bookings/:id/cancel", authMiddleware, async (req, res) => {
       // L2_CANCEL_RELEASE_CAPACITY: release reserved capacity once (idempotent)
 
       // L2_CANCEL_RELEASE_CAPACITY: release reserved capacity once (idempotent + atomic claim)
-      await __releaseCapacityOnceAtomic(booking);
+      await __releaseCapacityOnceAtomic(booking, "guest_cancel");
       try { booking.capacityReleasedAt = booking.capacityReleasedAt || new Date(); } catch (_) {}
       try { await booking.save(); } catch (_) {}
       return res.json({
@@ -4917,7 +4917,16 @@ app.post("/api/bookings/:id/cancel", authMiddleware, async (req, res) => {
       });
     }
 
-    const wasConfirmed = (String(booking.status || "") == "confirmed");
+    // L2_GUEST_CANCEL_STATE_GUARD_V1
+    // Protect terminal/settled states from being overwritten by a guest cancel call.
+    // (Host cancel/idempotent cases are handled above.)
+    const curStatus = String(booking.status || "");
+    const terminal = new Set(["refunded", "completed"]);
+    if (terminal.has(curStatus)) {
+      return res.status(409).json({ message: "Booking cannot be cancelled in its current state", status: curStatus });
+    }
+
+    const wasConfirmed = (curStatus == "confirmed");
 
     await transitionBooking(booking, "cancelled");
     booking.cancellationReason = "User requested cancellation";
@@ -4927,7 +4936,7 @@ app.post("/api/bookings/:id/cancel", authMiddleware, async (req, res) => {
       // L2_CANCEL_RELEASE_CAPACITY: release reserved capacity once (idempotent)
 
     // L2_CANCEL_RELEASE_CAPACITY: release reserved capacity once (idempotent + atomic claim)
-    await __releaseCapacityOnceAtomic(booking);
+    await __releaseCapacityOnceAtomic(booking, "guest_cancel");
     try { booking.capacityReleasedAt = booking.capacityReleasedAt || new Date(); } catch (_) {}
 
 
