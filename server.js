@@ -2903,10 +2903,75 @@ async function computeConnectionStatuses(meId, otherIds) {
 
 
 
+// --- TIME SLOT NORMALIZATION (prevents 10:00 vs 10:00 AM mismatches) ---
+// Canonical key: "HH:MM" in 24h (e.g., "10:00", "18:30").
+// Accepts inputs like "10:00", "10:00 AM", "10:00AM", "6:30 pm", "18:30".
+function __normalizeTimeSlotKey(raw) {
+  try {
+    const s0 = String(raw || "").trim();
+    if (!s0) return "";
+    let t = s0.toLowerCase().replace(/\./g, "").replace(/\s+/g, " ").trim();
+    const m = t.match(/^(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$/i);
+    if (!m) return s0.trim();
+    let hh = Number(m[1]);
+    let mm = (m[2] != null) ? Number(m[2]) : 0;
+    const ap = (m[3] || "").toLowerCase();
+    if (!(hh >= 0 && hh <= 23 && mm >= 0 && mm <= 59)) return s0.trim();
+    if (ap === "am" || ap === "pm") {
+      if (hh === 12) hh = (ap === "am") ? 0 : 12;
+      else if (ap === "pm") hh = hh + 12;
+    }
+    if (!(hh >= 0 && hh <= 23)) return s0.trim();
+    const pad2 = (n) => (n < 10 ? "0" : "") + String(n);
+    return pad2(hh) + ":" + pad2(mm);
+  } catch (_) {
+    return String(raw || "").trim();
+  }
+}
+
+function __normalizeSlotsArray(arr) {
+  try {
+    if (Array.isArray(arr) == false) return [];
+    const out = [];
+    const seen = new Set();
+    for (const it of arr) {
+      const k = __normalizeTimeSlotKey(it);
+      if (!k) continue;
+      if (seen.has(k)) continue;
+      seen.add(k);
+      out.push(k);
+    }
+    return out;
+  } catch (_) {
+    return [];
+  }
+}
+
+
+
+function __getBookingGuestCount(booking) {
+  try {
+    if (!booking) return 0;
+
+    const a = Number.parseInt(String((booking && booking.numGuests) || "0"), 10) || 0;
+    if (a > 0) return a;
+
+    const b = Number.parseInt(String((booking && booking.guests) || "0"), 10) || 0;
+    if (b > 0) return b;
+
+    return 0;
+  } catch (_) {
+    return 0;
+  }
+}
+
 async function reserveCapacitySlot(experienceId, dateStr, timeSlot, guests) {
   const expId = String(experienceId || "").trim();
   const d = String(dateStr || "").trim();
-  const slot = String(timeSlot || "").trim();
+  const slotRaw = String(timeSlot || "").trim();
+  const slotKey = __normalizeTimeSlotKey(slotRaw);
+  const slotAlt = slotRaw;
+  const slot = slotKey || slotAlt;
   const g = Number.parseInt(String(guests || "0"), 10) || 0;
 
   const ok = Boolean(expId.length > 0 && d.length > 0 && slot.length > 0 && g > 0);
@@ -2960,8 +3025,20 @@ async function reserveCapacitySlot(experienceId, dateStr, timeSlot, guests) {
 
   const matched = Number(r && r.matchedCount) || 0;
   const upserted = Number(r && r.upsertedCount) || 0;
-  const did = Boolean(matched > 0 || upserted > 0);
+  let did = Boolean(matched > 0 || upserted > 0);
 
+
+// L2_LEGACY_SLOT_FALLBACK_RESERVE_V1: if normalized key did not match any row, try raw slot
+// This reduces duplicate CapacitySlot rows when old data uses a different representation.
+if (!did && slotAlt && slot && slotAlt !== slot) {
+  try {
+    const qLegacy = { experienceId: String(expId), bookingDate: d, timeSlot: slotAlt };
+    qLegacy[OR] = q[OR];
+    const rL = await CapacitySlot.updateOne(qLegacy, upd, { upsert: false });
+    const matchedL = Number(rL && rL.matchedCount) || 0;
+    did = Boolean(matchedL > 0);
+  } catch (_) {}
+}
   if (did) return { ok: true, maxGuests: maxGuests };
 
   const cur = await CapacitySlot.findOne({ experienceId: String(expId), bookingDate: d, timeSlot: slot }).lean();
@@ -2973,7 +3050,10 @@ async function reserveCapacitySlot(experienceId, dateStr, timeSlot, guests) {
 async function releaseCapacitySlot(experienceId, dateStr, timeSlot, guests) {
   const expId = String(experienceId || "").trim();
   const d = String(dateStr || "").trim();
-  const slot = String(timeSlot || "").trim();
+  const slotRaw = String(timeSlot || "").trim();
+  const slotKey = __normalizeTimeSlotKey(slotRaw);
+  const slotAlt = slotRaw;
+  const slot = slotKey || slotAlt;
   const g = Number.parseInt(String(guests || "0"), 10) || 0;
 
   const ok = Boolean(expId.length > 0 && d.length > 0 && slot.length > 0 && g > 0);
@@ -2998,15 +3078,106 @@ async function releaseCapacitySlot(experienceId, dateStr, timeSlot, guests) {
 
   await CapacitySlot.updateOne(q, upd);
 
+// L2_LEGACY_SLOT_FALLBACK_RELEASE_V1: if normalized key did not match any row, try raw slot
+if (slotAlt && slot && slotAlt !== slot) {
+  try {
+    const qLegacy = { experienceId: String(expId), bookingDate: d, timeSlot: slotAlt };
+    await CapacitySlot.updateOne(qLegacy, upd);
+  } catch (_) {}
+}
+
+
   const q2 = { experienceId: String(expId), bookingDate: d, timeSlot: slot, reservedGuests: (function(){ const x={}; x[LT]=0; return x; })() };
   const upd2 = {};
   upd2[SET] = { reservedGuests: 0, updatedAt: new Date() };
   await CapacitySlot.updateOne(q2, upd2);
 }
 
+
+// L2_HOST_CANCEL_CAPACITY_HELPER: single canonical atomic release guard
+// - Claims capacityReleasedAt atomically (prevents double release across retries/instances)
+// - Releases capacity only when claim succeeded
+// - Reverts claim if release fails
+async function __releaseCapacityOnceAtomic(booking, reasonTag) {
+  try {
+    if (!booking) return;
+    if (booking.capacityReleasedAt) return;
+
+    const SET = String.fromCharCode(36) + "set";
+    const UNSET = String.fromCharCode(36) + "unset";
+    const now = new Date();
+
+    const claimUpd = {};
+    claimUpd[SET] = { capacityReleasedAt: now };
+
+    const rClaim = await Booking.updateOne({ _id: booking._id, capacityReleasedAt: null }, claimUpd);
+    const claimed = Boolean((Number(rClaim && rClaim.matchedCount) || 0) > 0);
+    if (!claimed) return;
+
+    try {
+      const expId = String((booking && (booking.experienceId || booking.experience)) || "");
+      const dateStr = String((booking && (booking.bookingDate || "")) || "");
+      const slotRaw = String((booking && (booking.timeSlot || "")) || "");
+      const slotKey = __normalizeTimeSlotKey(slotRaw);
+      const slot = slotKey || slotRaw;
+
+      const g = __getBookingGuestCount(booking);
+      if (!expId || !dateStr || !slot || g <= 0) {
+        try { booking.capacityReleasedAt = booking.capacityReleasedAt || now; } catch (_) {}
+        return;
+      }
+
+      let cur = null;
+      try { cur = await CapacitySlot.findOne({ experienceId: expId, bookingDate: dateStr, timeSlot: slot }).lean(); } catch (_) { cur = null; }
+      if (cur == null && slotKey && slotKey != slotRaw) {
+        try { cur = await CapacitySlot.findOne({ experienceId: expId, bookingDate: dateStr, timeSlot: slotRaw }).lean(); } catch (_) { cur = null; }
+      }
+
+      const curR = (cur && typeof cur.reservedGuests === "number") ? Number(cur.reservedGuests) : 0;
+      if (curR >= g) {
+        try {
+          await releaseCapacitySlot(expId, dateStr, slot, g);
+        } catch (_) {
+          const rev = {};
+          rev[UNSET] = { capacityReleasedAt: 1 };
+          try { await Booking.updateOne({ _id: booking._id, capacityReleasedAt: now }, rev); } catch (_) {}
+        }
+      }
+    } catch (_) {
+      // keep claim; do not risk double-release later
+      return;
+    }
+
+    try { booking.capacityReleasedAt = booking.capacityReleasedAt || now; } catch (_) {}
+  } catch (_) {}
+}
+
+// L2_HOST_CANCEL_CANONICAL_V1:
+// Always release capacity atomically before setting cancelled_by_host.
+// Use this for ALL host cancellation paths (single reject, bulk delete, admin ops, etc).
+async function __hostCancelBookingAtomic(booking, reasonTag, meta) {
+  try {
+    await __releaseCapacityOnceAtomic(booking, reasonTag || "host_cancel");
+  } catch (_) {}
+
+  try {
+    if (meta && typeof meta === "object") {
+      return await transitionBooking(booking, "cancelled_by_host", meta);
+    }
+  } catch (_) {}
+
+  return await transitionBooking(booking, "cancelled_by_host");
+}
+
+
+
+
+
 async function checkCapacity(experienceId, date, timeSlot, newGuests) {
   const dateStr = String(date || "").trim();
-  const slot = String(timeSlot || "").trim();
+  const slotRaw = String(timeSlot || "").trim();
+  const slotKey = __normalizeTimeSlotKey(slotRaw);
+  const slot = slotKey || slotRaw;
 
   const isoOk = /^\d{4}-\d{2}-\d{2}$/.test(dateStr);
   if (!isoOk) return { available: false, message: "Invalid bookingDate (YYYY-MM-DD required)." };
@@ -3018,7 +3189,8 @@ async function checkCapacity(experienceId, date, timeSlot, newGuests) {
   if (exp.isPaused) return { available: false, message: "Host is paused." };
   if (exp.blockedDates && exp.blockedDates.includes(dateStr)) return { available: false, message: "Date blocked." };
 
-  if (Array.isArray(exp.timeSlots) && exp.timeSlots.length > 0 && !exp.timeSlots.includes(slot)) {
+  const allowedSlots = __normalizeSlotsArray(exp.timeSlots);
+  if (allowedSlots.length > 0 && !allowedSlots.includes(slot)) {
     return { available: false, message: "Invalid time slot." };
   }
 
@@ -3985,7 +4157,8 @@ app.delete("/api/experiences/:id", authMiddleware, async (req, res) => {
   try {
     const bs = await Booking.find({ experienceId: String(exp._id) });
     for (const b of bs) {
-      try { await transitionBooking(b, "cancelled_by_host"); } catch (_) {}
+      try { await __releaseCapacityOnceAtomic(b, "experience_delete"); } catch (_) {}
+      try { await __hostCancelBookingAtomic(b, "host_cancel"); } catch (_) {}
     }
   } catch (_) {}
 
@@ -4723,27 +4896,45 @@ app.post("/api/bookings/:id/cancel", authMiddleware, async (req, res) => {
     if (booking.status === "cancelled" || booking.status === "cancelled_by_host") {
       // L2_CANCEL_RELEASE_CAPACITY_ALREADY_CANCELLED
       // L2_CANCEL_RELEASE_CAPACITY: release reserved capacity once (idempotent)
-      if (!booking.capacityReleasedAt) {
-        try {
-          const expId = String((booking && (booking.experienceId || booking.experience)) || "");
-          const dateStr = String((booking && (booking.bookingDate || "")) || "");
-          const slot = String((booking && (booking.timeSlot || "")) || "");
-          const g = Number.parseInt(String((booking && (booking.guests || 0)) || "0"), 10) || 0;
-          if (expId && dateStr && slot && g > 0) {
-            let cur = null;
-            try { cur = await CapacitySlot.findOne({ experienceId: expId, bookingDate: dateStr, timeSlot: slot }).lean(); } catch (_) { cur = null; }
-            const curR = (cur && typeof cur.reservedGuests === "number") ? Number(cur.reservedGuests) : 0;
-            if (curR >= g) {
-              try { await releaseCapacitySlot(expId, dateStr, slot, g); } catch (_) {}
-            }
-            booking.capacityReleasedAt = new Date();
-          } else {
-            booking.capacityReleasedAt = new Date();
+
+// L2_CAPACITY_RELEASE_CLAIM_V3: atomic claim in DB to prevent double release across retries or instances
+try {
+  const SET = String.fromCharCode(36) + "set";
+  const UNSET = String.fromCharCode(36) + "unset";
+  const now = new Date();
+  const claimUpd = {};
+  claimUpd[SET] = { capacityReleasedAt: now };
+  const rClaim = await Booking.updateOne({ _id: booking._id, capacityReleasedAt: null }, claimUpd);
+  const claimed = Boolean((Number(rClaim && rClaim.matchedCount) || 0) > 0);
+  if (claimed) {
+    try {
+      const expId = String((booking && (booking.experienceId || booking.experience)) || "");
+      const dateStr = String((booking && (booking.bookingDate || "")) || "");
+      const slotRaw = String((booking && (booking.timeSlot || "")) || "");
+      const slotKey = __normalizeTimeSlotKey(slotRaw);
+      const slot = slotKey || slotRaw;
+      const g = __getBookingGuestCount(booking);
+      if (expId && dateStr && slot && g > 0) {
+        let cur = null;
+        try { cur = await CapacitySlot.findOne({ experienceId: expId, bookingDate: dateStr, timeSlot: slot }).lean(); } catch (_) { cur = null; }
+        if (cur == null && slotKey && slotKey != slotRaw) {
+          try { cur = await CapacitySlot.findOne({ experienceId: expId, bookingDate: dateStr, timeSlot: slotRaw }).lean(); } catch (_) { cur = null; }
+        }
+        const curR = (cur && typeof cur.reservedGuests === "number") ? Number(cur.reservedGuests) : 0;
+        if (curR >= g) {
+          try {
+            await releaseCapacitySlot(expId, dateStr, slot, g);
+          } catch (_) {
+            const rev = {};
+            rev[UNSET] = { capacityReleasedAt: 1 };
+            try { await Booking.updateOne({ _id: booking._id, capacityReleasedAt: now }, rev); } catch (_) {}
           }
-        } catch (_) {
-          try { booking.capacityReleasedAt = new Date(); } catch (_) {}
         }
       }
+    } catch (_) {}
+    try { booking.capacityReleasedAt = booking.capacityReleasedAt || now; } catch (_) {}
+  }
+} catch (_) {}
       try { await booking.save(); } catch (_) {}
       return res.json({
         message: "Already cancelled",
@@ -4759,27 +4950,45 @@ app.post("/api/bookings/:id/cancel", authMiddleware, async (req, res) => {
 
     // L2_CANCEL_RELEASE_CAPACITY_NORMAL
       // L2_CANCEL_RELEASE_CAPACITY: release reserved capacity once (idempotent)
-      if (!booking.capacityReleasedAt) {
-        try {
-          const expId = String((booking && (booking.experienceId || booking.experience)) || "");
-          const dateStr = String((booking && (booking.bookingDate || "")) || "");
-          const slot = String((booking && (booking.timeSlot || "")) || "");
-          const g = Number.parseInt(String((booking && (booking.guests || 0)) || "0"), 10) || 0;
-          if (expId && dateStr && slot && g > 0) {
-            let cur = null;
-            try { cur = await CapacitySlot.findOne({ experienceId: expId, bookingDate: dateStr, timeSlot: slot }).lean(); } catch (_) { cur = null; }
-            const curR = (cur && typeof cur.reservedGuests === "number") ? Number(cur.reservedGuests) : 0;
-            if (curR >= g) {
-              try { await releaseCapacitySlot(expId, dateStr, slot, g); } catch (_) {}
-            }
-            booking.capacityReleasedAt = new Date();
-          } else {
-            booking.capacityReleasedAt = new Date();
+
+// L2_CAPACITY_RELEASE_CLAIM_V3: atomic claim in DB to prevent double release across retries or instances
+try {
+  const SET = String.fromCharCode(36) + "set";
+  const UNSET = String.fromCharCode(36) + "unset";
+  const now = new Date();
+  const claimUpd = {};
+  claimUpd[SET] = { capacityReleasedAt: now };
+  const rClaim = await Booking.updateOne({ _id: booking._id, capacityReleasedAt: null }, claimUpd);
+  const claimed = Boolean((Number(rClaim && rClaim.matchedCount) || 0) > 0);
+  if (claimed) {
+    try {
+      const expId = String((booking && (booking.experienceId || booking.experience)) || "");
+      const dateStr = String((booking && (booking.bookingDate || "")) || "");
+      const slotRaw = String((booking && (booking.timeSlot || "")) || "");
+      const slotKey = __normalizeTimeSlotKey(slotRaw);
+      const slot = slotKey || slotRaw;
+      const g = __getBookingGuestCount(booking);
+      if (expId && dateStr && slot && g > 0) {
+        let cur = null;
+        try { cur = await CapacitySlot.findOne({ experienceId: expId, bookingDate: dateStr, timeSlot: slot }).lean(); } catch (_) { cur = null; }
+        if (cur == null && slotKey && slotKey != slotRaw) {
+          try { cur = await CapacitySlot.findOne({ experienceId: expId, bookingDate: dateStr, timeSlot: slotRaw }).lean(); } catch (_) { cur = null; }
+        }
+        const curR = (cur && typeof cur.reservedGuests === "number") ? Number(cur.reservedGuests) : 0;
+        if (curR >= g) {
+          try {
+            await releaseCapacitySlot(expId, dateStr, slot, g);
+          } catch (_) {
+            const rev = {};
+            rev[UNSET] = { capacityReleasedAt: 1 };
+            try { await Booking.updateOne({ _id: booking._id, capacityReleasedAt: now }, rev); } catch (_) {}
           }
-        } catch (_) {
-          try { booking.capacityReleasedAt = new Date(); } catch (_) {}
         }
       }
+    } catch (_) {}
+    try { booking.capacityReleasedAt = booking.capacityReleasedAt || now; } catch (_) {}
+  }
+} catch (_) {}
 
 
     const totalCents =
