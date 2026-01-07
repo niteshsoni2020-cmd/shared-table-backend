@@ -198,10 +198,14 @@ function computeHostPayoutAndSubsidy(args) {
 }
 
 function computeRefundCents(args) {
-  const paid = _requireInt("guestDisplayedPriceCents", args.guestDisplayedPriceCents);
+  // Refunds must be computed from a platform-fee-safe base (typically finalHostChargeCents),
+  // not from guestDisplayedPriceCents (which includes platform fee).
+  const base = _requireInt("refundBaseCents", args.refundBaseCents);
+  const pctRaw = Number.isFinite(Number(args.refundPct)) ? Number(args.refundPct) : 95;
+  const pct = _requireInt("refundPct", _clamp(_round(pctRaw), 0, 95));
   return {
-    refundPct: 95,
-    refundCents: _requireInt("refundCents", _round(paid * 95 / 100))
+    refundPct: pct,
+    refundCents: _requireInt("refundCents", _round(base * pct / 100))
   };
 }
 

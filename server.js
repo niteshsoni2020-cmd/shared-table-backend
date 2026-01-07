@@ -5399,15 +5399,36 @@ app.post("/api/bookings/:id/cancel", authMiddleware, async (req, res) => {
     const snap = booking.policySnapshot || null;
     const rules = (snap && snap.rules && typeof snap.rules === "object") ? snap.rules : null;
 
+    // Prefer a platform-fee-safe refund base (finalHostChargeCents) when available.
+    // Fall back to subtracting platformFeeCentsGross if present; otherwise fall back to totalCents.
+    const pfCents =
+      (booking.pricingSnapshot && Number.isFinite(booking.pricingSnapshot.platformFeeCentsGross)) ? Number(booking.pricingSnapshot.platformFeeCentsGross)
+      : (booking.feeBreakdown && Number.isFinite(booking.feeBreakdown.platformFeeCentsGross)) ? Number(booking.feeBreakdown.platformFeeCentsGross)
+      : null;
+
+    const refundBaseCents =
+      (booking.pricingSnapshot && Number.isFinite(booking.pricingSnapshot.finalHostChargeCents)) ? Number(booking.pricingSnapshot.finalHostChargeCents)
+      : (totalCents !== null && pfCents !== null) ? Math.max(0, Number(totalCents) - Number(pfCents))
+      : (totalCents !== null) ? Number(totalCents)
+      : null;
+
     let refundCents = 0;
     let refundPercent = 0;
     let decisionStatus = "manual";
 
-    if (totalCents !== null && rules) {
+    if (refundBaseCents !== null && rules) {
       const cap = Number.isFinite(rules.absoluteMaxGuestRefundPercent) ? Number(rules.absoluteMaxGuestRefundPercent) : 0.95;
       const pRaw = Number.isFinite(rules.guestMaxRefundPercent) ? Number(rules.guestMaxRefundPercent) : 0.95;
       refundPercent = Math.max(0, Math.min(cap, pRaw));
-      refundCents = Math.round(totalCents * refundPercent);
+      const refundPctInt = Math.round(refundPercent * 100);
+
+      try {
+        const out = pricing.computeRefundCents({ refundBaseCents: refundBaseCents, refundPct: refundPctInt });
+        refundCents = Number.isFinite(Number(out && out.refundCents)) ? Number(out.refundCents) : 0;
+      } catch (_) {
+        refundCents = 0;
+      }
+
       decisionStatus = "computed";
       booking.refundAmount = Number((refundCents / 100).toFixed(2)); // keep legacy UI field
     } else {
@@ -5423,6 +5444,20 @@ app.post("/api/bookings/:id/cancel", authMiddleware, async (req, res) => {
       stripeRefundId: "",
       stripeRefundStatus: "",
     };
+
+    // L3: append-only cancellation audit (no dead fields)
+    try {
+      if (!Array.isArray(booking.cancellationAudit)) booking.cancellationAudit = [];
+      booking.cancellationAudit.push({
+        at: new Date(),
+        by: "guest",
+        event: "cancel_requested",
+        reasonCode: (booking.cancellation && booking.cancellation.reasonCode) ? String(booking.cancellation.reasonCode) : "",
+        refundBaseCents: refundBaseCents,
+        refundCents: refundCents,
+        refundPercent: refundPercent,
+      });
+    } catch (_) {}
 
     // If already paid and refund is due, initiate Stripe refund server-side (idempotent)
     try {
