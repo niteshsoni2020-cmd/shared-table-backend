@@ -1850,6 +1850,8 @@ const bookingSchema = new mongoose.Schema(
     paymentStatus: { type: String, enum: ["unpaid","paid","failed","abandoned"], default: "unpaid" },
 
     expiresAt: { type: Date, default: null },
+    // Capacity release idempotency marker
+    capacityReleasedAt: { type: Date, default: null },
     pricing: Object,
     comms: { type: Object, default: {} },
 
@@ -4660,6 +4662,7 @@ app.get("/api/bookings/host-bookings", authMiddleware, async (req, res) => {
   try {
     const hostId = String(req.user._id);
     const bookings = await Booking.find({ hostId })
+      .select("-capacityReleasedAt")
       .populate("experience", "title images price imageUrl city")
       .populate("guestId", "name profilePic handle publicProfile") // mobile NOT included
       .sort({ bookingDate: 1 });
@@ -4693,7 +4696,7 @@ app.get("/api/host/bookings/:experienceId", authMiddleware, async (req, res) => 
 
 // Guest bookings
 async function getMyBookings(req, res) {
-  const bookings = await Booking.find({ guestId: req.user._id }).populate("experience").sort({ bookingDate: -1 });
+  const bookings = await Booking.find({ guestId: req.user._id }).select("-capacityReleasedAt").populate("experience").sort({ bookingDate: -1 });
   res.json(bookings);
 }
 
@@ -5735,10 +5738,41 @@ async function runUnpaidBookingExpiryCleanupOnce_V1() {
 
           const ok = Boolean(expId.length > 0 && dateStr.length > 0 && slot.length > 0 && g > 0);
           if (ok) {
-            await releaseCapacitySlot(expId, dateStr, slot, g);
             try {
-              const bookingDoc = await Booking.findById(String(b._id || ""));
-              if (bookingDoc) await maybeSendBookingExpiredComms(bookingDoc);
+              const claimUpd = {};
+              claimUpd[SET] = { capacityReleasedAt: now };
+              let claimed = false;
+              try {
+                const r2 = await Booking.updateOne({ _id: b._id, capacityReleasedAt: null }, claimUpd);
+                claimed = Boolean(r2 && (Number(r2.modifiedCount) > 0 || Number(r2.nModified) > 0));
+              } catch (e) {
+                try { __log("warn", "unpaid_expiry_step_failed", { step: "claim_capacityReleasedAt", bookingId: String(b._id || ""), err: String((e && e.message) ? e.message : e) }); } catch (_) {}
+              }
+              if (claimed) {
+                let releasedOk = false;
+                try { await releaseCapacitySlot(expId, dateStr, slot, g); releasedOk = true; } catch (e) {
+                  releasedOk = false;
+                  try { __log("warn", "unpaid_expiry_step_failed", { step: "release_capacity", bookingId: String(b._id || ""), experienceId: String(expId || ""), bookingDate: String(dateStr || ""), timeSlot: String(slot || ""), guests: Number(g || 0), err: String((e && e.message) ? e.message : e) }); } catch (_) {}
+                }
+                if (!releasedOk) {
+                  const UNSET = String.fromCharCode(36) + "unset";
+                  const revertUpd = {};
+                  revertUpd[UNSET] = { capacityReleasedAt: 1 };
+                  try { await Booking.updateOne({ _id: b._id, capacityReleasedAt: now }, revertUpd); } catch (e) {
+                    try { __log("warn", "unpaid_expiry_step_failed", { step: "revert_capacityReleasedAt", bookingId: String(b._id || ""), err: String((e && e.message) ? e.message : e) }); } catch (_) {}
+                  }
+                }
+              }
+              try {
+                const bookingDoc = await Booking.findById(String(b._id || ""));
+                if (bookingDoc) {
+                  try { await maybeSendBookingExpiredComms(bookingDoc); } catch (e) {
+                    try { __log("warn", "unpaid_expiry_step_failed", { step: "send_expired_comms", bookingId: String(b._id || ""), err: String((e && e.message) ? e.message : e) }); } catch (_) {}
+                  }
+                }
+              } catch (e) {
+                try { __log("warn", "unpaid_expiry_step_failed", { step: "load_booking_for_comms", bookingId: String(b._id || ""), err: String((e && e.message) ? e.message : e) }); } catch (_) {}
+              }
             } catch (_) {}
 
           }
