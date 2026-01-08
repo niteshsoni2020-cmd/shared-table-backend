@@ -6977,7 +6977,15 @@ app.get("/ready", (req, res) => (__dbReady ? res.status(200).json({ ok: true }) 
 
 
 
-// ================= L8_ADMIN_REASON_GUARD_V1 =================
+// ================= AUDIT_MARKERS_STATE_V1 =================
+// L8_ADMIN_REASON_GUARD_V1
+// L9_JOB_SINGLE_FLIGHT_GUARD_V1
+// L10_JOB_LOCK_TTL_60M_ENV_OVERRIDE_V1
+// L11_EMAIL_IDEMPOTENCY_WRAPPER_V1
+// L12_GUEST_COUNT_CANONICALIZATION_V1
+// NOTE: Markers are audit-only. They do not change runtime behavior.
+// ============================================================
+
 // Mandatory admin reason middleware (used by admin mutation routes).
 // Requirement: caller must send header: X-Admin-Reason (min 5 chars).
 function requireAdminReason(req, res, next) {
