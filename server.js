@@ -6515,7 +6515,7 @@ app.get("/api/users/:userId/profile", async (req, res) => {
     const out = {
       name: user.name,
       profilePic: user.profilePic,
-      bio: user.bio,
+      bio: user.publicProfile ? user.bio : "",
       handle: user.handle,
       publicProfile: user.publicProfile,
       createdAt: user.createdAt
