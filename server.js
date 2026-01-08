@@ -5517,16 +5517,13 @@ app.post("/api/bookings/:id/cancel", authMiddleware, async (req, res) => {
 
     const wasConfirmed = (curStatus == "confirmed");
 
+    // L7_FIX_CANCEL_ORDER_V1: release reserved capacity BEFORE status transition (idempotent + atomic claim)
+    await __releaseCapacityOnceAtomic(booking, "guest_cancel");
+    try { booking.capacityReleasedAt = booking.capacityReleasedAt || new Date(); } catch (_) {}
+
     await transitionBooking(booking, "cancelled");
     booking.cancellationReason = "User requested cancellation";
     booking.cancellation = { by: "guest", at: new Date(), reasonCode: "guest_cancel", note: "" };
-
-    // L2_CANCEL_RELEASE_CAPACITY_NORMAL
-      // L2_CANCEL_RELEASE_CAPACITY: release reserved capacity once (idempotent)
-
-    // L2_CANCEL_RELEASE_CAPACITY: release reserved capacity once (idempotent + atomic claim)
-    await __releaseCapacityOnceAtomic(booking, "guest_cancel");
-    try { booking.capacityReleasedAt = booking.capacityReleasedAt || new Date(); } catch (_) {}
 
 
     const totalCents =
