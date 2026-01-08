@@ -6712,7 +6712,10 @@ async function withJobRun(db, jobName, fn, opts) {
   const now = new Date();
 
   const o = opts || {};
-  const ttlMs = Number.isFinite(o.lockTtlMs) ? o.lockTtlMs : (15 * 60 * 1000);
+  const envTtl = Number(process.env.JOB_LOCK_TTL_MS);
+  const ttlMs = Number.isFinite(o.lockTtlMs) ? o.lockTtlMs : (
+    Number.isFinite(envTtl) && envTtl > 0 ? envTtl : (60 * 60 * 1000)
+  );
   const expiresAt = new Date(now.getTime() + ttlMs);
 
   const locks = db.collection("job_locks");
