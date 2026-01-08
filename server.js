@@ -5996,8 +5996,30 @@ app.post("/api/social/connect", authMiddleware, socialGuard, connectLimiter, asy
     if (!targetUserId && !handle) return res.status(400).json({ message: "targetUserId or handle required." });
 
     let target = null;
-    if (targetUserId) target = await User.findById(targetUserId);
-    if (!target && handle) target = await User.findOne({ handle, allowHandleSearch: true });
+    if (targetUserId) target = await User.findById(targetUserId)
+      .select("_id name profilePic bio handle publicProfile createdAt discoverable blockedUserIds allowHandleSearch");
+    if (!target && handle) target = await User.findOne({ handle, allowHandleSearch: true })
+      .select("_id name profilePic bio handle publicProfile createdAt discoverable blockedUserIds allowHandleSearch");
+
+    if (target && __canDiscoverUser(target) !== true) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    if (target) {
+      const meId = req.user && (req.user._id || req.user.id);
+      const __me = meId ? String(meId) : "";
+      const __tid = String((target && (target._id || target.id)) || "" );
+      if (__me.length > 0 && __tid.length > 0) {
+        try {
+          const __meDoc = await User.findById(__me).select("blockedUserIds").lean();
+          if (__isBlockedPair(__meDoc, target, __me, __tid) === true) {
+            return res.status(404).json({ message: "User not found" });
+          }
+        } catch (_e) {
+          return res.status(404).json({ message: "User not found" });
+        }
+      }
+    }
 
     if (!target) return res.status(404).json({ message: "User not found." });
     if (String(target._id) === String(req.user._id)) return res.status(400).json({ message: "Cannot connect to yourself." });
