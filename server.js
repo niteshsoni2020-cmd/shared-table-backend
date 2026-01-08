@@ -988,6 +988,7 @@ app.post(
   express.json({ limit: "200kb" }),
   authMiddleware,
   adminMiddleware,
+  requireAdminReason,
   async (req, res) => {
     try {
       const bookingId = String((req.params && req.params.id) ? req.params.id : "");
@@ -3057,7 +3058,7 @@ function __promoGenerateCode(prefix) {
 }
 
 // Create promo
-app.post("/api/admin/promo-codes", adminMiddleware, promoCreateLimiter, async (req, res) => {
+app.post("/api/admin/promo-codes", adminMiddleware, requireAdminReason, promoCreateLimiter, async (req, res) => {
   try {
     const body = (req && req.body) ? req.body : {};
     const now = new Date();
@@ -3145,7 +3146,7 @@ app.get("/api/admin/promo-codes", adminMiddleware, async (req, res) => {
 });
 
 // Toggle active
-app.put("/api/admin/promo-codes/:code/active", adminMiddleware, async (req, res) => {
+app.put("/api/admin/promo-codes/:code/active", adminMiddleware, requireAdminReason, async (req, res) => {
   try {
     const code = __promoCodeClean((req && req.params && req.params.code) ? req.params.code : "");
     if (!code) return res.status(400).json({ message: "code required" });
@@ -3205,7 +3206,7 @@ app.get("/api/policy/active", async (req, res) => {
   }
 });
 
-app.post("/api/policy/draft", adminMiddleware, async (req, res) => {
+app.post("/api/policy/draft", adminMiddleware, requireAdminReason, async (req, res) => {
   try {
     const body = req.body || {};
     const rules = (body.rules && typeof body.rules === "object") ? body.rules : {};
@@ -3235,7 +3236,7 @@ app.post("/api/policy/draft", adminMiddleware, async (req, res) => {
   }
 });
 
-app.post("/api/policy/publish", adminMiddleware, async (req, res) => {
+app.post("/api/policy/publish", adminMiddleware, requireAdminReason, async (req, res) => {
   try {
     const draftId = String((req.body && req.body.draftId) || "").trim();
     if (!draftId) return res.status(400).json({ message: "draftId required" });
@@ -6287,7 +6288,7 @@ app.get("/api/admin/reports", adminMiddleware, async (req, res) => {
   }
 });
 
-app.patch("/api/admin/reports/:id", adminMiddleware, async (req, res) => {
+app.patch("/api/admin/reports/:id", adminMiddleware, requireAdminReason, async (req, res) => {
   try {
     const id = String((req && req.params && req.params.id) ? req.params.id : "").trim();
     if (!id) return res.status(400).json({ message: "id required" });
@@ -6427,7 +6428,7 @@ app.get("/api/admin/users", adminMiddleware, async (req, res) => {
   }
 });
 
-app.delete("/api/admin/users/:id", adminMiddleware, async (req, res) => {
+app.delete("/api/admin/users/:id", adminMiddleware, requireAdminReason, async (req, res) => {
   try { await __auditAdmin(req, "admin_user_delete", { targetType: "user", targetId: String(req.params.id || "" ) }, { ok: true }); } catch (_) {}
 
   try {
@@ -6464,7 +6465,7 @@ app.get("/api/admin/experiences", adminMiddleware, async (req, res) => {
   }
 });
 
-app.patch("/api/admin/experiences/:id/toggle", adminMiddleware, async (req, res) => {
+app.patch("/api/admin/experiences/:id/toggle", adminMiddleware, requireAdminReason, async (req, res) => {
   try { await __auditAdmin(req, "admin_experience_toggle", { targetType: "experience", targetId: String(req.params.id || "" ) }, { ok: true }); } catch (_) {}
 
   try {
@@ -6975,6 +6976,19 @@ app.get("/health", (req, res) => res.status(200).json({ ok: true, dbReady: __dbR
 app.get("/ready", (req, res) => (__dbReady ? res.status(200).json({ ok: true }) : res.status(503).json({ ok: false })));
 
 
+
+// ================= L8_ADMIN_REASON_GUARD_V1 =================
+// Mandatory admin reason middleware (used by admin mutation routes).
+// Requirement: caller must send header: X-Admin-Reason (min 5 chars).
+function requireAdminReason(req, res, next) {
+  const reason = String((req && req.headers && (req.headers["x-admin-reason"] || req.headers["X-Admin-Reason"])) || "").trim();
+  if (!reason || reason.length < 5) {
+    return res.status(400).json({ message: "Admin reason required (X-Admin-Reason)" });
+  }
+  req.adminReason = reason.slice(0, 240);
+  return next();
+}
+// ================================================================
 
 let __httpServerStarted = false;
 function __startHttpServerOnce() {
