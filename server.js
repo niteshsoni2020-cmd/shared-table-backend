@@ -1592,9 +1592,18 @@ async function __ensureStripeWebhookIndex() {
     if (__stripeWebhookIndexPromise) return __stripeWebhookIndexPromise;
     if (mongoose == null) return null;
     if (mongoose.connection == null) return null;
-    __stripeWebhookIndexPromise = mongoose.connection
-      .collection("stripe_webhook_events")
-      .createIndex({ eventId: 1 }, { unique: true, background: true });
+
+    const col = mongoose.connection.collection("stripe_webhook_events");
+
+    // 1) Unique idempotency key
+    const p1 = col.createIndex({ eventId: 1 }, { unique: true, background: true });
+
+    // 2) TTL hygiene: auto-expire old webhook event docs (90 days)
+    // TTL works only when the indexed field is a Date; docs without receivedAt are not affected.
+    const ttlSeconds = 90 * 24 * 60 * 60;
+    const p2 = col.createIndex({ receivedAt: 1 }, { expireAfterSeconds: ttlSeconds, background: true });
+
+    __stripeWebhookIndexPromise = Promise.all([p1, p2]).then(function () { return true; });
     return __stripeWebhookIndexPromise;
   } catch (_) {
     return null;
