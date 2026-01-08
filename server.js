@@ -79,6 +79,35 @@ try {
 const express = require("express");
 const cors = require("cors");
 const mongoose = require("mongoose");
+
+// === EMAIL_DELIVERY_LEDGER_V1 ===
+const EmailDeliverySchema = new mongoose.Schema({
+  bookingId: { type: String, index: true },
+  email: { type: String, index: true },
+  template: { type: String, index: true },
+  state: { type: String },
+  providerMessageId: { type: String },
+  error: { type: String },
+  createdAt: { type: Date, default: Date.now }
+}, { versionKey: false });
+
+EmailDeliverySchema.index(
+  { bookingId: 1, template: 1 },
+  { unique: true }
+);
+
+const EmailDelivery = mongoose.model("EmailDelivery", EmailDeliverySchema);
+
+const EmailSuppressionSchema = new mongoose.Schema({
+  email: { type: String, unique: true },
+  reason: { type: String },
+  createdAt: { type: Date, default: Date.now }
+}, { versionKey: false });
+
+const EmailSuppression = mongoose.model("EmailSuppression", EmailSuppressionSchema);
+// === END EMAIL_DELIVERY_LEDGER_V1 ===
+
+
 const multer = require("multer");
 const cloudinary = require("cloudinary").v2;
 const { start: startJobs, registerInterval } = require("./src/jobs");
@@ -350,106 +379,99 @@ function __errDetails(e) {
 }
 
   async function __sendEventEmailTracked(payload, meta) {
-  const p = (payload && typeof payload === "object") ? payload : {};
-  const m = (meta && typeof meta === "object") ? meta : {};
+  const p = payload || {};
+  const m = meta || {};
 
-  const rid = String(m.rid || "");
-  const toRaw = String(p.to || "");
-  const eventName = String(p.eventName || "");
-  const category = String(p.category || "");
-  const templateId = String(p.templateId || "");
+  const toRaw =
+    (p && (p.to || p.email || p.recipient)) ||
+    (m && (m.to || m.email || m.recipient)) ||
+    "";
+  const to = String(toRaw || "").toLowerCase().trim();
 
-  const toMasked = __maskEmail(toRaw);
-  const toHash = __hashEmail(toRaw);
-  const providerGuess = String(
-    (p && (p.provider || p.emailProvider)) ||
-    (m && (m.provider || m.emailProvider)) ||
-    process.env.EMAIL_PROVIDER ||
-    process.env.MAIL_PROVIDER ||
-    process.env.EMAIL_TRANSPORT ||
-    ""
-  );
-  let doc = null;
-  try {
-    doc = await CommDelivery.create({
-      rid: rid,
-      eventName: eventName,
-      category: category,
-      templateId: templateId,
-      toMasked: toMasked,
-      toHash: toHash,
-      ok: false,
-      provider: providerGuess || "",
-      providerMessageId: "",
-      ms: 0,
-      error: "",
-      attempt: Number.parseInt(String(m.attempt || "1"), 10) || 1,
-      parentId: String(m.parentId || "")
-    });
-  } catch (_) {}
+  const bookingIdRaw =
+    (m && (m.bookingId || m.BOOKING_ID)) ||
+    (p && (p.bookingId || p.BOOKING_ID)) ||
+    "";
+  const bookingId = String(bookingIdRaw || "").trim();
 
-  const t0 = Date.now();
-  const timeoutMs = __emailTimeoutMs();
+  const templateRaw =
+    (m && (m.template || m.eventName || m.type)) ||
+    (p && (p.template || p.eventName || p.type)) ||
+    "EVENT_EMAIL";
+  const template = String(templateRaw || "EVENT_EMAIL").trim();
 
-  try {
-    const t = new Promise(function(_, rej) { setTimeout(function() { rej(new Error("EMAIL_TIMEOUT_MS_EXCEEDED ms=" + String(timeoutMs))); }, timeoutMs); });
-    const r = await Promise.race([ Promise.resolve(sendEventEmail(p)), t ]);
+  const enforceLedger = (bookingId.length > 0 && to.length > 0);
 
-    const ms = Date.now() - t0;
-    const ok = (r === true) || (Boolean(r && r.ok === true));
-    const provider = String((r && r.provider) || providerGuess || "");
-    const mid = String((r && (r.providerMessageId || r.id || r.messageId || r.messageID)) || "");
-const statusCode = __pickStatusCode(r);
-    const err = ok ? "" : __errDetails((r && (r.error || r.err || r.message)) ? { message: String((r.error || r.err || r.message)) } : r);
-
-    if (doc) {
-      try {
-        doc.ok = ok;
-        doc.provider = provider;
-        doc.providerMessageId = mid;
-          if (statusCode !== null) doc.statusCode = statusCode;
-        doc.ms = ms;
-        doc.error = err.slice(0, 800);
-                // COMMDELIVERY_OUTCOME_PATCH_TSTS_FINAL
-        await doc.save();
-      } catch (_) {}
-    }
-
-    if (!ok) throw new Error(err || "send_failed");
-    return r;
-  } catch (e) {
-    const ms = Date.now() - t0;
-    const emsg = __errDetails(e);
-      const mid2 = __pickMessageId(e);
-      const statusCode2 = __pickStatusCode(e);
-      const provider2 = String((e && e.provider) || providerGuess || "");
-    if (doc) {
-      try {
-        doc.ok = false;
-          if (!doc.provider) doc.provider = provider2;
-          if (!doc.providerMessageId && mid2) doc.providerMessageId = mid2;
-          if (statusCode2 !== null) doc.statusCode = statusCode2;
-        doc.ms = ms;
-        doc.error = emsg.slice(0, 800);
-        await doc.save();
-      } catch (_) {}
-    }
-
-    // bounded retry (non-blocking)
-    const attempt = Number.parseInt(String(m.attempt || "1"), 10) || 1;
-    const maxRetry = __emailRetryMax();
-    if (attempt <= maxRetry) {
-      const delay = __emailRetryDelayMs();
-      setTimeout(function() {
-        try {
-          __sendEventEmailTracked(p, { rid: rid, attempt: attempt + 1, parentId: doc ? String(doc._id || "") : String(m.parentId || "") })
-            .catch(function() {});
-        } catch (_) {}
-      }, delay);
-    }
-
-    throw e;
+  // Suppression precheck
+  if (to.length > 0) {
+    try {
+      const sup = await EmailSuppression.findOne({ email: to }).lean();
+      if (sup) {
+        if (enforceLedger) {
+          try {
+            await EmailDelivery.create({
+              bookingId,
+              email: to,
+              template,
+              state: "suppressed",
+              providerMessageId: "",
+              error: String((sup && sup.reason) || "suppressed")
+            });
+          } catch (_) {}
+        }
+        __log("info", "email_suppressed_skip", { bookingId: bookingId || undefined, template, to });
+        return false;
+      }
+    } catch (_) {}
   }
+
+  // Exactly-once gate (bookingId+template unique index)
+  if (enforceLedger) {
+    try {
+      await EmailDelivery.create({
+        bookingId,
+        email: to,
+        template,
+        state: "queued",
+        providerMessageId: "",
+        error: ""
+      });
+    } catch (err) {
+      const msg = (err && err.message) ? String(err.message) : "";
+      const dup = msg.toLowerCase().indexOf("duplicate") >= 0 || msg.indexOf("E11000") >= 0;
+      if (dup) {
+        __log("info", "email_idempotent_skip", { bookingId, template, to });
+        return true;
+      }
+      __log("error", "email_ledger_create_failed", { bookingId, template, to, err: msg });
+    }
+  }
+
+  const subject = String(p.subject || "");
+  const html = (typeof p.html !== "undefined") ? p.html : undefined;
+  const text = (typeof p.text !== "undefined") ? p.text : undefined;
+
+  const r = await sendEmailWithInfo({ to, subject, html, text });
+
+  if (enforceLedger) {
+    try {
+      const upd = {
+        state: (r && r.ok === true) ? "sent" : "failed",
+        providerMessageId: String((r && r.providerMessageId) || ""),
+        error: String((r && r.error) || "")
+      };
+      await EmailDelivery.updateOne({ bookingId, template }, { $set: upd });
+    } catch (err) {
+      const msg = (err && err.message) ? String(err.message) : "ledger_update_failed";
+      __log("error", "email_ledger_update_failed", { bookingId, template, to, err: msg });
+    }
+  }
+
+  if (!(r && r.ok === true)) {
+    __log("error", "email_delivery_failed", { bookingId: bookingId || undefined, template, to, err: String((r && r.error) || "") });
+  }
+
+  return (r && r.ok === true);
 }
 
 
@@ -1073,7 +1095,8 @@ app.post(
         return res.status(400).send("Webhook signature verification failed");
       }
 
-      if (mongoose == null || mongoose.connection == null || mongoose.connection.readyState !== 1) {
+      if (mongoose == null || 
+mongoose.connection == null || mongoose.connection.readyState !== 1) {
         return res.status(500).send("DB not ready");
       }
 
@@ -1743,7 +1766,9 @@ const upload = multer({
 // Env contract:
 //   SMTP_HOST, SMTP_USER, SMTP_PASS are required to send email
 //   SMTP_PORT (default 587), SMTP_SECURE ("true"/"false"), FROM_EMAIL (optional)
+
 let __mailer = null;
+
 function getMailer() {
   const host = String(process.env.SMTP_HOST || "");
   const user = String(process.env.SMTP_USER || "");
@@ -1761,204 +1786,32 @@ function getMailer() {
   return __mailer;
 }
 
-async function sendEmail({ to, subject, html, text }) {
+async function sendEmailWithInfo({ to, subject, html, text }) {
   const mailer = getMailer();
-  if (!mailer) return false;
+  if (!mailer) return { ok: false, providerMessageId: "", error: "mailer_not_configured" };
 
   const from = String(process.env.FROM_EMAIL || process.env.SMTP_USER || "");
   try {
-    await mailer.sendMail({
+    const info = await mailer.sendMail({
       from,
       to,
       subject,
       ...(html ? { html } : {}),
       ...(text ? { text } : {}),
     });
-    return true;
+    const mid = (info && info.messageId) ? String(info.messageId) : "";
+    return { ok: true, providerMessageId: mid, error: "" };
   } catch (err) {
-    __log("error", "email_send_failed", { rid: undefined, path: undefined });
-    return false;
+    const msg = (err && err.message) ? String(err.message) : "email_send_failed";
+    __log("error", "email_send_failed", { err: msg });
+    return { ok: false, providerMessageId: "", error: msg };
   }
 }
 
-function __frontendBaseUrl() {
-  const raw = String(process.env.FRONTEND_BASE_URL || "http://localhost:3000");
-  return raw.replace(/\/$/, "");
+async function sendEmail({ to, subject, html, text }) {
+  const r = await sendEmailWithInfo({ to, subject, html, text });
+  return r && r.ok === true;
 }
-function __dashboardUrl() {
-  return __frontendBaseUrl() + "/dashboard";
-}
-
-function escapeHtml(s) {
-  return String(s || "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/\"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
-
-function emailLayout(title, bodyHtml, cta) {
-  const safeTitle = escapeHtml(title);
-  const href = cta && cta.href ? String(cta.href) : "";
-  const hasCta = href.trim().length > 0;
-
-  const DOCTYPE = "<" + "!" + "doctype html>";
-
-  const ctaHtml = hasCta
-    ? `<div style="margin:20px 0 0">
-         <a href="${escapeHtml(href)}"
-            style="display:inline-block;padding:12px 16px;border-radius:10px;background:#111827;color:#ffffff;text-decoration:none;font-weight:600">
-           ${escapeHtml(cta.text || "Open")}
-         </a>
-       </div>`
-    : "";
-
-  return `${DOCTYPE}
-<html>
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>${safeTitle}</title>
-</head>
-<body style="margin:0;background:#f6f7fb;font-family:system-ui">
-  <div style="max-width:560px;margin:0 auto;padding:24px">
-    <div style="background:#fff;border:1px solid #e5e7eb;border-radius:14px;padding:22px">
-      <h1 style="margin:0 0 12px 0;font-size:18px">${safeTitle}</h1>
-      <div style="font-size:14px;line-height:1.6">
-        ${bodyHtml || ""}
-        ${ctaHtml}
-      </div>
-    </div>
-    <div style="font-size:12px;color:#6b7280;margin-top:12px">
-      The Shared Table Story
-    </div>
-  </div>
-</body>
-</html>`;
-}
-
-function welcomeEmailHtml(name) {
-  const who = escapeHtml(String(name || "").trim());
-  const hi = who.length > 0 ? ("Hi " + who + ",") : "Hi,";
-
-  return emailLayout(
-    "Welcome",
-    `<p style="margin:0 0 12px 0">${hi}</p>
-     <p style="margin:0 0 12px 0">Welcome to The Shared Table Story.</p>
-     <p style="margin:0 0 12px 0">The Shared Table Story is a curated marketplace for local experiences across Culture, Food, and Nature.</p>
-     <p style="margin:0 0 12px 0">It is built for people who value depth, presence, and genuine connection over mass tourism.</p>
-     <p style="margin:0 0 12px 0">Each experience is hosted by individuals who share a table, a trail, a tradition, or a craft with a small group, thoughtfully and intentionally.</p>
-     <p style="margin:0">If you did not create this account, you can ignore this email.</p>`,
-    null
-  );
-}
-function resetPasswordEmailHtml(resetUrl) {
-  const href = String(resetUrl || "").trim();
-  return emailLayout(
-    "Reset your password",
-    `<p style="margin:0 0 12px 0">Use the button below to reset your password. The link is valid for 30 minutes.</p>
-     <p style="margin:0">If you did not request this, you can ignore this email.</p>`,
-    { text: "Reset password", href }
-  );
-}
-
-
-function bookingConfirmedGuestEmailHtml(booking, guest, host) {
-  const g = guest || {};
-  const b = booking || {};
-  const h = host || {};
-  const title = "Booking confirmed";
-
-  const name = escapeHtml(String(g.name || "").trim());
-  const exp = escapeHtml(String(b.experienceTitle || b.title || "").trim());
-  const date = escapeHtml(String(b.bookingDate || "").trim());
-  const time = escapeHtml(String(b.timeSlot || "").trim());
-  const hostName = escapeHtml(String(h.name || b.hostName || "").trim());
-
-  const body =
-    "<p style=\"margin:0 0 12px 0\">Hi " + name + ",</p>" +
-    "<p style=\"margin:0 0 12px 0\">Your booking is confirmed.</p>" +
-    "<p style=\"margin:0 0 8px 0\"><b>Experience</b>: " + exp + "</p>" +
-    "<p style=\"margin:0 0 8px 0\"><b>Date</b>: " + date + "</p>" +
-    "<p style=\"margin:0 0 8px 0\"><b>Time</b>: " + time + "</p>" +
-    "<p style=\"margin:0\"><b>Host</b>: " + hostName + "</p>";
-
-  return emailLayout(title, body, null);
-}
-
-function bookingConfirmedHostEmailHtml(booking, guest, host) {
-  const g = guest || {};
-  const b = booking || {};
-  const h = host || {};
-  const title = "New booking received";
-
-  const hostName = escapeHtml(String(h.name || b.hostName || "").trim());
-  const guestName = escapeHtml(String(g.name || b.guestName || "").trim());
-  const exp = escapeHtml(String(b.experienceTitle || b.title || "").trim());
-  const date = escapeHtml(String(b.bookingDate || "").trim());
-  const time = escapeHtml(String(b.timeSlot || "").trim());
-
-  const body =
-    "<p style=\"margin:0 0 12px 0\">Hi " + hostName + ",</p>" +
-    "<p style=\"margin:0 0 12px 0\">A guest has a confirmed booking.</p>" +
-    "<p style=\"margin:0 0 8px 0\"><b>Guest</b>: " + guestName + "</p>" +
-    "<p style=\"margin:0 0 8px 0\"><b>Experience</b>: " + exp + "</p>" +
-    "<p style=\"margin:0 0 8px 0\"><b>Date</b>: " + date + "</p>" +
-    "<p style=\"margin:0\"><b>Time</b>: " + time + "</p>";
-
-  return emailLayout(title, body, null);
-}
-
-function bookingCancelledGuestEmailHtml(booking, guest, host) {
-  const g = guest || {};
-  const b = booking || {};
-  const h = host || {};
-  const title = "Booking cancelled";
-
-  const name = escapeHtml(String(g.name || "").trim());
-  const exp = escapeHtml(String(b.experienceTitle || b.title || "").trim());
-  const date = escapeHtml(String(b.bookingDate || "").trim());
-  const time = escapeHtml(String(b.timeSlot || "").trim());
-  const hostName = escapeHtml(String(h.name || b.hostName || "").trim());
-
-  const body =
-    "<p style=\"margin:0 0 12px 0\">Hi " + name + ",</p>" +
-    "<p style=\"margin:0 0 12px 0\">This booking was cancelled.</p>" +
-    "<p style=\"margin:0 0 8px 0\"><b>Experience</b>: " + exp + "</p>" +
-    "<p style=\"margin:0 0 8px 0\"><b>Date</b>: " + date + "</p>" +
-    "<p style=\"margin:0 0 8px 0\"><b>Time</b>: " + time + "</p>" +
-    "<p style=\"margin:0\"><b>Host</b>: " + hostName + "</p>";
-
-  return emailLayout(title, body, null);
-}
-
-function bookingCancelledHostEmailHtml(booking, guest, host) {
-  const g = guest || {};
-  const b = booking || {};
-  const h = host || {};
-  const title = "Booking cancelled";
-
-  const hostName = escapeHtml(String(h.name || b.hostName || "").trim());
-  const guestName = escapeHtml(String(g.name || b.guestName || "").trim());
-  const exp = escapeHtml(String(b.experienceTitle || b.title || "").trim());
-  const date = escapeHtml(String(b.bookingDate || "").trim());
-  const time = escapeHtml(String(b.timeSlot || "").trim());
-
-  const body =
-    "<p style=\"margin:0 0 12px 0\">Hi " + hostName + ",</p>" +
-    "<p style=\"margin:0 0 12px 0\">A booking was cancelled.</p>" +
-    "<p style=\"margin:0 0 8px 0\"><b>Guest</b>: " + guestName + "</p>" +
-    "<p style=\"margin:0 0 8px 0\"><b>Experience</b>: " + exp + "</p>" +
-    "<p style=\"margin:0 0 8px 0\"><b>Date</b>: " + date + "</p>" +
-    "<p style=\"margin:0\"><b>Time</b>: " + time + "</p>";
-
-  return emailLayout(title, body, null);
-}
-
-
-
-
 
 
 // 5. SCHEMAS
@@ -6720,6 +6573,62 @@ function startUnpaidBookingExpiryCleanupLoop_V1() {
 
 
 // TSTS_VERSION_ENDPOINT
+app.post("/api/comms/email-event", async (req, res) => {
+  try {
+    const secret = String(process.env.COMMS_WEBHOOK_SECRET || "");
+    const got = String((req.headers && (req.headers["x-comms-secret"] || req.headers["X-Comms-Secret"])) || "");
+    if (!secret || got !== secret) return res.status(401).json({ ok: false });
+
+    const body = req.body || {};
+    const email = String(body.email || "").toLowerCase().trim();
+    const event = String(body.event || "").toLowerCase().trim(); // bounced | delivered | failed | suppressed
+    const reason = String(body.reason || "");
+    const bookingId = String(body.bookingId || "").trim();
+    const template = String(body.template || "EVENT_EMAIL").trim();
+    const providerMessageId = String(body.providerMessageId || "");
+
+    if (!email) return res.status(400).json({ ok: false, message: "email required" });
+
+    if (event === "bounced" || event === "hard_bounce") {
+      try { await EmailSuppression.updateOne({ email }, { $set: { reason: reason || "hard_bounce" } }, { upsert: true }); } catch (_) {}
+      if (bookingId) {
+        try { await EmailDelivery.updateOne({ bookingId, template }, { $set: { state: "bounced", providerMessageId, error: reason || "bounced" } }); } catch (_) {}
+      }
+      __log("info", "email_bounce_recorded", { email, bookingId: bookingId || undefined, template, reason });
+      return res.json({ ok: true });
+    }
+
+    if (event === "suppressed") {
+      try { await EmailSuppression.updateOne({ email }, { $set: { reason: reason || "suppressed" } }, { upsert: true }); } catch (_) {}
+      if (bookingId) {
+        try { await EmailDelivery.updateOne({ bookingId, template }, { $set: { state: "suppressed", providerMessageId, error: reason || "suppressed" } }); } catch (_) {}
+      }
+      __log("info", "email_suppressed_recorded", { email, bookingId: bookingId || undefined, template, reason });
+      return res.json({ ok: true });
+    }
+
+    if (event === "failed") {
+      if (bookingId) {
+        try { await EmailDelivery.updateOne({ bookingId, template }, { $set: { state: "failed", providerMessageId, error: reason || "failed" } }); } catch (_) {}
+      }
+      __log("error", "email_failed_recorded", { email, bookingId: bookingId || undefined, template, reason });
+      return res.json({ ok: true });
+    }
+
+    if (event === "delivered") {
+      if (bookingId) {
+        try { await EmailDelivery.updateOne({ bookingId, template }, { $set: { state: "delivered", providerMessageId } }); } catch (_) {}
+      }
+      __log("info", "email_delivered_recorded", { email, bookingId: bookingId || undefined, template });
+      return res.json({ ok: true });
+    }
+
+    return res.status(400).json({ ok: false, message: "unknown event" });
+  } catch (e) {
+    return res.status(500).json({ ok: false });
+  }
+});
+
 app.get("/version", (req, res) => {
   const sha =
     String(process.env.RENDER_GIT_COMMIT || "") ||
