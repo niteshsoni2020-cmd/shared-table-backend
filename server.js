@@ -1061,34 +1061,48 @@ app.post(
   async (req, res) => {
     try {
       __log("info", "stripe_webhook_hit", { rid: __ridFromReq(req), path: (req && req.originalUrl) ? String(req.originalUrl) : undefined });
-      if (!STRIPE_WEBHOOK_SECRET)
-        return res.status(500).send("Missing STRIPE_WEBHOOK_SECRET");
+      if (!STRIPE_WEBHOOK_SECRET) return res.status(500).send("Missing STRIPE_WEBHOOK_SECRET");
 
       const sig = req.headers["stripe-signature"];
       let event;
       try {
-        event = stripe.webhooks.constructEvent(
-          req.body,
-          sig,
-          STRIPE_WEBHOOK_SECRET
-        );
+        event = stripe.webhooks.constructEvent(req.body, sig, STRIPE_WEBHOOK_SECRET);
         __log("info", "stripe_webhook_verified", { rid: __ridFromReq(req), path: (req && req.originalUrl) ? String(req.originalUrl) : undefined });
       } catch (err) {
         __log("error", "stripe_webhook_sig_fail", { rid: __ridFromReq(req), path: (req && req.originalUrl) ? String(req.originalUrl) : undefined });
-          return res.status(400).send("Webhook signature verification failed");
+        return res.status(400).send("Webhook signature verification failed");
       }
 
-      // Require DB for idempotency + booking state updates.
-      // If DB is not connected, fail so Stripe retries (do not ACK when we cannot process).
       if (mongoose == null || mongoose.connection == null || mongoose.connection.readyState !== 1) {
         return res.status(500).send("DB not ready");
       }
 
-      // Event-level idempotency: insert Stripe event.id first
       const eventId = String((event && event.id) ? event.id : "");
       if (eventId.length === 0) return res.json({ received: true });
 
       try { await __ensureStripeWebhookIndex(); } catch (_) {}
+
+      const __adminEmail = () => {
+        const a = (process && process.env && process.env.ADMIN_EMAIL) ? String(process.env.ADMIN_EMAIL).trim() : "";
+        const s = (process && process.env && process.env.SUPPORT_EMAIL) ? String(process.env.SUPPORT_EMAIL).trim() : "";
+        return (a.length > 0 ? a : (s.length > 0 ? s : ""));
+      };
+
+      const __alertAdminOnce = async (BookingModel, bookingId, commsKey, eventName, category, vars) => {
+        try {
+          const to = __adminEmail();
+          if (!to) return false;
+          const when = new Date();
+          const q = { _id: bookingId, $or: [ { [commsKey]: { $exists: false } }, { [commsKey]: null } ] };
+          const u = { $set: { [commsKey]: when } };
+          const gate = await BookingModel.findOneAndUpdate(q, u, { new: true });
+          if (!gate) return false;
+          __fireAndForgetEmail({ to, eventName, category, vars });
+          return true;
+        } catch (_) {
+          return false;
+        }
+      };
 
       const evCol = mongoose.connection.db.collection("stripe_webhook_events");
       try {
@@ -1104,29 +1118,20 @@ app.post(
           error: "",
           data: (event && event.data) ? event.data : null,
         });
-        __log("info", "stripe_webhook_event_inserted", { rid: __ridFromReq(req), path: (req && req.originalUrl) ? String(req.originalUrl) : undefined });
-        // Force-persist raw Stripe payload (bypass mongoose strict schema)
+
         try {
-          await evCol.updateOne(
-            { eventId },
-            { $set: { data: (event && event.data) ? event.data : null } }
-          );
+          await evCol.updateOne({ eventId }, { $set: { data: (event && event.data) ? event.data : null } });
         } catch (_) {}
       } catch (e) {
         if (__isDuplicateKeyError(e)) {
-          // Duplicate eventId: claim processing only if not processed yet.
           try {
             const claimed = await evCol.findOneAndUpdate(
               { eventId, processedAt: null, $or: [{ processingAt: null }, { processingAt: { $exists: false } }, { processingAt: { $lte: new Date(Date.now() - 10 * 60 * 1000) } }] },
               { $set: { processingAt: new Date(), error: "", type: String(event.type || ""), livemode: Boolean(event.livemode), createdAt: (event && event.created) ? new Date(Number(event.created) * 1000) : null, receivedAt: new Date() }, $inc: { attempts: 1 } },
               { returnDocument: "after" }
             );
-            if (!claimed || !claimed.value) {
-              // Someone else is processing or already processed; ACK to stop retries.
-              return res.json({ received: true, duplicate: true });
-            }
+            if (!claimed || !claimed.value) return res.json({ received: true, duplicate: true });
           } catch (_) {
-            // If claim fails, do not ACK; force retry.
             throw e;
           }
         } else {
@@ -1134,137 +1139,79 @@ app.post(
         }
       }
 
-
       if (event.type === "checkout.session.completed") {
         const session = (event && event.data && event.data.object) ? event.data.object : {};
         const bookingId = session.client_reference_id || (session.metadata && session.metadata.bookingId);
         if (!bookingId) {
-          try {
-            await mongoose.connection
-              .collection("stripe_webhook_events")
-              .updateOne(
-                { eventId },
-                { $set: { processedAt: new Date(), processingAt: null, error: "missing_booking_id" } }
-              );
-          } catch (_) {}
+          try { await evCol.updateOne({ eventId }, { $set: { processedAt: new Date(), processingAt: null, error: "missing_booking_id" } }); } catch (_) {}
           return res.json({ received: true });
         }
 
-        // models are registered later during file load, so by runtime this exists
         const BookingModel = mongoose.model("Booking");
         const booking = await BookingModel.findById(bookingId);
         if (!booking) return res.json({ received: true });
 
-        booking.stripeSessionId = String(
-          session.id || booking.stripeSessionId || ""
-        );
+        booking.stripeSessionId = String(session.id || booking.stripeSessionId || "");
 
         try {
           if (session.id) {
-            const full = await stripe.checkout.sessions.retrieve(
-              String(session.id),
-              {
-                expand: ["payment_intent", "line_items"],
-              }
-            );
+            const full = await stripe.checkout.sessions.retrieve(String(session.id), { expand: ["payment_intent", "line_items"] });
 
-            if (!booking.currency)
-              booking.currency = String(
-                (full.currency ||
-                  session.currency ||
-                  (booking.pricing && booking.pricing.currency) ||
-                  "aud")
-              ).toLowerCase();
+            if (!booking.currency) booking.currency = String((full.currency || session.currency || (booking.pricing && booking.pricing.currency) || "aud")).toLowerCase();
 
             const amt =
               (Number.isFinite(full.amount_total) && Number(full.amount_total)) ||
               (Number.isFinite(session.amount_total) && Number(session.amount_total)) ||
-              (booking.pricing &&
-                Number.isFinite(booking.pricing.totalCents) &&
-                Number(booking.pricing.totalCents)) ||
+              (booking.pricing && Number.isFinite(booking.pricing.totalCents) && Number(booking.pricing.totalCents)) ||
               null;
 
             if (amt !== null) booking.amountCents = amt;
 
             const piObj = full.payment_intent;
-            const pi =
-              (piObj && (piObj.id || piObj)) ||
-              session.payment_intent ||
-              null;
-
+            const pi = (piObj && (piObj.id || piObj)) || session.payment_intent || null;
             if (pi) booking.stripePaymentIntentId = String(pi);
           } else {
-            if (session.payment_intent)
-              booking.stripePaymentIntentId = String(session.payment_intent);
-            if (Number.isFinite(session.amount_total))
-              booking.amountCents = Number(session.amount_total);
-            if (session.currency)
-              booking.currency = String(session.currency).toLowerCase();
+            if (session.payment_intent) booking.stripePaymentIntentId = String(session.payment_intent);
+            if (Number.isFinite(session.amount_total)) booking.amountCents = Number(session.amount_total);
+            if (session.currency) booking.currency = String(session.currency).toLowerCase();
           }
-        } catch (e) {
-          if (session.payment_intent)
-            booking.stripePaymentIntentId = String(session.payment_intent);
-          if (Number.isFinite(session.amount_total))
-            booking.amountCents = Number(session.amount_total);
+        } catch (_) {
+          if (session.payment_intent) booking.stripePaymentIntentId = String(session.payment_intent);
+          if (Number.isFinite(session.amount_total)) booking.amountCents = Number(session.amount_total);
           if (session.currency) booking.currency = String(session.currency).toLowerCase();
         }
 
         booking.currency = String(booking.currency || "aud").toLowerCase();
-
         await booking.save();
 
         try {
           if (!booking.comms || typeof booking.comms !== "object") booking.comms = {};
-          const __when = new Date();
-          const __gate = await Booking.findOneAndUpdate(
+          const when = new Date();
+          const gate = await Booking.findOneAndUpdate(
             { _id: booking._id, $or: [ { "comms.invoiceReceiptGuestSentAt": { $exists: false } }, { "comms.invoiceReceiptGuestSentAt": null } ] },
-            { $set: { "comms.invoiceReceiptGuestSentAt": __when } },
+            { $set: { "comms.invoiceReceiptGuestSentAt": when } },
             { new: true }
           );
-          if (__gate) {
-            const __to = booking.guestEmail ? String(booking.guestEmail).trim() : "";
-            const __nm = booking.guestName ? String(booking.guestName).trim() : "";
-            const __date = booking.bookingDate ? String(booking.bookingDate).trim() : "";
-            const __title = booking.experienceTitle ? String(booking.experienceTitle).trim() : (booking.title ? String(booking.title).trim() : "" );
-            const __cur = booking.currency ? String(booking.currency).trim().toUpperCase() : "AUD";
-            let __cents = null;
-            if (Number.isFinite(Number(booking.amountCents))) __cents = Number(booking.amountCents);
-            else if (booking.pricing && Number.isFinite(Number(booking.pricing.totalCents))) __cents = Number(booking.pricing.totalCents);
-            const __amt = (__cents === null) ? "" : (__cur + " " + (Number(__cents) / 100).toFixed(2));
-            if (__to) {
-              __fireAndForgetEmail({
-                to: __to,
-                eventName: "INVOICE_RECEIPT_GUEST",
-                category: "PAYMENTS",
-                vars: {
-                  DASHBOARD_URL: __dashboardUrl(),
-                  Name: __nm,
-                  DATE: __date,
-                  EXPERIENCE_TITLE: __title,
-                  AMOUNT: __amt
-                }
-              });
-            }
+          if (gate) {
+            const to = booking.guestEmail ? String(booking.guestEmail).trim() : "";
+            const nm = booking.guestName ? String(booking.guestName).trim() : "";
+            const date = booking.bookingDate ? String(booking.bookingDate).trim() : "";
+            const title = booking.experienceTitle ? String(booking.experienceTitle).trim() : (booking.title ? String(booking.title).trim() : "");
+            const cur = booking.currency ? String(booking.currency).trim().toUpperCase() : "AUD";
+            let cents = null;
+            if (Number.isFinite(Number(booking.amountCents))) cents = Number(booking.amountCents);
+            else if (booking.pricing && Number.isFinite(Number(booking.pricing.totalCents))) cents = Number(booking.pricing.totalCents);
+            const amt = (cents === null) ? "" : (cur + " " + (Number(cents) / 100).toFixed(2));
+            if (to) __fireAndForgetEmail({ to, eventName: "INVOICE_RECEIPT_GUEST", category: "PAYMENTS", vars: { DASHBOARD_URL: __dashboardUrl(), Name: nm, DATE: date, EXPERIENCE_TITLE: title, AMOUNT: amt } });
           }
         } catch (_) {}
-
-
       }
 
-
-      
       if (event.type === "checkout.session.async_payment_failed" || event.type === "checkout.session.expired") {
         const session = (event && event.data && event.data.object) ? event.data.object : {};
         const bookingId = session.client_reference_id || (session.metadata && session.metadata.bookingId);
         if (!bookingId) {
-          try {
-            await mongoose.connection
-              .collection("stripe_webhook_events")
-              .updateOne(
-                { eventId },
-                { $set: { processedAt: new Date(), processingAt: null, error: "missing_booking_id" } }
-              );
-          } catch (_) {}
+          try { await evCol.updateOne({ eventId }, { $set: { processedAt: new Date(), processingAt: null, error: "missing_booking_id" } }); } catch (_) {}
           return res.json({ received: true });
         }
 
@@ -1272,13 +1219,8 @@ app.post(
         const booking = await BookingModel.findById(String(bookingId));
         if (!booking) return res.json({ received: true });
 
-        // Try to expand session -> payment_intent so we can classify true failures
         let full = null;
-        try {
-          if (session && session.id) {
-            full = await stripe.checkout.sessions.retrieve(String(session.id), { expand: ["payment_intent"] });
-          }
-        } catch (_) {}
+        try { if (session && session.id) full = await stripe.checkout.sessions.retrieve(String(session.id), { expand: ["payment_intent"] }); } catch (_) {}
 
         const stripeStatus = String((session && session.payment_status) ? session.payment_status : "unpaid");
         const piObj = (full && full.payment_intent) ? full.payment_intent : (session && session.payment_intent ? session.payment_intent : null);
@@ -1288,15 +1230,13 @@ app.post(
         booking.paymentLastPiStatus = piStatus;
         booking.stripeSessionId = String(session.id || booking.stripeSessionId || "");
 
-        // PAYMENT_ATTEMPT_POLICY_V1 (webhook mirror): count only real failures
-        // Do NOT count requires_action as failure attempt
         const now = new Date();
         const lockedUntil = booking.paymentLockedUntil ? new Date(booking.paymentLockedUntil) : null;
         if (lockedUntil && lockedUntil.getTime() > now.getTime()) {
-          // Already locked: do not keep incrementing attempts from webhook retries.
           await booking.save();
           return res.json({ received: true });
         }
+
         const isFail = (piStatus === "requires_payment_method" || piStatus === "canceled" || piStatus === "cancelled");
         if (stripeStatus !== "paid" && isFail) {
           booking.paymentAttemptCount = Number.isFinite(Number(booking.paymentAttemptCount)) ? Number(booking.paymentAttemptCount) + 1 : 1;
@@ -1306,43 +1246,29 @@ app.post(
           const firstAt = booking.paymentAttemptFirstAt ? new Date(booking.paymentAttemptFirstAt) : now;
           const within30m = (now.getTime() - firstAt.getTime()) <= (30 * 60 * 1000);
           const attempts = Number(booking.paymentAttemptCount || 0);
-          if (within30m && attempts >= 5) {
-            booking.paymentLockedUntil = new Date(now.getTime() + (30 * 60 * 1000));
-          }
+          if (within30m && attempts >= 5) booking.paymentLockedUntil = new Date(now.getTime() + (30 * 60 * 1000));
         }
 
-        // Keep paymentStatus as unpaid unless already paid/confirmed
         if (String(booking.paymentStatus || "unpaid") !== "paid") {
-          const __sessionStatus = String((session && session.status) ? session.status : "");
-          const __outcome = __classifyPaymentOutcome(stripeStatus, (piObj && piObj.status) ? String(piObj.status) : "", __sessionStatus);
-          booking.paymentStatus = __outcome;
+          const sessionStatus = String((session && session.status) ? session.status : "");
+          booking.paymentStatus = __classifyPaymentOutcome(stripeStatus, (piObj && piObj.status) ? String(piObj.status) : "", sessionStatus);
         }
 
         try {
           if (!booking.comms || typeof booking.comms !== "object") booking.comms = {};
-          const __isExpired = (event.type === "checkout.session.expired");
-          const __isFail = (piStatus === "requires_payment_method" || piStatus === "canceled" || piStatus === "cancelled");
-          if (__isExpired || (__isFail && stripeStatus !== "paid")) {
-            const __when = new Date();
-            const __gate = await Booking.findOneAndUpdate(
+          const isExpired = (event.type === "checkout.session.expired");
+          const isFail2 = (piStatus === "requires_payment_method" || piStatus === "canceled" || piStatus === "cancelled");
+          if (isExpired || (isFail2 && stripeStatus !== "paid")) {
+            const when = new Date();
+            const gate = await Booking.findOneAndUpdate(
               { _id: booking._id, $or: [ { "comms.paymentFailedSentAt": { $exists: false } }, { "comms.paymentFailedSentAt": null } ] },
-              { $set: { "comms.paymentFailedSentAt": __when } },
+              { $set: { "comms.paymentFailedSentAt": when } },
               { new: true }
             );
-            if (__gate) {
-              const __to = booking.guestEmail ? String(booking.guestEmail).trim() : "";
-              const __nm = booking.guestName ? String(booking.guestName).trim() : "";
-              if (__to) {
-                __fireAndForgetEmail({
-                  to: __to,
-                  eventName: "PAYMENT_FAILED",
-                  category: "PAYMENTS",
-                  vars: {
-                    DASHBOARD_URL: __dashboardUrl(),
-                    Name: __nm
-                  }
-                });
-              }
+            if (gate) {
+              const to = booking.guestEmail ? String(booking.guestEmail).trim() : "";
+              const nm = booking.guestName ? String(booking.guestName).trim() : "";
+              if (to) __fireAndForgetEmail({ to, eventName: "PAYMENT_FAILED", category: "PAYMENTS", vars: { DASHBOARD_URL: __dashboardUrl(), Name: nm } });
             }
           }
         } catch (_) {}
@@ -1351,10 +1277,67 @@ app.post(
         return res.json({ received: true });
       }
 
+      // L4-6/L4-7: refund failure tracking + retry eligibility + admin alert
+      const __markRefundFailed = async (BookingModel, booking, kind, msg, refundId, refundStatus) => {
+        try {
+          if (!booking.refundDecision || typeof booking.refundDecision !== "object") booking.refundDecision = {};
+          const prev = Number.isFinite(Number(booking.refundDecision.attemptCount)) ? Number(booking.refundDecision.attemptCount) : 0;
+          booking.refundDecision.attemptCount = prev + 1;
+          booking.refundDecision.lastError = String(msg || kind || "refund_failed");
+          booking.refundDecision.status = "refund_failed";
+          booking.refundDecision.retryEligible = true;
+          booking.refundDecision.retryAfterAt = new Date(Date.now() + 15 * 60 * 1000);
+          if (refundId) booking.refundDecision.stripeRefundId = String(refundId);
+          if (refundStatus) booking.refundDecision.stripeRefundStatus = String(refundStatus);
+
+          if (!Array.isArray(booking.refundEvents)) booking.refundEvents = [];
+          booking.refundEvents.push({
+            at: new Date(),
+            by: "stripe_webhook",
+            event: String(kind || "refund_failed"),
+            stripeRefundId: String(refundId || ""),
+            amountCents: 0,
+            status: String(refundStatus || "failed"),
+            error: String(msg || ""),
+          });
+
+          await booking.save();
+
+          try {
+            const vars = {
+              DASHBOARD_URL: __dashboardUrl(),
+              BOOKING_ID: String(booking._id || ""),
+              GUEST_EMAIL: String(booking.guestEmail || ""),
+              STRIPE_PI: String(booking.stripePaymentIntentId || ""),
+              REFUND_ID: String(refundId || ""),
+              REFUND_STATUS: String(refundStatus || ""),
+              ERROR: String(msg || kind || "refund_failed"),
+            };
+            await __alertAdminOnce(BookingModel, booking._id, "comms.refundFailedAdminAlertSentAt", "REFUND_FAILED_ADMIN_ALERT", "PAYMENTS", vars);
+          } catch (_) {}
+        } catch (_) {}
+      };
+
+      if (event.type === "refund.failed") {
+        const refund = (event && event.data && event.data.object) ? event.data.object : {};
+        const pi = String(refund.payment_intent || "");
+        const refundId = String(refund.id || "");
+        const refundStatus = String(refund.status || "failed");
+        const failureReason = String(refund.failure_reason || "");
+        const msg = (failureReason.length > 0 ? failureReason : "refund_failed");
+
+        if (!pi) return res.json({ received: true });
+        const BookingModel = mongoose.model("Booking");
+        const booking = await BookingModel.findOne({ stripePaymentIntentId: pi });
+        if (!booking) return res.json({ received: true });
+
+        await __markRefundFailed(BookingModel, booking, "refund_failed", msg, refundId, refundStatus);
+      }
+
       if (event.type === "refund.updated" || event.type === "refund.created") {
         const refund = event.data.object || {};
-        const __refundAmt = (refund && Number.isFinite(Number(refund.amount))) ? Number(refund.amount) : null;
-        const __refundCur = refund && refund.currency ? String(refund.currency).toLowerCase() : "";
+        const amt = (refund && Number.isFinite(Number(refund.amount))) ? Number(refund.amount) : null;
+        const cur = refund && refund.currency ? String(refund.currency).toLowerCase() : "";
 
         const pi = String(refund.payment_intent || "");
         const refundId = String(refund.id || "");
@@ -1366,41 +1349,26 @@ app.post(
         if (!booking) return res.json({ received: true });
 
         if (!booking.refundDecision || typeof booking.refundDecision !== "object") booking.refundDecision = {};
-        if (__refundAmt !== null) booking.refundDecision.amountCents = __refundAmt;
-        if (__refundCur) booking.refundDecision.currency = __refundCur;
-
+        if (amt !== null) booking.refundDecision.amountCents = amt;
+        if (cur) booking.refundDecision.currency = cur;
         if (refundId) booking.refundDecision.stripeRefundId = refundId;
         if (refundStatus) booking.refundDecision.stripeRefundStatus = refundStatus;
 
         if (refundStatus === "succeeded") {
-          // L3_PARTIAL_REFUND_SAFE_WEBHOOK_V1
-          // Do NOT force terminal "refunded" unless the booking is fully refunded.
           try {
-            const amt = Number.isFinite(Number(__refundAmt)) ? Math.max(0, Math.floor(Number(__refundAmt))) : 0;
+            const rAmt = Number.isFinite(Number(amt)) ? Math.max(0, Math.floor(Number(amt))) : 0;
             const rid = String(refundId || "");
 
             if (!Number.isFinite(Number(booking.totalRefundedCents))) booking.totalRefundedCents = 0;
             if (!Array.isArray(booking.refundEvents)) booking.refundEvents = [];
 
             const already = (rid && booking.refundEvents.some((e) => e && typeof e === "object" && String(e.stripeRefundId || "") === rid));
-            if (already == false && (rid || amt > 0)) {
-              booking.refundEvents.push({
-                at: new Date(),
-                by: "stripe_webhook",
-                event: "refund_succeeded",
-                stripeRefundId: rid,
-                amountCents: amt,
-                status: "succeeded",
-              });
-              if (amt > 0) {
-                booking.totalRefundedCents = Math.max(0, Math.floor(Number(booking.totalRefundedCents) || 0) + amt);
-              }
+            if (already == false && (rid || rAmt > 0)) {
+              booking.refundEvents.push({ at: new Date(), by: "stripe_webhook", event: "refund_succeeded", stripeRefundId: rid, amountCents: rAmt, status: "succeeded" });
+              if (rAmt > 0) booking.totalRefundedCents = Math.max(0, Math.floor(Number(booking.totalRefundedCents) || 0) + rAmt);
             }
 
-            const totalCents = Number(
-              (((booking.feeBreakdown && booking.feeBreakdown.totalCents) != null) ? booking.feeBreakdown.totalCents :
-              (((booking.pricingSnapshot && booking.pricingSnapshot.totalCents) != null) ? booking.pricingSnapshot.totalCents : 0))
-            ) || 0;
+            const totalCents = Number((((booking.feeBreakdown && booking.feeBreakdown.totalCents) != null) ? booking.feeBreakdown.totalCents : (((booking.pricingSnapshot && booking.pricingSnapshot.totalCents) != null) ? booking.pricingSnapshot.totalCents : 0))) || 0;
 
             if (totalCents > 0 && Number(booking.totalRefundedCents) >= Number(totalCents)) {
               booking.refundDecision.status = "refunded";
@@ -1411,12 +1379,13 @@ app.post(
               booking.partialRefundCents = Math.max(0, Math.floor(Number(booking.totalRefundedCents) || 0));
             }
           } catch (_) {
-            // Fallback: record success without forcing terminal transition.
             booking.refundDecision.status = "refund_succeeded";
           }
         } else if (refundStatus === "failed" || refundStatus === "canceled" || refundStatus === "cancelled") {
-          booking.refundDecision.status = "refund_failed";
+          const msg = String(refund.failure_reason || refundStatus || "refund_failed");
+          await __markRefundFailed(BookingModel, booking, "refund_failed", msg, refundId, refundStatus);
         }
+
         await booking.save();
       }
 
@@ -1431,15 +1400,11 @@ app.post(
 
         if (!booking.refundDecision || typeof booking.refundDecision !== "object") booking.refundDecision = {};
         booking.refundDecision.stripeRefundStatus = "succeeded";
-        // L3_PARTIAL_REFUND_SAFE_CHARGE_REFUNDED_V1
-        // charge.refunded can fire for partial refunds; only transition to refunded if fully refunded.
+
         try {
           if (!Number.isFinite(Number(booking.totalRefundedCents))) booking.totalRefundedCents = 0;
 
-          const totalCents = Number(
-            (((booking.feeBreakdown && booking.feeBreakdown.totalCents) != null) ? booking.feeBreakdown.totalCents :
-            (((booking.pricingSnapshot && booking.pricingSnapshot.totalCents) != null) ? booking.pricingSnapshot.totalCents : 0))
-          ) || 0;
+          const totalCents = Number((((booking.feeBreakdown && booking.feeBreakdown.totalCents) != null) ? booking.feeBreakdown.totalCents : (((booking.pricingSnapshot && booking.pricingSnapshot.totalCents) != null) ? booking.pricingSnapshot.totalCents : 0))) || 0;
 
           if (totalCents > 0 && Number(booking.totalRefundedCents) >= Number(totalCents)) {
             booking.refundDecision.status = "refunded";
@@ -1455,31 +1420,114 @@ app.post(
         await booking.save();
       }
 
-      // Mark processed only after successful handling
-      try {
-        await mongoose.connection
-          .collection("stripe_webhook_events")
-          .updateOne(
-            { eventId },
-            { $set: { processedAt: new Date(), processingAt: null, error: "" } }
-          );
-      } catch (_) {}
+      // L4-8/L4-9/L4-10: dispute ingestion + lifecycle + admin alert
+      const __upsertDispute = async (BookingModel, dispute, eventType) => {
+        const d = dispute || {};
+        const disputeId = String(d.id || "");
+        const chargeId = String(d.charge || "");
+        const status = String(d.status || "");
+        const reason = String(d.reason || "");
+        const cur = d.currency ? String(d.currency).toLowerCase() : "";
+        const amt = Number.isFinite(Number(d.amount)) ? Number(d.amount) : null;
+        const livemode = Boolean(d.livemode);
 
+        let pi = String(d.payment_intent || "");
+        if (!pi && chargeId) {
+          try {
+            const ch = await stripe.charges.retrieve(String(chargeId), { expand: ["payment_intent"] });
+            if (ch && ch.payment_intent) pi = String((ch.payment_intent && (ch.payment_intent.id || ch.payment_intent)) || "");
+          } catch (_) {}
+        }
+
+        if (!pi) return null;
+
+        const booking = await BookingModel.findOne({ stripePaymentIntentId: pi });
+        if (!booking) return null;
+
+        if (!booking.dispute || typeof booking.dispute !== "object") booking.dispute = {};
+        if (!Array.isArray(booking.disputeEvents)) booking.disputeEvents = [];
+
+        booking.dispute.stripeDisputeId = disputeId || booking.dispute.stripeDisputeId || "";
+        booking.dispute.stripeChargeId = chargeId || booking.dispute.stripeChargeId || "";
+        booking.dispute.status = status || booking.dispute.status || "";
+        booking.dispute.reason = reason || booking.dispute.reason || "";
+        if (amt !== null) booking.dispute.amountCents = amt;
+        if (cur) booking.dispute.currency = cur;
+        booking.dispute.livemode = livemode;
+        booking.dispute.lastEventType = String(eventType || "");
+        booking.dispute.updatedAt = new Date();
+
+        const active = (status && status !== "won" && status !== "lost" && status !== "closed");
+        booking.dispute.active = Boolean(active);
+
+        try {
+          if (Number.isFinite(Number(d.created))) booking.dispute.createdAt = new Date(Number(d.created) * 1000);
+        } catch (_) {}
+
+        try {
+          const due = (d.evidence_details && Number.isFinite(Number(d.evidence_details.due_by))) ? Number(d.evidence_details.due_by) : null;
+          if (due !== null) booking.dispute.evidenceDueBy = new Date(due * 1000);
+        } catch (_) {}
+
+        booking.disputeEvents.push({
+          at: new Date(),
+          by: "stripe_webhook",
+          event: String(eventType || ""),
+          stripeDisputeId: disputeId,
+          stripeChargeId: chargeId,
+          status: status,
+          reason: reason,
+          amountCents: (amt !== null ? amt : 0),
+          currency: cur,
+        });
+
+        await booking.save();
+
+        try {
+          const vars = {
+            DASHBOARD_URL: __dashboardUrl(),
+            BOOKING_ID: String(booking._id || ""),
+            STRIPE_PI: String(booking.stripePaymentIntentId || ""),
+            DISPUTE_ID: disputeId,
+            CHARGE_ID: chargeId,
+            STATUS: status,
+            REASON: reason,
+            AMOUNT_CENTS: (amt === null ? "" : String(amt)),
+            CURRENCY: cur,
+            EVENT_TYPE: String(eventType || ""),
+          };
+
+          const key = (eventType === "charge.dispute.created") ? "comms.disputeCreatedAdminAlertSentAt" :
+                      (eventType === "charge.dispute.closed") ? "comms.disputeClosedAdminAlertSentAt" :
+                      "comms.disputeUpdatedAdminAlertSentAt";
+
+          await __alertAdminOnce(BookingModel, booking._id, key, "DISPUTE_ADMIN_ALERT", "PAYMENTS", vars)
+        } catch (_) {}
+
+        return booking;
+      };
+
+      if (event.type === "charge.dispute.created" || event.type === "charge.dispute.updated" || event.type === "charge.dispute.closed") {
+        const dispute = (event && event.data && event.data.object) ? event.data.object : {};
+        try {
+          const BookingModel = mongoose.model("Booking");
+          await __upsertDispute(BookingModel, dispute, String(event.type || ""));
+        } catch (_) {}
+      }
+
+      try { await evCol.updateOne({ eventId }, { $set: { processedAt: new Date(), processingAt: null, error: "" } }); } catch (_) {}
       return res.json({ received: true });
     } catch (e) {
       try {
         if (mongoose && mongoose.connection && mongoose.connection.readyState === 1) {
           const evCol2 = mongoose.connection.db.collection("stripe_webhook_events");
           if (typeof eventId === "string" && eventId.length > 0) {
-            await evCol2.updateOne(
-              { eventId },
-              { $set: { error: String((e && e.message) ? e.message : "webhook_error"), processingAt: null } }
-            );
+            await evCol2.updateOne({ eventId }, { $set: { error: String((e && e.message) ? e.message : "webhook_error"), processingAt: null } });
           }
         }
       } catch (_) {}
-      __log("error", "stripe_webhook_error", { rid: __ridFromReq(req), path: (req && req.originalUrl) ? req.originalUrl : undefined });
-        return res.status(500).send("Webhook handler error");
+      __log("error", "stripe_webhook_error", { rid: __ridFromReq(req), path: (req && req.originalUrl) ? String(req.originalUrl) : undefined });
+      return res.status(500).send("Webhook handler error");
     }
   }
 );
