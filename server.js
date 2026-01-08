@@ -6732,6 +6732,86 @@ app.get("/version", (req, res) => {
 
 
 // INTERNAL_JOBS_ENDPOINT_TSTS (Batch6 D1)
+
+// ==========================
+// L5_JOB_INFRA_V1 (LOCKED)
+// ==========================
+async function withJobRun(db, jobName, fn, opts) {
+  const runId = "job_" + Date.now() + "_" + Math.random().toString(36).slice(2);
+  const now = new Date();
+
+  const o = opts || {};
+  const ttlMs = Number.isFinite(o.lockTtlMs) ? o.lockTtlMs : (15 * 60 * 1000);
+  const expiresAt = new Date(now.getTime() + ttlMs);
+
+  const locks = db.collection("job_locks");
+  const runs  = db.collection("job_runs");
+  const dlq   = db.collection("job_dlq");
+
+  const lock = await locks.findOneAndUpdate(
+    {
+      _id: jobName,
+      $or: [
+        { locked: { $ne: true } },
+        { expiresAt: { $lte: now } }
+      ]
+    },
+    {
+      $set: {
+        locked: true,
+        at: now,
+        runId: runId,
+        expiresAt: expiresAt
+      }
+    },
+    { upsert: true, returnDocument: "after" }
+  );
+
+  if (!lock.value || lock.value.runId !== runId) {
+    throw new Error("JOB_LOCKED");
+  }
+
+  await runs.insertOne({
+    runId: runId,
+    jobName: jobName,
+    startedAt: now,
+    status: "running"
+  });
+
+  try {
+    await fn(runId);
+    await runs.updateOne(
+      { runId: runId },
+      { $set: { status: "completed", finishedAt: new Date() } }
+    );
+  } catch (err) {
+    const errStr = (err && err.stack) ? String(err.stack) : String(err);
+    await runs.updateOne(
+      { runId: runId },
+      { $set: { status: "failed", finishedAt: new Date(), error: errStr } }
+    );
+    await dlq.insertOne({
+      runId: runId,
+      jobName: jobName,
+      error: errStr,
+      at: new Date()
+    });
+    try { __log("error", "job_failed", { jobName, runId }); } catch (_) {}
+    throw err;
+  } finally {
+    await locks.updateOne(
+      { _id: jobName, runId: runId },
+      {
+        $set: { locked: false, releasedAt: new Date() },
+        $unset: { runId: "", expiresAt: "" }
+      }
+    );
+  }
+}
+// ==========================
+// END L5_JOB_INFRA_V1
+// ==========================
+
 // Trigger idempotent job runs via scheduler (Render Cron / trusted caller).
 // Security: requires env INTERNAL_JOBS_TOKEN and header X-Internal-Token to match.
 // Note: This endpoint runs functions that are already safe/idempotent by design.
