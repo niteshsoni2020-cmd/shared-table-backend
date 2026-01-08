@@ -2316,6 +2316,20 @@ const Bookmark = mongoose.model(
 );
 
 const User = mongoose.model("User", userSchema);
+
+// === L7_SOCIAL_AUDIT_V1 (append-only) ===
+const socialAuditSchema = new mongoose.Schema({
+  actorId: String,
+  targetType: String,
+  targetId: String,
+  action: String,
+  meta: Object,
+  createdAt: { type: Date, default: Date.now }
+}, { versionKey: false });
+socialAuditSchema.index({ createdAt: -1 });
+const SocialAudit = mongoose.models.SocialAudit || mongoose.model("SocialAudit", socialAuditSchema);
+// === END L7_SOCIAL_AUDIT_V1 ===
+
 const Experience = mongoose.model("Experience", experienceSchema);
 
 
@@ -2357,6 +2371,24 @@ async function canSeeExperiencePrivate(req, exp) {
 
 const Booking = mongoose.model("Booking", bookingSchema);
 const Review = mongoose.model("Review", reviewSchema);
+
+// === L7_SOCIAL_GUARD_V1 ===
+async function socialGuard(req, res, next) {
+  const me = req.user && (req.user._id || req.user.id);
+  const target =
+    (req.params && (req.params.userId || req.params.id)) ||
+    (req.body && req.body.userId);
+  if (!me) return res.status(401).end();
+
+  const UserModel = mongoose.model("User");
+  const u = await UserModel.findById(me).select("blockedUserIds").lean();
+  if (u && Array.isArray(u.blockedUserIds) && target && u.blockedUserIds.map(String).includes(String(target))) {
+    return res.status(403).json({ message: "Blocked" });
+  }
+  next();
+}
+// === END L7_SOCIAL_GUARD_V1 ===
+
 const ExperienceLike = mongoose.model("ExperienceLike", experienceLikeSchema);
 const ExperienceComment = mongoose.model("ExperienceComment", experienceCommentSchema);
 
@@ -5607,6 +5639,15 @@ app.post("/api/bookings/:id/cancel", authMiddleware, async (req, res) => {
 
 // Reviews
 app.post("/api/reviews", authMiddleware, reviewLimiter, async (req, res) => {
+  // L7-7: review only after completion
+  if (bookingId) {
+    const BookingModel = mongoose.model("Booking");
+    const b = await BookingModel.findById(bookingId).select("status").lean();
+    if (!b || String(b.status).toLowerCase() != "completed") {
+      return res.status(400).json({ message: "Review allowed only after completion." });
+    }
+  }
+
   const body = req.body || {};
   if (__isPlainObject(body) === false) return res.status(400).json({ message: "Invalid payload" });
   if (Object.prototype.hasOwnProperty.call(body, "__proto__") || Object.prototype.hasOwnProperty.call(body, "constructor") || Object.prototype.hasOwnProperty.call(body, "prototype")) {
@@ -5861,7 +5902,7 @@ app.put("/api/bookings/:id/visibility", authMiddleware, async (req, res) => {
 });
 
 // Social: connect
-app.post("/api/social/connect", authMiddleware, connectLimiter, async (req, res) => {
+app.post("/api/social/connect", authMiddleware, socialGuard, connectLimiter, async (req, res) => {
   try {
     const __toStr = (v) => String(v || "").trim();
 
@@ -5912,7 +5953,7 @@ app.post("/api/social/connect", authMiddleware, connectLimiter, async (req, res)
 });
 
 // Social: incoming requests
-app.get("/api/social/requests", authMiddleware, async (req, res) => {
+app.get("/api/social/requests", authMiddleware, socialGuard, async (req, res) => {
   try {
     const reqs = await Connection.find({ addresseeId: req.user._id, status: "pending" }).sort({ createdAt: -1 });
     const out = [];
@@ -5924,7 +5965,7 @@ app.get("/api/social/requests", authMiddleware, async (req, res) => {
 });
 
 // Social: accept / reject / block
-app.post("/api/social/requests/:id/accept", authMiddleware, async (req, res) => {
+app.post("/api/social/requests/:id/accept", authMiddleware, socialGuard, async (req, res) => {
   try {
     const connId = __cleanId(req.params.id, 64);
     if (!connId) return res.status(400).json({ message: "Invalid requestId" });
@@ -5942,7 +5983,7 @@ app.post("/api/social/requests/:id/accept", authMiddleware, async (req, res) => 
   }
 });
 
-app.post("/api/social/requests/:id/reject", authMiddleware, async (req, res) => {
+app.post("/api/social/requests/:id/reject", authMiddleware, socialGuard, async (req, res) => {
   try {
     const connId = __cleanId(req.params.id, 64);
     if (!connId) return res.status(400).json({ message: "Invalid requestId" });
@@ -5960,13 +6001,13 @@ app.post("/api/social/requests/:id/reject", authMiddleware, async (req, res) => 
   }
 });
 
-app.post("/api/social/requests/:id/block", authMiddleware, async (req, res) => {
+app.post("/api/social/requests/:id/block", authMiddleware, socialGuard, async (req, res) => {
   try {
     const connId = __cleanId(req.params.id, 64);
     if (!connId) return res.status(400).json({ message: "Invalid requestId" });
 
 // SOCIAL_USER_BLOCK_TSTS (Batch6 G1)
-app.post("/api/social/block-user", authMiddleware, connectLimiter, async (req, res) => {
+app.post("/api/social/block-user", authMiddleware, socialGuard, connectLimiter, async (req, res) => {
   try {
     const targetId = String((req.body && req.body.userId) || "").trim();
     if (!targetId) return res.status(400).json({ message: "userId required" });
@@ -6000,7 +6041,7 @@ app.post("/api/social/block-user", authMiddleware, connectLimiter, async (req, r
 });
 
 // Social: list accepted connections
-app.get("/api/social/connections", authMiddleware, async (req, res) => {
+app.get("/api/social/connections", authMiddleware, socialGuard, async (req, res) => {
   try {
     const me = req.user._id;
     const conns = await Connection.find({
@@ -6020,7 +6061,7 @@ app.get("/api/social/connections", authMiddleware, async (req, res) => {
 });
 
 // Social: friends feed (opt-in)
-app.get("/api/social/feed", authMiddleware, async (req, res) => {
+app.get("/api/social/feed", authMiddleware, socialGuard, async (req, res) => {
   try {
     const me = req.user._id;
 
@@ -6075,7 +6116,7 @@ app.get("/api/social/feed", authMiddleware, async (req, res) => {
 });
 
 // ✅ Friend-circle history endpoint (privacy gates)
-app.get("/api/social/user/:userId/visible-bookings", authMiddleware, async (req, res) => {
+app.get("/api/social/user/:userId/visible-bookings", authMiddleware, socialGuard, async (req, res) => {
   try {
     const me = String(req.user._id);
     const other = __cleanId(req.params.userId, 64);
