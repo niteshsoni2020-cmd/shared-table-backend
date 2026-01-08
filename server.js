@@ -3664,7 +3664,7 @@ async function checkCapacity(experienceId, date, timeSlot, newGuests) {
     $or: [{ status: "confirmed" }, { paymentStatus: "paid" }],
   });
 
-  const currentCount = existing.reduce((sum, b) => sum + (Number(b.numGuests) || 0), 0);
+  const currentCount = existing.reduce((sum, b) => sum + (__getBookingGuestCount(b) || 0), 0);
   const incoming = Number(newGuests) || 1;
 
   if ((Number(exp.maxGuests) || 0) > 0 && currentCount + incoming > Number(exp.maxGuests)) {
