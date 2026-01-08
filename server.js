@@ -1896,6 +1896,7 @@ const userSchema = new mongoose.Schema(
     // Social foundation (privacy-preserving)
     handle: { type: String, unique: true, sparse: true }, // exact-match lookup only
     allowHandleSearch: { type: Boolean, default: false }, // opt-in
+    discoverable: { type: Boolean, default: false }, // opt-in discovery
     showExperiencesToFriends: { type: Boolean, default: false }, // opt-in visibility
 
     // Public profile (privacy-first)
@@ -2395,6 +2396,15 @@ async function canSeeExperiencePrivate(req, exp) {
 
 const Booking = mongoose.model("Booking", bookingSchema);
 const Review = mongoose.model("Review", reviewSchema);
+
+// L7_DISCOVERY_GUARD_V1
+function __canDiscoverUser(u) {
+  try {
+    return !!(u && u.discoverable === true);
+  } catch (_) {
+    return false;
+  }
+}
 
 // === L7_SOCIAL_GUARD_V1 ===
 async function socialGuard(req, res, next) {
