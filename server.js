@@ -1786,6 +1786,30 @@ function getMailer() {
   return __mailer;
 }
 
+// L11_EMAIL_IDEMPOTENT_WRAPPER_V1
+async function sendEmailWithInfo_Idempotent(db, args) {
+  try {
+    const crypto = require("crypto");
+    const toKey = String((args && args.to) || "").trim().toLowerCase();
+    const subKey = String((args && args.subject) || "").trim();
+    const htmlKey = String((args && args.html) || "");
+    const textKey = String((args && args.text) || "");
+    const keySrc = JSON.stringify({ to: toKey, subject: subKey, html: htmlKey, text: textKey });
+    const idemKey = crypto.createHash("sha256").update(keySrc).digest("hex");
+    if (db && db.collection) {
+      const emails = db.collection("email_idempotency");
+      const now = new Date();
+      try {
+        await emails.insertOne({ _id: idemKey, at: now, to: toKey, subject: subKey });
+      } catch (e) {
+        const msg = String((e && e.message) || "").toLowerCase();
+        if (msg.includes("duplicate")) return { skipped: true };
+      }
+    }
+  } catch (_) {}
+  return await sendEmailWithInfo(args);
+}
+
 async function sendEmailWithInfo({ to, subject, html, text }) {
   const mailer = getMailer();
   if (!mailer) return { ok: false, providerMessageId: "", error: "mailer_not_configured" };
