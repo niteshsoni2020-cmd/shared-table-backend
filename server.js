@@ -6502,9 +6502,16 @@ function startPaymentReconciliationLoop_V1() {
   if (!__shouldRunJobs()) { __log("info", "jobs_skipped_disabled", { job: "payment_reconciliation_v1", reason: "RUN_JOBS disabled" }); return; }
   if (global.__tsts_payment_recon_started_v1 === true) return;
   global.__tsts_payment_recon_started_v1 = true;
+let __payment_recon_inflight_v1 = false;
   try { __log("info", "job_runner_started", { job: "payment_reconciliation_v1" }); } catch (_) {}
   setTimeout(() => { runPaymentReconciliationOnce_V1().catch(() => {}); }, 30 * 1000);
-  setInterval(() => { runPaymentReconciliationOnce_V1().catch(() => {}); }, 10 * 60 * 1000);
+  setInterval(() => {
+  if (__payment_recon_inflight_v1) return;
+  __payment_recon_inflight_v1 = true;
+  Promise.resolve(runPaymentReconciliationOnce_V1())
+    .catch(() => {})
+    .finally(() => { __payment_recon_inflight_v1 = false; });
+}, 10 * 60 * 1000);
 }
 
 // Expires unpaid bookings and releases reserved capacity (idempotent + race-safe).
