@@ -2406,6 +2406,22 @@ function __canDiscoverUser(u) {
   }
 }
 
+// L7_BLOCK_PAIR_GUARD_V1
+function __isBlockedPair(meDoc, targetDoc, meId, targetId) {
+  try {
+    const A = String(meId || "");
+    const B = String(targetId || "");
+    if (!A || !B) return true;
+    const a = (meDoc && Array.isArray(meDoc.blockedUserIds)) ? meDoc.blockedUserIds.map(String) : [];
+    const b = (targetDoc && Array.isArray(targetDoc.blockedUserIds)) ? targetDoc.blockedUserIds.map(String) : [];
+    if (a.includes(B)) return true;
+    if (b.includes(A)) return true;
+    return false;
+  } catch (_e) {
+    return true;
+  }
+}
+
 // === L7_SOCIAL_GUARD_V1 ===
 async function socialGuard(req, res, next) {
   const me = req.user && (req.user._id || req.user.id);
@@ -2414,12 +2430,20 @@ async function socialGuard(req, res, next) {
     (req.body && req.body.userId);
   if (!me) return res.status(401).end();
 
+  if (!target) return next();
+
   const UserModel = mongoose.model("User");
-  const u = await UserModel.findById(me).select("blockedUserIds").lean();
-  if (u && Array.isArray(u.blockedUserIds) && target && u.blockedUserIds.map(String).includes(String(target))) {
+  try {
+    const meDoc = await UserModel.findById(me).select("blockedUserIds").lean();
+    const targetDoc = await UserModel.findById(target).select("blockedUserIds").lean();
+    if (__isBlockedPair(meDoc, targetDoc, me, target) === true) {
+      return res.status(403).json({ message: "Blocked" });
+    }
+  } catch (_e) {
     return res.status(403).json({ message: "Blocked" });
   }
-  next();
+
+  return next();
 }
 // === END L7_SOCIAL_GUARD_V1 ===
 
