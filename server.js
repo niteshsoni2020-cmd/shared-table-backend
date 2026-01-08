@@ -4733,6 +4733,23 @@ app.post("/api/experiences/:id/book", authMiddleware, bookingCreateLimiter, asyn
     return res.status(403).json({ message: "Hosts cannot book their own experience." });
   }
 
+  // L7_SOCIAL_BOOKING_GUARD_V1: blocked users cannot transact (guest<->host) via booking route
+  try {
+    const u = await UserModel.findById(meId).select("blockedUserIds").lean();
+    const blocked = (u && Array.isArray(u.blockedUserIds)) ? u.blockedUserIds.map(String) : [];
+    if (meId && hostId && blocked.includes(String(hostId))) {
+      return res.status(403).json({ message: "Blocked" });
+    }
+  } catch (_) {}
+
+  try {
+    const h = await UserModel.findById(hostId).select("blockedUserIds").lean();
+    const hBlocked = (h && Array.isArray(h.blockedUserIds)) ? h.blockedUserIds.map(String) : [];
+    if (meId && hostId && hBlocked.includes(String(meId))) {
+      return res.status(403).json({ message: "Blocked" });
+    }
+  } catch (_) {}
+
   const { numGuests, isPrivate, bookingDate, timeSlot, guestNotes, promoCode } = req.body || {};
   let guests = Number.parseInt(numGuests, 10) || 1;
 
