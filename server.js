@@ -6462,58 +6462,49 @@ app.get("/api/users/:userId/profile", async (req, res) => {
   try {
     const userIdParam = __cleanId(req.params.userId, 64);
     if (!userIdParam) return res.status(400).json({ message: "Invalid userId" });
+
+    const meId = req.user && (req.user._id || req.user.id);
+    const isAdmin = !!(req.user && req.user.isAdmin);
+    const isSelf = !!(meId && String(meId) == String(userIdParam));
+
     const user = await User.findById(userIdParam)
-      .select("name profilePic bio handle publicProfile createdAt")
+      .select("name profilePic bio handle publicProfile createdAt discoverable blockedUserIds")
       .lean();
 
-    if (!user) return res.status(404).json({ message: "User not found." });
+    if (!user) return res.status(404).json({ message: "User not found" });
 
-    const isHostProfile = await isHost(user._id);
+    if (!isSelf && !isAdmin) {
+      if (__canDiscoverUser(user) !== true) {
+        return res.status(404).json({ message: "User not found" });
+      }
 
-    // Guests must opt-in; hosts are always viewable (trust model)
-    if (!isHostProfile && !user.publicProfile) {
-      return res.status(403).json({ message: "Profile is private." });
-    }
-
-    let experiences = [];
-    let reviews = [];
-    let hostRating = 0;
-    let hostReviewCount = 0;
-
-    if (isHostProfile) {
-      experiences = await Experience.find({
-        hostId: String(user._id),
-        isPaused: false,
-        isDeleted: false
-      }).sort({ averageRating: -1, createdAt: -1 });
-
-      const expIds = experiences.map(e => String(e._id));
-
-      reviews = await Review.find({
-        experienceId: { $in: expIds },
-        type: "guest_to_host"
-      }).sort({ date: -1 }).limit(10);
-
-      hostReviewCount = reviews.length;
-
-      const rated = experiences.filter(e => Number(e.averageRating) > 0);
-      if (rated.length > 0) {
-        hostRating = rated.reduce((s, e) => s + Number(e.averageRating || 0), 0) / rated.length;
+      if (meId) {
+        try {
+          const meDoc = await User.findById(meId).select("blockedUserIds").lean();
+          if (__isBlockedPair(meDoc, user, meId, userIdParam) === true) {
+            return res.status(404).json({ message: "User not found" });
+          }
+        } catch (_e) {
+          return res.status(404).json({ message: "User not found" });
+        }
       }
     }
 
-    return res.json({
-      user: publicUserCardFromDoc(user),
-      isHost: isHostProfile,
-      experiences: (experiences || []).map(e => stripExperiencePrivateFields((e && typeof e.toObject === "function") ? e.toObject() : e)),
-      reviews,
-      hostStats: { rating: hostRating, reviewCount: hostReviewCount }
-    });
+    const out = {
+      name: user.name,
+      profilePic: user.profilePic,
+      bio: user.bio,
+      handle: user.handle,
+      publicProfile: user.publicProfile,
+      createdAt: user.createdAt
+    };
 
+    return res.json(out);
   } catch (err) {
-    return res.status(500).json({ message: "Server error fetching profile." });
+    return res.status(500).json({ message: "Error fetching profile", error: err && err.message ? err.message : String(err) });
   }
 });
+
 
 // UNPAID_BOOKING_EXPIRY_CLEANUP_V1
 
