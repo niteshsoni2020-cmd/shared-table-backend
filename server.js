@@ -758,6 +758,16 @@ app.get("/", (req, res) => {
   res.status(200).json({ service: "shared-table-api", status: "ok" });
 });
 
+// L11_CORE_ROUTES_EARLY_V1
+// Define core status routes before 404 middleware so they are never intercepted.
+app.get("/version", (req, res) => {
+  const sha = String(process.env.RENDER_GIT_COMMIT || process.env.GIT_SHA || process.env.SHA || process.env.COMMIT_SHA || "unknown");
+  const rid = String((req && req.requestId) ? req.requestId : "");
+  return res.status(200).json({ service: "shared-table-api", sha: sha, rid: rid });
+});
+app.get("/health", (req, res) => res.status(200).json({ ok: true, dbReady: __dbReady }));
+app.get("/ready", (req, res) => (__dbReady ? res.status(200).json({ ok: true }) : res.status(503).json({ ok: false })));
+
 // Rate limiting (basic abuse protection)
 const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
