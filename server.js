@@ -1109,8 +1109,10 @@ app.post(
       });
     } catch (e) {
       return res.status(500).json({
+        ok: false,
+        error: "admin_refund_partial_failed",
+        code: "ADMIN_REFUND_PARTIAL_FAILED",
         message: "Admin refund-partial failed",
-        error: String((e && e.message) ? e.message : e),
       });
     }
   }
@@ -1434,7 +1436,10 @@ mongoose.connection == null || mongoose.connection.readyState !== 1) {
 
             if (totalCents > 0 && Number(booking.totalRefundedCents) >= Number(totalCents)) {
               booking.refundDecision.status = "refunded";
+              if (booking.status !== "refunded") {
+              await __releaseCapacityOnceAtomic(booking, "stripe_refund");
               await transitionBooking(booking, "refunded");
+            }
             } else {
               booking.refundDecision.status = "partially_refunded";
               booking.partialRefund = true;
@@ -1470,7 +1475,10 @@ mongoose.connection == null || mongoose.connection.readyState !== 1) {
 
           if (totalCents > 0 && Number(booking.totalRefundedCents) >= Number(totalCents)) {
             booking.refundDecision.status = "refunded";
-            await transitionBooking(booking, "refunded");
+            if (booking.status !== "refunded") {
+              await __releaseCapacityOnceAtomic(booking, "stripe_refund");
+              await transitionBooking(booking, "refunded");
+            }
           } else {
             booking.refundDecision.status = "partially_refunded";
             booking.partialRefund = true;
@@ -1673,7 +1681,7 @@ app.use((req, res, next) => {
     const wantsJson = (accept.toLowerCase().indexOf("application/json") >= 0);
     const isApi = (p.indexOf("/api") == 0);
     if (wantsJson || isApi) {
-      return res.status(404).json({ ok: false, error: "NOT_FOUND", message: "Not found" });
+      return res.status(404).json({ ok: false, error: "NOT_FOUND", code: "NOT_FOUND", message: "Not found" });
     }
   } catch (_) {}
   return res.status(404).send("Not found");
@@ -4739,6 +4747,9 @@ app.get("/api/experiences", async (req, res) => {
   if (sort === "price_asc") sortObj.price = 1;
   if (sort === "rating_desc") sortObj.averageRating = -1;
 
+  query.isDeleted = false;
+  query.isPaused = false;
+
   const exps = await Experience.find(query).sort(sortObj);
   const safe = (exps || []).map(e => stripExperiencePrivateFields((e.toObject ? e.toObject() : e)));
   res.json(safe);
@@ -4751,6 +4762,8 @@ app.get("/api/experiences/:id", async (req, res) => {
     if (!expId || !/^[a-fA-F0-9]{24}$/.test(expId)) return res.status(400).json({ message: "Invalid experienceId" });
     const exp = await Experience.findById(expId);
     if (!exp) return res.status(404).json({ message: "Not found" });
+    if (exp.isDeleted) return res.status(404).json({ message: "Not found" });
+    if (exp.isPaused) return res.status(404).json({ message: "Not found" });
     const safe = stripExperiencePrivateFields((exp.toObject ? exp.toObject() : exp));
     return res.json(safe);
   } catch {
@@ -4776,7 +4789,7 @@ app.get("/api/experiences/:id/similar", async (req, res) => {
       .select("title price images imageUrl city averageRating");
 
     if (similar.length === 0) {
-      const fallback = await Experience.find({ _id: { $ne: currentExp._id }, isPaused: false })
+      const fallback = await Experience.find({ _id: { $ne: currentExp._id }, isPaused: false, isDeleted: false })
         .sort({ averageRating: -1 })
         .limit(3)
         .select("title price images imageUrl city averageRating");
@@ -4802,13 +4815,15 @@ app.get("/api/experiences/:id/attendees", authMiddleware, async (req, res) => {
     const bookings = await Booking.find({
       experienceId: expId,
       $or: [{ status: "confirmed" }, { paymentStatus: "paid" }],
-    }).populate("guestId", "name profilePic bio handle publicProfile");
+    }).populate("guestId", "name profilePic bio handle publicProfile isDeleted accountStatus");
 
     const seen = new Set();
     const publicGuests = [];
     for (const b of bookings) {
       if (!b.guestId) continue;
       const u = b.guestId;
+      if (u.isDeleted === true) continue;
+      if (String(u.accountStatus || "") !== "active") continue;
       if (!u.publicProfile) continue;
       const uid = String(u._id);
       if (seen.has(uid)) continue;
@@ -5453,7 +5468,7 @@ app.post("/api/bookings/verify", bookingVerifyLimiter, async (req, res) => {
       // Legacy sessions may not carry client_reference_id/metadata.bookingId.
       // Safe fallback: allow only if booking already stores the same Stripe session id.
       if (!(metaMissing && sessionOk)) {
-        return res.status(400).json({ status: "mismatch", error: "session does not match booking" });
+        return res.status(400).json({ ok: false, error: "booking_session_mismatch", code: "BOOKING_SESSION_MISMATCH", message: "Session does not match booking" });
       }
     }
 
@@ -5466,7 +5481,7 @@ app.post("/api/bookings/verify", bookingVerifyLimiter, async (req, res) => {
       : (booking.pricing && Number.isFinite(booking.pricing.totalCents)) ? Number(booking.pricing.totalCents)
       : null;
 
-    if (expectedCents !== null && amountTotal !== null && amountTotal !== expectedCents) return res.status(400).json({ status: "mismatch", error: "amount mismatch" });
+    if (expectedCents !== null && amountTotal !== null && amountTotal !== expectedCents) return res.status(400).json({ ok: false, error: "booking_amount_mismatch", code: "BOOKING_AMOUNT_MISMATCH", message: "Amount mismatch" });
 
     const stripeStatus = String(session.payment_status || "unknown");
     // PAYMENT_ATTEMPT_POLICY_V1
@@ -5763,6 +5778,65 @@ app.post("/api/bookings/:id/cancel", authMiddleware, async (req, res) => {
 });
 
 // Reviews
+app.get("/api/reviews", async (req, res) => {
+  try {
+    const hostId = String(req.query.hostId || "").trim();
+    const experienceId = String(req.query.experienceId || "").trim();
+    const excludeExperienceId = String(req.query.excludeExperienceId || "").trim();
+    const ratingRaw = String(req.query.rating || "").trim();
+    const sort = String(req.query.sort || "top").trim().toLowerCase();
+    const limitRaw = String(req.query.limit || "5").trim();
+    const pageRaw = String(req.query.page || "1").trim();
+
+    if (!hostId && !experienceId) {
+      return res.status(400).json({ ok: false, error: "MISSING_FILTER", message: "hostId or experienceId required" });
+    }
+
+    const limit = Math.max(1, Math.min(50, parseInt(limitRaw, 10) || 5));
+    const page = Math.max(1, parseInt(pageRaw, 10) || 1);
+    const skip = (page - 1) * limit;
+
+    const q = { type: "guest_to_host" };
+    if (hostId) q.hostId = hostId;
+    if (experienceId) q.experienceId = experienceId;
+    if (excludeExperienceId && !experienceId) {
+      q.experienceId = { $ne: excludeExperienceId };
+    }
+
+    if (ratingRaw) {
+      const r = parseInt(ratingRaw, 10);
+      if (r >= 1 && r <= 5) q.rating = r;
+    }
+
+    const sortObj = (sort === "recent") ? { date: -1, createdAt: -1 } : { rating: -1, date: -1, createdAt: -1 };
+
+    const reviewsRaw = await Review.find(q).sort(sortObj).skip(skip).limit(limit).lean();
+
+    const authorIds = [];
+    for (const r of reviewsRaw) {
+      if (r && r.authorId) authorIds.push(r.authorId);
+    }
+
+    let okSet = null;
+    if (authorIds.length > 0) {
+      const okUsers = await User.find({ _id: { $in: authorIds }, isDeleted: { $ne: true }, accountStatus: "active" }).select("_id").lean();
+      okSet = new Set((okUsers || []).map(u => String(u._id)));
+    }
+
+    const reviews = [];
+    for (const r of reviewsRaw) {
+      if (!r) continue;
+      if (okSet && r.authorId && okSet.has(String(r.authorId)) === false) continue;
+      reviews.push(r);
+    }
+
+    return res.json({ ok: true, page: page, limit: limit, count: reviews.length, reviews: reviews });
+  } catch (e) {
+    console.error("GET /api/reviews failed:", e);
+    return res.status(500).json({ ok: false, error: "REVIEWS_FETCH_FAILED" });
+  }
+});
+
 app.post("/api/reviews", authMiddleware, reviewLimiter, async (req, res) => {
   // L7-7: review only after completion
   if (bookingId) {
@@ -5813,8 +5887,29 @@ app.post("/api/reviews", authMiddleware, reviewLimiter, async (req, res) => {
 app.get("/api/experiences/:id/reviews", async (req, res) => {
   const expId = __cleanId(req.params.id, 64);
   if (!expId || !/^[a-fA-F0-9]{24}$/.test(expId)) return res.status(400).json({ message: "Invalid experienceId" });
-  const reviews = await Review.find({ experienceId: expId, type: "guest_to_host" }).sort({ date: -1 });
-  res.json(reviews);
+  const reviews = await Review.find({ experienceId: expId, type: "guest_to_host" }).sort({ date: -1 }).lean();
+
+  const authorIds = Array.from(new Set((reviews || []).map((r) => String((r && r.authorId) || "")).filter(Boolean)));
+  let allowed = new Set();
+  if (authorIds.length > 0) {
+    const okUsers = await User.find({ _id: { $in: authorIds }, isDeleted: { $ne: true }, accountStatus: "active" }).select("_id").lean();
+    allowed = new Set((okUsers || []).map((u) => String(u._id)));
+  }
+
+  const out = (reviews || []).map((r) => {
+    const a = String((r && r.authorId) || "");
+    if (!a || !allowed.has(a)) {
+      const rr = (r && typeof r === "object") ? { ...r } : r;
+      if (rr && typeof rr === "object") {
+        rr.authorId = "";
+        rr.authorName = "Deleted user";
+      }
+      return rr;
+    }
+    return r;
+  });
+
+  return res.json(out);
 });
 
 // --- Likes --- (toggle + count)
@@ -5948,7 +6043,7 @@ app.get("/api/experiences/:id/comments", authMiddleware, async (req, res) => {
     const comments = await ExperienceComment.find({ experienceId: expId })
       .sort({ createdAt: -1 })
       .limit(50)
-      .populate("authorId", "name profilePic bio handle publicProfile");
+      .populate("authorId", "name profilePic bio handle publicProfile isDeleted accountStatus");
 
     const out = comments.map((c) => {
       const u = c.authorId;
@@ -5958,14 +6053,16 @@ app.get("/api/experiences/:id/comments", authMiddleware, async (req, res) => {
         text: c.text,
         createdAt: c.createdAt,
         author: u
-          ? {
-              _id: u._id,
-              name: String(u.name || ""),
-              profilePic: u.publicProfile ? String(u.profilePic || "") : "",
-              bio: u.publicProfile ? String(u.bio || "") : "",
-              handle: String(u.handle || ""),
-              publicProfile: !!u.publicProfile,
-            }
+          ? ((u.isDeleted === true || String(u.accountStatus || "") !== "active")
+              ? null
+              : {
+                  _id: u._id,
+                  name: String(u.name || ""),
+                  profilePic: u.publicProfile ? String(u.profilePic || "") : "",
+                  bio: u.publicProfile ? String(u.bio || "") : "",
+                  handle: String(u.handle || ""),
+                  publicProfile: !!u.publicProfile,
+                })
           : null,
       };
     });
@@ -5993,7 +6090,7 @@ app.post("/api/bookmarks/:experienceId", authMiddleware, async (req, res) => {
 
 app.get("/api/my/bookmarks/details", authMiddleware, async (req, res) => {
   const bms = await Bookmark.find({ userId: req.user._id });
-  const exps = await Experience.find({ _id: { $in: bms.map((b) => b.experienceId) } });
+  const exps = await Experience.find({ _id: { $in: bms.map((b) => b.experienceId) }, isDeleted: false, isPaused: false });
   res.json(exps);
 });
 
@@ -6220,7 +6317,7 @@ app.get("/api/social/feed", authMiddleware, socialGuard, async (req, res) => {
     const friendIds = conns.map((c) => (String(c.requesterId) === String(me) ? c.addresseeId : c.requesterId));
     if (friendIds.length === 0) return res.json([]);
 
-    const allowedUsers = await User.find({ _id: { $in: friendIds }, showExperiencesToFriends: true }).select("_id");
+    const allowedUsers = await User.find({ _id: { $in: friendIds }, showExperiencesToFriends: true, isDeleted: { $ne: true }, accountStatus: "active" }).select("_id");
     const allowedFriendIds = allowedUsers.map((u) => u._id);
     if (allowedFriendIds.length === 0) return res.json([]);
 
@@ -6462,9 +6559,9 @@ app.get("/api/admin/bookings", adminMiddleware, async (req, res) => {
 
 // Recommendations
 app.get("/api/recommendations", authMiddleware, async (req, res) => {
-  const exps = await Experience.find({ isPaused: false }).sort({ averageRating: -1 }).limit(4);
+  const exps = await Experience.find({ isPaused: false, isDeleted: false }).sort({ averageRating: -1 }).limit(4);
   if (exps.length > 0) return res.json(exps);
-  const fallback = await Experience.find({ isPaused: false }).limit(4);
+  const fallback = await Experience.find({ isPaused: false, isDeleted: false }).limit(4);
   res.json(fallback);
 });
 
@@ -6473,7 +6570,7 @@ app.get("/api/admin/users", adminMiddleware, async (req, res) => {
   try { await __auditAdmin(req, "admin_users_list", {}, { ok: true }); } catch (_) {}
 
   try {
-    const users = await User.find().sort({ createdAt: -1 });
+    const users = await User.find({ isDeleted: { $ne: true } }).sort({ createdAt: -1 });
     return res.json((users || []).map(u => adminSafeUser(u)));
   } catch (err) {
     return res.status(500).json({ message: "Server error" });
@@ -6510,7 +6607,7 @@ app.get("/api/admin/experiences", adminMiddleware, async (req, res) => {
   try { await __auditAdmin(req, "admin_experiences_list", {}, { ok: true }); } catch (_) {}
 
   try {
-    const exps = await Experience.find().sort({ createdAt: -1 });
+    const exps = await Experience.find({ isDeleted: false }).sort({ createdAt: -1 });
     res.json(exps);
   } catch (err) {
     res.status(500).json({ message: "Server error" });
@@ -6576,7 +6673,7 @@ app.get("/api/users/:userId/profile", async (req, res) => {
 
     return res.json(out);
   } catch (err) {
-    return res.status(500).json({ message: "Error fetching profile", error: err && err.message ? err.message : String(err) });
+    return res.status(500).json({ ok: false, error: "profile_fetch_failed", code: "PROFILE_FETCH_FAILED", message: "Error fetching profile" });
   }
 });
 
@@ -6918,13 +7015,13 @@ app.all("/api/internal/jobs/run", async (req, res) => {
   // Guard 1: do not run until DB is ready
   if (typeof __dbReady !== "undefined" && __dbReady !== true) {
     try { __log("error", "internal_jobs_db_not_ready", { rid: undefined, path: "/api/internal/jobs/run" }); } catch (_) {}
-    return res.status(503).json({ ok: false, error: "DB_NOT_READY" });
+    return res.status(503).json({ ok: false, error: "DB_NOT_READY", code: "DB_NOT_READY", message: "Database not ready" });
   }
 
   const expected = String(process.env.INTERNAL_JOBS_TOKEN || "").trim();
   if (expected.length === 0) {
     try { __log("error", "internal_jobs_token_missing", { rid: undefined, path: "/api/internal/jobs/run" }); } catch (_) {}
-    return res.status(503).json({ ok: false, error: "INTERNAL_JOBS_TOKEN_MISSING" });
+    return res.status(503).json({ ok: false, error: "INTERNAL_JOBS_TOKEN_MISSING", code: "INTERNAL_JOBS_TOKEN_MISSING", message: "Internal jobs token missing" });
   }
 
   const got = String(
@@ -6933,14 +7030,14 @@ app.all("/api/internal/jobs/run", async (req, res) => {
 
   if (got.length === 0 || got !== expected) {
     try { __log("error", "internal_jobs_unauthorized", { rid: undefined, path: "/api/internal/jobs/run" }); } catch (_) {}
-    return res.status(401).json({ ok: false, error: "UNAUTHORIZED" });
+    return res.status(401).json({ ok: false, error: "UNAUTHORIZED", code: "UNAUTHORIZED", message: "Unauthorized" });
   }
 
   // Guard 2: prevent overlapping runs in this process (set after auth)
   try {
     if (global && global.__tsts_internal_jobs_running === true) {
       try { __log("error", "internal_jobs_busy", { rid: undefined, path: "/api/internal/jobs/run" }); } catch (_) {}
-      return res.status(409).json({ ok: false, error: "BUSY" });
+      return res.status(409).json({ ok: false, error: "BUSY", code: "BUSY", message: "Busy" });
     }
     if (global) global.__tsts_internal_jobs_running = true;
   } catch (_) {}
