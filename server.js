@@ -1170,7 +1170,7 @@ mongoose.connection == null || mongoose.connection.readyState !== 1) {
 
       const evCol = mongoose.connection.db.collection("stripe_webhook_events");
       try {
-        await evCol.insertOne({
+        const __evDoc = {
           eventId,
           type: String(event.type || ""),
           livemode: Boolean(event.livemode),
@@ -1181,7 +1181,18 @@ mongoose.connection == null || mongoose.connection.readyState !== 1) {
           attempts: 1,
           error: "",
           data: (event && event.data) ? event.data : null,
-        });
+        };
+        const __q = { eventId: eventId };
+        const __u = { $setOnInsert: __evDoc };
+        const __r = await evCol.updateOne(__q, __u, { upsert: true });
+        const __inserted = (
+          (__r && (typeof __r.upsertedCount === "number") && (__r.upsertedCount > 0)) ||
+          (__r && (__r.upsertedId !== undefined) && (__r.upsertedId !== null))
+        );
+        if (!__inserted) {
+          __log("info", "stripe_webhook_dup_event", { rid: __ridFromReq(req), eventId: eventId });
+          return res.json({ received: true });
+        }
 
         try {
           await evCol.updateOne({ eventId }, { $set: { data: (event && event.data) ? event.data : null } });
