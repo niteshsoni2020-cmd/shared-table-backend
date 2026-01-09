@@ -1653,6 +1653,22 @@ app.use((err, req, res, next) => {
   return next(err);
 });
 
+// L11_JSON_404_HANDLER_V1
+// Ensure missing routes return JSON when caller expects JSON (or for /api/*).
+// This allows the res.json shim to inject rid + stable code (NOT_FOUND).
+app.use((req, res, next) => {
+  try {
+    const p = String((req && (req.path || req.originalUrl)) || "");
+    const accept = String((req && req.headers && req.headers["accept"]) || "");
+    const wantsJson = (accept.toLowerCase().indexOf("application/json") >= 0);
+    const isApi = (p.indexOf("/api") == 0);
+    if (wantsJson || isApi) {
+      return res.status(404).json({ ok: false, error: "NOT_FOUND", message: "Not found" });
+    }
+  } catch (_) {}
+  return res.status(404).send("Not found");
+});
+
 // HTTP_ERROR_MIDDLEWARE_TSTS
 app.use((err, req, res, next) => {
   try {
