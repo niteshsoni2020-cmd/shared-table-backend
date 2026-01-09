@@ -7193,16 +7193,19 @@ async function withJobRun(db, jobName, fn, opts) {
 // Note: This endpoint runs functions that are already safe/idempotent by design.
 app.all("/api/internal/jobs/run", async (req, res) => {
 
+  const rid = String((req && (req.requestId || req.rid)) ? (req.requestId || req.rid) : __tstsRidNow());
+  try { if (rid) res.set("X-Request-Id", rid); } catch (_) {}
+
   // Guard 1: do not run until DB is ready
   if (typeof __dbReady !== "undefined" && __dbReady !== true) {
-    try { __log("error", "internal_jobs_db_not_ready", { rid: undefined, path: "/api/internal/jobs/run" }); } catch (_) {}
-    return res.status(503).json({ ok: false, error: "DB_NOT_READY", code: "DB_NOT_READY", message: "Database not ready" });
+    try { __log("error", "internal_jobs_db_not_ready", { rid: rid, path: "/api/internal/jobs/run" }); } catch (_) {}
+    return res.status(503).json({ ok: false, error: "DB_NOT_READY", code: "DB_NOT_READY", message: "Database not ready", rid: rid });
   }
 
   const expected = String(process.env.INTERNAL_JOBS_TOKEN || "").trim();
   if (expected.length === 0) {
-    try { __log("error", "internal_jobs_token_missing", { rid: undefined, path: "/api/internal/jobs/run" }); } catch (_) {}
-    return res.status(503).json({ ok: false, error: "INTERNAL_JOBS_TOKEN_MISSING", code: "INTERNAL_JOBS_TOKEN_MISSING", message: "Internal jobs token missing" });
+    try { __log("error", "internal_jobs_token_missing", { rid: rid, path: "/api/internal/jobs/run" }); } catch (_) {}
+    return res.status(500).json({ ok: false, error: "INTERNAL_JOBS_TOKEN_MISSING", code: "INTERNAL_JOBS_TOKEN_MISSING", message: "Internal jobs token missing", rid: rid });
   }
 
   const got = String(
