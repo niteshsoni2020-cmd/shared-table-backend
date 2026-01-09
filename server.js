@@ -6,11 +6,28 @@ require("dotenv").config();
 
 // TSTS_ENV_VALIDATION (Batch0 L0-6) — fail-fast in production, warn in dev
 function __tstsValidateEnv() {
-  const env = String(process.env.NODE_ENV || "").toLowerCase();
+  // NODE_ENV contract:
+  // - If explicitly provided, honor it (must be one of allowed).
+  // - If missing/blank, infer:
+  //   - Render => production
+  //   - otherwise => development
+  const raw = String(process.env.NODE_ENV || "").trim().toLowerCase();
+
+  const isRender =
+    String(process.env.RENDER || "").trim().length > 0 ||
+    String(process.env.RENDER_SERVICE_ID || "").trim().length > 0 ||
+    String(process.env.RENDER_INSTANCE_ID || "").trim().length > 0;
+
+  const env = raw.length > 0 ? raw : (isRender ? "production" : "development");
+
   const isProd = env === "production";
   const allowed = new Set(["production", "development", "test", "staging", "preview"]);
   if (!allowed.has(env)) {
     throw new Error("ENV_INVALID_NODE_ENV: " + env);
+  }
+
+  if (raw.length === 0) {
+    try { console.warn("[TSTS][ENV] NODE_ENV missing; inferred=" + env); } catch (e) {}
   }
 
   const requiredProd = [
@@ -608,6 +625,40 @@ function __ridFromReq(req) {
 }
 
 // attach requestId + access logs
+
+// L11_HEALTH_READY_BASELINE_V2
+// Core liveness/readiness routes must be defined early so they are never intercepted by auth/admin gates or 404 middleware.
+function __tstsDbReadyNow() {
+  try {
+    if (typeof global !== "undefined" && global && global.__tsts_db_connected === true) return true;
+  } catch (_) {}
+  try {
+    if (typeof mongoose !== "undefined" && mongoose && mongoose.connection) return (mongoose.connection.readyState === 1);
+  } catch (_) {}
+  return false;
+}
+function __tstsRidNow() {
+  try {
+    const c = require("crypto");
+    return c.randomBytes(12).toString("hex");
+  } catch (_) {}
+  try {
+    return (Date.now().toString(16) + Math.random().toString(16).slice(2)).slice(0, 24);
+  } catch (_) {}
+  return "";
+}
+app.get("/health", (req, res) => {
+  const rid = String((req && (req.requestId || req.rid)) ? (req.requestId || req.rid) : __tstsRidNow());
+  try { if (rid) res.set("X-Request-Id", rid); } catch (_) {}
+  return res.status(200).json({ ok: true, dbReady: __tstsDbReadyNow(), rid: rid });
+});
+app.get("/ready", (req, res) => {
+  const dbReady = __tstsDbReadyNow();
+  const rid = String((req && (req.requestId || req.rid)) ? (req.requestId || req.rid) : __tstsRidNow());
+  try { if (rid) res.set("X-Request-Id", rid); } catch (_) {}
+  return dbReady ? res.status(200).json({ ok: true, dbReady: true, rid: rid }) : res.status(503).json({ ok: false, dbReady: false, rid: rid });
+});
+
 app.use((req, res, next) => {
   const rid = __rid();
   req.requestId = rid;
@@ -784,6 +835,8 @@ app.get("/version", (req, res) => {
   const rid = String((req && req.requestId) ? req.requestId : "");
   return res.status(200).json({ service: "shared-table-api", sha: sha, rid: rid });
 });
+
+
 
 
 
@@ -7249,8 +7302,8 @@ async function __startServerAfterDb() {
   }
 }
 
-app.get("/health", (req, res) => res.status(200).json({ ok: true, dbReady: __dbReady }));
-app.get("/ready", (req, res) => (__dbReady ? res.status(200).json({ ok: true }) : res.status(503).json({ ok: false })));
+
+
 
 
 
