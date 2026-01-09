@@ -1623,12 +1623,12 @@ app.use("/api", (req, res, next) => {
 
     if (isJson) {
       if (__isPlainObject(req.body) === false) {
-        return res.status(400).json({ error: "invalid_json_body" });
+        return res.status(400).json({ ok: false, error: "invalid_json_body", code: "INVALID_JSON_BODY", message: "Invalid JSON body" });
       }
     }
     return next();
   } catch (_) {
-    return res.status(400).json({ error: "invalid_request" });
+    return res.status(400).json({ ok: false, error: "invalid_request", code: "INVALID_REQUEST", message: "Invalid request" });
   }
 });
 
@@ -1639,12 +1639,12 @@ app.use((err, req, res, next) => {
   const tooLarge = (typeStr === "entity.too.large") || (msg.indexOf("request entity too large") >= 0);
 
   if (tooLarge) {
-    return res.status(413).json({ error: "payload_too_large" });
+    return res.status(413).json({ ok: false, error: "payload_too_large", code: "PAYLOAD_TOO_LARGE", message: "Payload too large" });
   }
 
   const looksJson = (msg.indexOf("unexpected token") >= 0) || (msg.indexOf("json") >= 0);
   if (looksJson) {
-    return res.status(400).json({ error: "invalid_json" });
+    return res.status(400).json({ ok: false, error: "invalid_json", code: "INVALID_JSON", message: "Invalid JSON" });
   }
 
   return next(err);
@@ -1658,7 +1658,7 @@ app.use("/api/admin", adminLimiter);
 // CORS error handler (clean response)
 app.use((err, req, res, next) => {
   if (err && String(err.message || "").startsWith("CORS blocked")) {
-    return res.status(403).json({ error: "CORS blocked" });
+    return res.status(403).json({ ok: false, error: "CORS blocked", code: "CORS_BLOCKED", message: "CORS blocked" });
   }
   return next(err);
 });
@@ -1703,9 +1703,9 @@ app.use((err, req, res, next) => {
       errorStack: stack
     });
 
-    return res.status(500).json({ error: "server_error", rid: rid });
+    return res.status(500).json({ ok: false, error: "server_error", code: "SERVER_ERROR", message: "Server error", rid: rid });
   } catch (_) {
-    return res.status(500).json({ error: "server_error" });
+    return res.status(500).json({ ok: false, error: "server_error", code: "SERVER_ERROR", message: "Server error" });
   }
 });
 
