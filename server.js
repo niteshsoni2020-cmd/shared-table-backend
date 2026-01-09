@@ -605,6 +605,34 @@ app.use((req, res, next) => {
   req.requestId = rid;
   try { res.set("X-Request-Id", rid); } catch (_) {}
 
+  // JSON response shim: always include rid + stable code for errors
+  try {
+    const __origJson = res.json.bind(res);
+    res.json = (payload) => {
+      try {
+        const statusCode = (typeof res.statusCode === "number") ? res.statusCode : 200;
+        const isObj = (payload !== null) && (typeof payload === "object") && (Array.isArray(payload) === false);
+        if (isObj) {
+          if (payload.rid == null) payload.rid = rid;
+          if (statusCode >= 400 && payload.code == null) {
+            let code = "ERROR";
+            if (statusCode === 400) code = "BAD_REQUEST";
+            else if (statusCode === 401) code = "UNAUTHENTICATED";
+            else if (statusCode === 403) code = "FORBIDDEN";
+            else if (statusCode === 404) code = "NOT_FOUND";
+            else if (statusCode === 409) code = "CONFLICT";
+            else if (statusCode === 413) code = "PAYLOAD_TOO_LARGE";
+            else if (statusCode === 415) code = "UNSUPPORTED_MEDIA_TYPE";
+            else if (statusCode === 429) code = "RATE_LIMITED";
+            else if (statusCode >= 500) code = "SERVER_ERROR";
+            payload.code = code;
+          }
+        }
+      } catch (_) {}
+      return __origJson(payload);
+    };
+  } catch (_) {}
+
   const start = Date.now();
   res.on("finish", () => {
     __log("info", "http_access", {
