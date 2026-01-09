@@ -156,6 +156,8 @@ const rateLimit = require("express-rate-limit");
 const helmet = require("helmet");
 const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
+const { AsyncLocalStorage } = require("async_hooks");
+const __als = new AsyncLocalStorage();
 
 // EMAIL_DELIVERY_TRACKING_TSTS (Batch6 D5)
 // Persist delivery attempts (privacy-preserving) and retry failures in a bounded way.
@@ -268,11 +270,6 @@ function __adminReason(req) {
     const h = (req && req.headers) ? req.headers : {};
     const v = (h && (h["x-admin-reason"] || h["X-Admin-Reason"])) ? String(h["x-admin-reason"] || h["X-Admin-Reason"]) : "";
     if (v && v.trim()) return v.trim().slice(0, 240);
-  } catch (_) {}
-  try {
-    const b = (req && req.body && typeof req.body === "object") ? req.body : {};
-    const r = (b && (b.reason || b.adminReason)) ? String(b.reason || b.adminReason) : "";
-    if (r && r.trim()) return r.trim().slice(0, 240);
   } catch (_) {}
   return "";
 }
@@ -572,7 +569,18 @@ function __log(level, event, meta) {
     const lvl = String(level || "info").toLowerCase();
     const ev = String(event || "event");
     const m = (meta && typeof meta === "object") ? meta : {};
-    const payload = { ts: new Date().toISOString(), level: lvl, event: ev, meta: __redact(m, 0) };
+    let rid;
+    try {
+      const st = (__als && typeof __als.getStore === "function") ? __als.getStore() : undefined;
+      const r = (st && st.rid) ? String(st.rid) : "";
+      if (r && r.trim()) rid = r.trim();
+    } catch (_) {}
+    try {
+      if (rid && (m.rid == null)) m.rid = rid;
+    } catch (_) {}
+    const payload = { ts: new Date().toISOString(), level: lvl, event: ev };
+    if (rid) payload.rid = rid;
+    payload.meta = __redact(m, 0);
     if (__winstonLogger) {
       const fn = (__winstonLogger[lvl] && typeof __winstonLogger[lvl] === "function") ? __winstonLogger[lvl] : __winstonLogger.info;
       fn.call(__winstonLogger, payload);
@@ -583,7 +591,7 @@ function __log(level, event, meta) {
       try { console.error(line); } catch (_) {}
       return;
     }
-    try { console.log(line); } catch (_) {}
+    return;
   } catch (_) {
     try { console.error("LOG_FAIL"); } catch (_) {}
   }
@@ -605,54 +613,65 @@ app.use((req, res, next) => {
   req.requestId = rid;
   try { res.set("X-Request-Id", rid); } catch (_) {}
 
-  // JSON response shim: always include rid + stable code for errors
-  try {
-    const __origJson = res.json.bind(res);
-    res.json = (payload) => {
-      try {
-        const statusCode = (typeof res.statusCode === "number") ? res.statusCode : 200;
-        const isObj = (payload !== null) && (typeof payload === "object") && (Array.isArray(payload) === false);
-        if (isObj) {
-          if (payload.rid == null) payload.rid = rid;
-          if (statusCode >= 400 && payload.code == null) {
-            let code = "ERROR";
-            if (statusCode === 400) code = "BAD_REQUEST";
-            else if (statusCode === 401) code = "UNAUTHENTICATED";
-            else if (statusCode === 403) code = "FORBIDDEN";
-            else if (statusCode === 404) code = "NOT_FOUND";
-            else if (statusCode === 409) code = "CONFLICT";
-            else if (statusCode === 413) code = "PAYLOAD_TOO_LARGE";
-            else if (statusCode === 415) code = "UNSUPPORTED_MEDIA_TYPE";
-            else if (statusCode === 429) code = "RATE_LIMITED";
-            else if (statusCode >= 500) code = "SERVER_ERROR";
-            payload.code = code;
+  // Ensure all downstream logs can be correlated (async-safe)
+  return __als.run({ rid: rid }, () => {
+    // JSON response shim: always include rid + stable code for errors
+    try {
+      const __origJson = res.json.bind(res);
+
+      const __origSend = res.send.bind(res);
+      res.send = (payload) => {
+        try {
+          const statusCode = (typeof res.statusCode === "number") ? res.statusCode : 200;
+          const isString = (typeof payload === "string");
+          if (isString && statusCode >= 400) {
+            return res.json({ message: String(payload || "Error") });
           }
-        }
-      } catch (_) {}
-      return __origJson(payload);
-    };
-  } catch (_) {}
+        } catch (_) {}
+        return __origSend(payload);
+      };
 
-  const start = Date.now();
-  res.on("finish", () => {
-    __log("info", "http_access", {
-      rid: rid,
-      method: req.method,
-      path: String(req.originalUrl || "").split("?")[0],
-      status: res.statusCode,
-      durationMs: Date.now() - start,
-      ip: req.ip
+      res.json = (payload) => {
+        try {
+          const statusCode = (typeof res.statusCode === "number") ? res.statusCode : 200;
+          const isObj = (payload !== null) && (typeof payload === "object") && (Array.isArray(payload) === false);
+          if (isObj) {
+            if (payload.rid == null) payload.rid = rid;
+            if (statusCode >= 400 && payload.code == null) {
+              let code = "ERROR";
+              if (statusCode === 400) code = "BAD_REQUEST";
+              else if (statusCode === 401) code = "UNAUTHENTICATED";
+              else if (statusCode === 403) code = "FORBIDDEN";
+              else if (statusCode === 404) code = "NOT_FOUND";
+              else if (statusCode === 409) code = "CONFLICT";
+              else if (statusCode === 413) code = "PAYLOAD_TOO_LARGE";
+              else if (statusCode === 415) code = "UNSUPPORTED_MEDIA_TYPE";
+              else if (statusCode === 429) code = "RATE_LIMITED";
+              else if (statusCode >= 500) code = "SERVER_ERROR";
+              payload.code = code;
+            }
+          }
+        } catch (_) {}
+        return __origJson(payload);
+      };
+    } catch (_) {}
+
+    const start = Date.now();
+    res.on("finish", () => {
+      __log("info", "http_access", {
+        rid: rid,
+        method: req.method,
+        path: String(req.originalUrl || "").split("?")[0],
+        status: res.statusCode,
+        durationMs: Date.now() - start,
+        ip: req.ip
+      });
     });
+
+    return next();
   });
-
-  return next();
-
-
-
-
-
-
 });
+
 const PORT = process.env.PORT || 4000;
 
 function __validateEnvOrExit() {
@@ -1124,13 +1143,33 @@ app.post(
   async (req, res) => {
     try {
       __log("info", "stripe_webhook_hit", { rid: __ridFromReq(req), path: (req && req.originalUrl) ? String(req.originalUrl) : undefined });
-      if (!STRIPE_WEBHOOK_SECRET) return res.status(500).send("Missing STRIPE_WEBHOOK_SECRET");
+      if (!STRIPE_WEBHOOK_SECRET) return res.status(500).json({ message: "Server error" });
 
       const sig = req.headers["stripe-signature"];
       let event;
       try {
         event = stripe.webhooks.constructEvent(req.body, sig, STRIPE_WEBHOOK_SECRET);
         __log("info", "stripe_webhook_verified", { rid: __ridFromReq(req), path: (req && req.originalUrl) ? String(req.originalUrl) : undefined });
+
+      try {
+        const evObj = (event && event.data && event.data.object) ? event.data.object : {};
+        const bid = String((evObj && (evObj.client_reference_id || (evObj.metadata && evObj.metadata.bookingId))) || "");
+        const so = String((evObj && (evObj.id || evObj.payment_intent || evObj.charge)) || "");
+        const amt = Number((evObj && (evObj.amount_total || evObj.amount || evObj.amount_refunded)) || 0) || 0;
+        const cur = String((evObj && evObj.currency) ? evObj.currency : "aud");
+        await __ledgerAppendOnce({
+          bookingId: bid,
+          eventId: String(event.id || ""),
+          eventType: String(event.type || ""),
+          stripeObjectId: so,
+          amountCents: amt,
+          currency: cur,
+          status: "verified",
+          note: "stripe_webhook_verified",
+          meta: { hasBookingId: Boolean(bid), hasStripeObjectId: Boolean(so) }
+        });
+      } catch (_) {}
+
       } catch (err) {
         __log("error", "stripe_webhook_sig_fail", { rid: __ridFromReq(req), path: (req && req.originalUrl) ? String(req.originalUrl) : undefined });
         return res.status(400).send("Webhook signature verification failed");
@@ -2412,6 +2451,16 @@ const Bookmark = mongoose.model(
   )
 );
 
+try {
+  userSchema.pre("save", function(next) {
+    try {
+      if (this && this.isDeleted === true && (this.deletedAt == null)) {
+        this.deletedAt = new Date();
+      }
+    } catch (_) {}
+    return next();
+  });
+} catch (_) {}
 const User = mongoose.model("User", userSchema);
 
 // === L7_SOCIAL_AUDIT_V1 (append-only) ===
@@ -2427,6 +2476,16 @@ socialAuditSchema.index({ createdAt: -1 });
 const SocialAudit = mongoose.models.SocialAudit || mongoose.model("SocialAudit", socialAuditSchema);
 // === END L7_SOCIAL_AUDIT_V1 ===
 
+try {
+  experienceSchema.pre("save", function(next) {
+    try {
+      if (this && this.isDeleted === true && (this.deletedAt == null)) {
+        this.deletedAt = new Date();
+      }
+    } catch (_) {}
+    return next();
+  });
+} catch (_) {}
 const Experience = mongoose.model("Experience", experienceSchema);
 
 
@@ -2468,6 +2527,54 @@ async function canSeeExperiencePrivate(req, exp) {
 
 const Booking = mongoose.model("Booking", bookingSchema);
 const Review = mongoose.model("Review", reviewSchema);
+const financialLedgerSchema = new mongoose.Schema(
+  {
+    bookingId: { type: String, default: "" },
+    eventId: { type: String, default: "" },
+    eventType: { type: String, default: "" },
+    stripeObjectId: { type: String, default: "" },
+    amountCents: { type: Number, default: 0 },
+    currency: { type: String, default: "aud" },
+    status: { type: String, default: "" },
+    note: { type: String, default: "" },
+    meta: { type: Object, default: {} },
+  },
+  { timestamps: true }
+);
+try { financialLedgerSchema.index({ eventId: 1, eventType: 1 }, { unique: true, sparse: true }); } catch (_) {}
+const FinancialLedger = mongoose.model("FinancialLedger", financialLedgerSchema);
+
+async function __ledgerAppendOnce(entry) {
+  try {
+    const e = (entry && typeof entry === "object") ? entry : {};
+    const eventId = String(e.eventId || "").trim();
+    const eventType = String(e.eventType || "").trim();
+    if (!eventId || !eventType) return false;
+
+    const doc = {
+      bookingId: String(e.bookingId || ""),
+      eventId: eventId,
+      eventType: eventType,
+      stripeObjectId: String(e.stripeObjectId || ""),
+      amountCents: Number.isFinite(Number(e.amountCents)) ? Number(e.amountCents) : 0,
+      currency: String(e.currency || "aud"),
+      status: String(e.status || ""),
+      note: String(e.note || ""),
+      meta: (e.meta && typeof e.meta === "object") ? e.meta : {},
+    };
+
+    try {
+      await FinancialLedger.create(doc);
+      return true;
+    } catch (err) {
+      const msg = (err && err.message) ? String(err.message) : "";
+      if (msg.toLowerCase().indexOf("duplicate") >= 0) return true;
+      return false;
+    }
+  } catch (_) {
+    return false;
+  }
+}
 
 // L7_DISCOVERY_GUARD_V1
 function __canDiscoverUser(u) {
@@ -3095,8 +3202,8 @@ function adminMiddleware(req, res, next) {
   });
 }
 
-
-// --- ADMIN: PROMO CODES ---
+// Note: requireAdminReason is intentionally applied at route-level for admin access and admin mutations.
+ // --- ADMIN: PROMO CODES ---
 // Universal promo: appliesToExperienceIds=[] and appliesToHostIds=[].
 // Experience-specific (including multi-experience): appliesToExperienceIds=[...]
 // Host-specific: appliesToHostIds=[...]
@@ -6442,7 +6549,7 @@ app.get("/api/social/user/:userId/visible-bookings", authMiddleware, socialGuard
 
 
 // Admin: moderation triage (reports)
-app.get("/api/admin/reports", adminMiddleware, async (req, res) => {
+app.get("/api/admin/reports", adminMiddleware, requireAdminReason, async (req, res) => {
   try {
     const q = (req && req.query && typeof req.query === "object") ? req.query : {};
     const status = String(q.status || "").trim().toLowerCase();
@@ -6547,7 +6654,7 @@ app.patch("/api/admin/reports/:id", adminMiddleware, requireAdminReason, async (
     return res.status(500).json({ message: "Failed" });
   }
 });
-app.get("/api/admin/stats", adminMiddleware, async (req, res) => {
+app.get("/api/admin/stats", adminMiddleware, requireAdminReason, async (req, res) => {
   try { await __auditAdmin(req, "admin_stats", {}, { ok: true }); } catch (_) {}
 
   const revenueDocs = await Booking.find({ status: "confirmed" }, "pricing");
@@ -6560,7 +6667,7 @@ app.get("/api/admin/stats", adminMiddleware, async (req, res) => {
 });
 
 // Admin bookings
-app.get("/api/admin/bookings", adminMiddleware, async (req, res) => {
+app.get("/api/admin/bookings", adminMiddleware, requireAdminReason, async (req, res) => {
   try { await __auditAdmin(req, "admin_bookings_list", {}, { ok: true }); } catch (_) {}
 
   try {
@@ -7177,6 +7284,185 @@ function requireAdminReason(req, res, next) {
 
 let __httpServerStarted = false;
 function __startHttpServerOnce() {
+app.get(
+  "/api/admin/runbook/refund-failure",
+  authMiddleware,
+  adminMiddleware,
+  requireAdminReason,
+  async (req, res) => {
+    return res.json({
+      ok: true,
+      title: "Refund failure runbook",
+      steps: [
+        "Capture rid from response headers (X-Request-Id) or response body rid.",
+        "Search logs by rid to isolate the failing path.",
+        "If failure is in Stripe refund creation, confirm payment intent exists and amountCents is <= totalCents.",
+        "If webhook did not update booking status, inspect FinancialLedger for matching (eventId,eventType).",
+        "Use admin refund endpoints only with X-Admin-Reason and record the reason in the ticket."
+      ],
+      notes: [
+        "All admin mutations must include X-Admin-Reason.",
+        "All error responses include code and rid."
+      ]
+    });
+  }
+);
+
+app.get(
+  "/api/admin/runbook/backup-restore",
+  authMiddleware,
+  adminMiddleware,
+  requireAdminReason,
+  async (req, res) => {
+    return res.json({
+      ok: true,
+      title: "Backup and restore runbook",
+      steps: [
+        "Use managed database backups (provider feature).",
+        "Verify automated backups are enabled and retention is configured.",
+        "Perform a restore test to staging and confirm server boots and core endpoints respond.",
+        "Record restore evidence: timestamp, snapshot id, and smoke test output."
+      ],
+      evidenceRequired: [
+        "Provider restore audit trail",
+        "Smoke test output"
+      ]
+    });
+  }
+);
+
+app.get(
+  "/api/admin/orphans/report",
+  authMiddleware,
+  adminMiddleware,
+  requireAdminReason,
+  async (req, res) => {
+    try {
+      const limRaw = (req.query && req.query.limit) ? req.query.limit : "2000";
+      const limit = Math.max(1, Math.min(5000, Number.isFinite(Number(limRaw)) ? Math.floor(Number(limRaw)) : 2000));
+
+      const BookingModel = mongoose.model("Booking");
+      const rows = await BookingModel.find({}, { _id: 1, guestId: 1, experienceId: 1, paymentStatus: 1, stripePaymentIntentId: 1 })
+        .limit(limit).lean();
+
+      let missingGuestId = 0;
+      let missingExperienceId = 0;
+      let paidMissingStripePaymentIntentId = 0;
+      const sample = [];
+
+      for (const r of (rows || [])) {
+        const gid = (r && r.guestId != null) ? String(r.guestId) : "";
+        const eid = (r && r.experienceId != null) ? String(r.experienceId) : "";
+        const ps = (r && r.paymentStatus != null) ? String(r.paymentStatus) : "";
+        const pi = (r && r.stripePaymentIntentId != null) ? String(r.stripePaymentIntentId) : "";
+        const badG = (gid.trim().length == 0);
+        const badE = (eid.trim().length == 0);
+        const badPi = (ps == "paid") && (pi.trim().length == 0);
+
+        if (badG) missingGuestId += 1;
+        if (badE) missingExperienceId += 1;
+        if (badPi) paidMissingStripePaymentIntentId += 1;
+
+        if ((badG || badE || badPi) && (sample.length < 20)) {
+          sample.push({
+            _id: r._id,
+            guestId: r.guestId,
+            experienceId: r.experienceId,
+            paymentStatus: r.paymentStatus,
+            stripePaymentIntentId: r.stripePaymentIntentId
+          });
+        }
+      }
+
+      return res.json({
+        ok: true,
+        scanned: (rows || []).length,
+        counts: {
+          missingGuestId: missingGuestId,
+          missingExperienceId: missingExperienceId,
+          paidMissingStripePaymentIntentId: paidMissingStripePaymentIntentId
+        },
+        sample: sample
+      });
+    } catch (_) {
+      return res.status(500).json({ message: "Server error" });
+    }
+  }
+);
+
+app.get(
+  "/api/admin/export/bookings",
+  authMiddleware,
+  adminMiddleware,
+  requireAdminReason,
+  async (req, res) => {
+    try {
+      const format = String((req.query && req.query.format) ? req.query.format : "json").toLowerCase();
+      const limRaw = (req.query && req.query.limit) ? req.query.limit : "1000";
+      const limit = Math.max(1, Math.min(5000, Number.isFinite(Number(limRaw)) ? Math.floor(Number(limRaw)) : 1000));
+
+      const BookingModel = mongoose.model("Booking");
+      const rows = await BookingModel.find({}, {
+        _id: 1,
+        experienceId: 1,
+        guestId: 1,
+        hostId: 1,
+        guestName: 1,
+        guestEmail: 1,
+        numGuests: 1,
+        bookingDate: 1,
+        timeSlot: 1,
+        status: 1,
+        paymentStatus: 1,
+        stripeSessionId: 1,
+        stripePaymentIntentId: 1,
+        createdAt: 1,
+        updatedAt: 1
+      }).limit(limit).lean();
+
+      if (format == "csv") {
+        const header = [
+          "id","experienceId","guestId","hostId","guestName","guestEmail","numGuests","bookingDate","timeSlot","status","paymentStatus","stripeSessionId","stripePaymentIntentId","createdAt","updatedAt"
+        ];
+        const esc = (v) => {
+          const x = (v == null) ? "" : String(v);
+          const needs = (x.indexOf("\,") >= 0) || (x.indexOf("\"") >= 0) || (x.indexOf("\n") >= 0);
+          const y = x.replace(/"/g, "\"\"");
+          return needs ? ("\"" + y + "\"") : y;
+        };
+        const out = [];
+        out.push(header.join("\,"));
+        for (const r of (rows || [])) {
+          out.push([
+            esc(r._id),
+            esc(r.experienceId),
+            esc(r.guestId),
+            esc(r.hostId),
+            esc(r.guestName),
+            esc(r.guestEmail),
+            esc(r.numGuests),
+            esc(r.bookingDate),
+            esc(r.timeSlot),
+            esc(r.status),
+            esc(r.paymentStatus),
+            esc(r.stripeSessionId),
+            esc(r.stripePaymentIntentId),
+            esc(r.createdAt),
+            esc(r.updatedAt)
+          ].join("\,"));
+        }
+        try { res.set("Content-Type", "text/csv; charset=utf-8"); } catch (_) {}
+        try { res.set("Content-Disposition", "attachment; filename=bookings_export.csv"); } catch (_) {}
+        return res.status(200).send(out.join("\n"));
+      }
+
+      return res.json({ ok: true, count: (rows || []).length, rows: rows || [] });
+    } catch (_) {
+      return res.status(500).json({ message: "Server error" });
+    }
+  }
+);
+
   if (__httpServerStarted) return;
   __httpServerStarted = true;
       app.listen(PORT, () => {
