@@ -784,8 +784,8 @@ app.get("/version", (req, res) => {
   const rid = String((req && req.requestId) ? req.requestId : "");
   return res.status(200).json({ service: "shared-table-api", sha: sha, rid: rid });
 });
-app.get("/health", (req, res) => res.status(200).json({ ok: true, dbReady: __dbReady }));
-app.get("/ready", (req, res) => (__dbReady ? res.status(200).json({ ok: true }) : res.status(503).json({ ok: false })));
+
+
 
 // Rate limiting (basic abuse protection)
 const apiLimiter = rateLimit({
@@ -3306,7 +3306,7 @@ app.post("/api/admin/promo-codes", adminMiddleware, requireAdminReason, promoCre
 });
 
 // List promos (latest 200)
-app.get("/api/admin/promo-codes", adminMiddleware, async (req, res) => {
+app.get("/api/admin/promo-codes", adminMiddleware, requireAdminReason, async (req, res) => {
   try {
     const q = (req && req.query) ? req.query : {};
     const activeRaw = (typeof q.active === "string") ? String(q.active).trim().toLowerCase() : "";
@@ -6701,7 +6701,7 @@ app.get("/api/recommendations", authMiddleware, async (req, res) => {
 });
 
 // Admin users
-app.get("/api/admin/users", adminMiddleware, async (req, res) => {
+app.get("/api/admin/users", adminMiddleware, requireAdminReason, async (req, res) => {
   try { await __auditAdmin(req, "admin_users_list", {}, { ok: true }); } catch (_) {}
 
   try {
@@ -6738,7 +6738,7 @@ app.delete("/api/admin/users/:id", adminMiddleware, requireAdminReason, async (r
   }
 });
 
-app.get("/api/admin/experiences", adminMiddleware, async (req, res) => {
+app.get("/api/admin/experiences", adminMiddleware, requireAdminReason, async (req, res) => {
   try { await __auditAdmin(req, "admin_experiences_list", {}, { ok: true }); } catch (_) {}
 
   try {
@@ -7047,14 +7047,7 @@ app.post("/api/comms/email-event", async (req, res) => {
   }
 });
 
-app.get("/version", (req, res) => {
-  const sha =
-    String(process.env.RENDER_GIT_COMMIT || "") ||
-    String(process.env.GIT_SHA || "") ||
-    String(process.env.COMMIT_SHA || "") ||
-    "unknown";
-  return res.json({ service: "shared-table-api", sha });
-});
+
 
 
 
