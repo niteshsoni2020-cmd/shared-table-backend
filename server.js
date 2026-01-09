@@ -5375,23 +5375,40 @@ app.post("/api/experiences/:id/book", authMiddleware, bookingCreateLimiter, asyn
 
   try {
     const baseUrl = __requirePublicUrl();
+    const __currency = "aud";
+    const __amountCents = Number(totalCents) || 0;
+    const __pricingHash = String(booking.pricingHash || pricingHash || "");
+    const __meta = {
+      bookingId: String(booking._id),
+      experienceId: String(exp._id),
+      guestId: String(req.user._id),
+      currency: __currency,
+      amountCents: String(__amountCents),
+      pricingHash: __pricingHash
+    };
+
+    const __expiresAtMs = (booking && booking.expiresAt) ? new Date(booking.expiresAt).getTime() : (Date.now() + (15 * 60 * 1000));
+    const __expiresAt = Math.floor(__expiresAtMs / 1000);
+
     const session = await stripe.checkout.sessions.create({
       client_reference_id: String(booking._id),
-      metadata: { bookingId: String(booking._id), experienceId: String(exp._id), guestId: String(req.user._id) },
+      metadata: __meta,
+      payment_intent_data: { metadata: __meta },
       payment_method_types: ["card"],
+      expires_at: __expiresAt,
       line_items: [
         {
           price_data: {
-            currency: "aud",
+            currency: __currency,
             product_data: { name: exp.title, description },
-            unit_amount: totalCents,
+            unit_amount: __amountCents,
           },
           quantity: 1,
         },
       ],
       mode: "payment",
       success_url: `${baseUrl}/success.html?sessionId={CHECKOUT_SESSION_ID}&bookingId=${booking._id}`,
-      cancel_url: `${baseUrl}/experience.html?id=${exp._id}`,
+      cancel_url: `${baseUrl}/experience.html?id=${exp._id}&bookingId=${booking._id}`,
     });
 
     booking.stripeSessionId = session.id;
