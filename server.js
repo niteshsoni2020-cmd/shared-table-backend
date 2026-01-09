@@ -1708,8 +1708,6 @@ mongoose
 __dbReady = true;
   __log("info", "db_connected", { rid: undefined, path: undefined });
   try { global.__tsts_db_connected = true; } catch (_) {}
-  try { startUnpaidBookingExpiryCleanupLoop_V1(); } catch (_) {}
-  try { startPaymentReconciliationLoop_V1(); } catch (_) {}
 
 
 })
@@ -6963,8 +6961,8 @@ async function __startServerAfterDb() {
 
     // Start job loops only after DB is ready
     // jobs start after db_connected
-
-
+    try { startUnpaidBookingExpiryCleanupLoop_V1(); } catch (_) {}
+    try { startPaymentReconciliationLoop_V1(); } catch (_) {}
 
   } catch (e) {
     console.error("STARTUP_FATAL", (e && e.message) ? e.message : String(e));
