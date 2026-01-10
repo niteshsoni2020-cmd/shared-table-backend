@@ -1176,7 +1176,6 @@ app.options("*", cors(corsOptions));
 app.post(
   "/api/admin/bookings/:id/refund-partial",
   express.json({ limit: "200kb" }),
-  authMiddleware,
   adminMiddleware,
   requireAdminReason,
   async (req, res) => {
@@ -7643,7 +7642,6 @@ let __httpServerStarted = false;
 function __startHttpServerOnce() {
 app.get(
   "/api/admin/runbook/refund-failure",
-  authMiddleware,
   adminMiddleware,
   requireAdminReason,
   async (req, res) => {
@@ -7667,7 +7665,6 @@ app.get(
 
 app.get(
   "/api/admin/runbook/backup-restore",
-  authMiddleware,
   adminMiddleware,
   requireAdminReason,
   async (req, res) => {
@@ -7690,7 +7687,6 @@ app.get(
 
 app.get(
   "/api/admin/orphans/report",
-  authMiddleware,
   adminMiddleware,
   requireAdminReason,
   async (req, res) => {
@@ -7749,7 +7745,6 @@ app.get(
 
 app.get(
   "/api/admin/export/bookings",
-  authMiddleware,
   adminMiddleware,
   requireAdminReason,
   async (req, res) => {
