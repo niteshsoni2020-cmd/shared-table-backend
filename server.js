@@ -4,6 +4,14 @@
 require("dotenv").config();
 
 
+function __tstsLogEarly(level, event, meta) {
+  try {
+    const payload = { level: String(level || "info"), event: String(event || "event"), meta: meta || {}, ts: new Date().toISOString() };
+    process.stderr.write(JSON.stringify(payload) + "\n");
+  } catch (_) {}
+}
+
+
 // TSTS_ENV_VALIDATION (Batch0 L0-6) — fail-fast in production, warn in dev
 function __tstsValidateEnv() {
   // NODE_ENV contract:
@@ -27,9 +35,7 @@ function __tstsValidateEnv() {
   }
 
   if (raw.length === 0) {
-    try { console.warn("[TSTS][ENV] NODE_ENV missing; inferred=" + env); } catch (e) {
-    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
-  }
+    try { __tstsLogEarly("warn", "env_node_env_missing_inferred", { env: env }); } catch (_) {}
   }
 
   const requiredProd = [
@@ -52,9 +58,7 @@ function __tstsValidateEnv() {
     }
   } else {
     if (missing.length) {
-      try { console.warn("[TSTS][ENV] missing (dev allowed): " + missing.join(",")); } catch (e) {
-    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
-  }
+      try { __tstsLogEarly("warn", "env_missing_dev_allowed", { missing: missing }); } catch (_) {}
     }
   }
 
@@ -69,7 +73,7 @@ function __tstsValidateEnv() {
 try {
   __tstsValidateEnv();
 } catch (e) {
-  console.error("[TSTS][BOOT] env validation failed:", (e && e.message) || String(e));
+  try { __tstsLogEarly("error", "boot_env_validation_failed", { message: (e && e.message) ? String(e.message) : String(e) }); } catch (_) {}
   process.exit(1);
 }
 
@@ -625,14 +629,14 @@ function __log(level, event, meta) {
     }
     const line = JSON.stringify(payload);
     if (lvl === "error") {
-      try { console.error(line); } catch (_) {
+      try { process.stderr.write(String(line) + "\n"); } catch (_) {
     try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
   }
       return;
     }
     return;
   } catch (_) {
-    try { console.error("LOG_FAIL"); } catch (_) {
+    try { process.stderr.write("LOG_FAIL\n"); } catch (_) {
     try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
   }
   }
@@ -647,6 +651,58 @@ function __ridFromReq(req) {
     return undefined;
   }
 }
+
+function __tstsCodeFromStatus(statusCode) {
+  const sc = Number(statusCode || 0);
+  if (sc === 400) return "BAD_REQUEST";
+  if (sc === 401) return "UNAUTHORIZED";
+  if (sc === 403) return "FORBIDDEN";
+  if (sc === 404) return "NOT_FOUND";
+  if (sc === 409) return "CONFLICT";
+  if (sc === 413) return "PAYLOAD_TOO_LARGE";
+  if (sc === 429) return "RATE_LIMITED";
+  if (sc >= 500) return "SERVER_ERROR";
+  return "ERROR";
+}
+
+function __tstsNormalizeErrorPayload(payload, rid, statusCode) {
+  const sc = Number(statusCode || 0);
+  const r = rid || undefined;
+  if (payload == null) return { ok: false, code: __tstsCodeFromStatus(sc), message: "Error", rid: r };
+  if (typeof payload === "string") return { ok: false, code: __tstsCodeFromStatus(sc), message: String(payload), rid: r };
+  if (typeof payload !== "object") return { ok: false, code: __tstsCodeFromStatus(sc), message: "Error", rid: r };
+  const out = Object.assign({}, payload);
+  out.ok = false;
+  if (!out.code) out.code = __tstsCodeFromStatus(sc);
+  if (!out.message) out.message = (out.error && typeof out.error === "string") ? out.error : "Error";
+  if (!out.rid) out.rid = r;
+  return out;
+}
+
+function __tstsWrapResJson(req, res, next) {
+  try {
+    const orig = res.json.bind(res);
+    res.json = function(payload) {
+      try {
+        const rid = (__ridFromReq(req) || req.requestId || req.rid || __tstsRidNow());
+        const sc = Number(res.statusCode || 200);
+        const looksError = (sc >= 400) || (payload && typeof payload === "object" && (payload.ok === false || payload.error || payload.message));
+        if (looksError) {
+          const normalized = __tstsNormalizeErrorPayload(payload, rid, sc);
+          try { if (rid && !res.getHeader("X-Request-Id")) res.setHeader("X-Request-Id", String(rid)); } catch (_) {}
+          return orig(normalized);
+        }
+        try { if (rid && !res.getHeader("X-Request-Id")) res.setHeader("X-Request-Id", String(rid)); } catch (_) {}
+        return orig(payload);
+      } catch (_) {
+        return orig(payload);
+      }
+    };
+  } catch (_) {}
+  return next();
+}
+
+app.use(__tstsWrapResJson);
 
 // attach requestId + access logs
 
@@ -820,10 +876,10 @@ function __validateEnvOrExit() {
     if (missing.length > 0) {
       const uniq = Array.from(new Set(missing));
       if (isProd) {
-        console.error("ENV_GUARD_FAIL_MISSING", uniq.join(","));
+        try { __log("error", "env_guard_fail_missing", { missing: uniq, rid: __tstsRidNow() }); } catch (_) {}
         process.exit(1);
       } else {
-        try { console.warn("ENV_GUARD_WARN_MISSING", uniq.join(",")); } catch (_) {
+        try { __log("warn", "env_guard_warn_missing", { missing: uniq, rid: __tstsRidNow() }); } catch (_) {
     try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
   }
       }
@@ -831,7 +887,7 @@ function __validateEnvOrExit() {
   } catch (e) {
     const isProd = String(process.env.NODE_ENV || "").toLowerCase() === "production";
     if (isProd) {
-      try { console.error("ENV_GUARD_FATAL", (e && e.message) ? String(e.message) : String(e)); } catch (_) {
+      try { __log("error", "env_guard_fatal", { message: (e && e.message) ? String(e.message) : String(e), rid: __tstsRidNow() }); } catch (_) {
     try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
   }
       process.exit(1);
@@ -7591,7 +7647,7 @@ async function __startServerAfterDb() {
     const t0 = Date.now();
     while (!(global && global.__tsts_db_connected === true)) {
       if (Date.now() - t0 > 30000) {
-        console.error("STARTUP_DB_TIMEOUT");
+        try { __log("error", "startup_db_timeout", { rid: __tstsRidNow() }); } catch (_) {}
         process.exit(1);
       }
       await new Promise((r) => setTimeout(r, 100));
@@ -7607,7 +7663,7 @@ async function __startServerAfterDb() {
   }
 
   } catch (e) {
-    console.error("STARTUP_FATAL", (e && e.message) ? e.message : String(e));
+    try { __log("error", "startup_fatal", { message: (e && e.message) ? String(e.message) : String(e), rid: __tstsRidNow() }); } catch (_) {}
     process.exit(1);
   }
 }
@@ -7962,7 +8018,7 @@ async function transitionBooking(booking, nextStatus, meta = {}) {
         await maybeSendRefundProcessedComms(booking);
       }
     } catch (e) {
-      console.error("BOOKING_COMMS_FAIL", booking._id, nextStatus, e?.message);
+      try { __log("error", "booking_comms_fail", { bookingId: String(booking && booking._id), nextStatus: String(nextStatus), message: (e && e.message) ? String(e.message) : String(e), rid: __tstsRidNow() }); } catch (_) {}
     }
   }
 
