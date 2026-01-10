@@ -7116,7 +7116,7 @@ app.get("/api/users/:userId/profile", async (req, res) => {
     const isSelf = !!(meId && String(meId) === String(userIdParam));
 
     const user = await User.findById(userIdParam)
-      .select("name profilePic bio handle publicProfile createdAt discoverable blockedUserIds")
+      .select("name profilePic bio handle publicProfile createdAt discoverable")
       .lean();
 
     if (!user) {
@@ -7131,7 +7131,8 @@ app.get("/api/users/:userId/profile", async (req, res) => {
       if (meId) {
         try {
           const meDoc = await User.findById(meId).select("blockedUserIds").lean();
-          if (__isBlockedPair(meDoc, user, meId, userIdParam) === true) {
+          const targetDoc = await User.findById(userIdParam).select("blockedUserIds").lean();
+          if (__isBlockedPair(meDoc, targetDoc, meId, userIdParam) === true) {
             return res.status(404).json({ ok: false, code: "NOT_FOUND", message: "User not found", rid: rid });
           }
         } catch (_e) {
