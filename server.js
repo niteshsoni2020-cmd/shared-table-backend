@@ -860,6 +860,11 @@ const loginLimiter = rateLimit({
   limit: 10,
   standardHeaders: true,
   legacyHeaders: false,
+  handler: function (req, res) {
+    const rid = String((req && (req.requestId || req.rid)) ? (req.requestId || req.rid) : "");
+    try { if (rid) res.set("X-Request-Id", rid); } catch (_) {}
+    return res.status(429).json({ ok: false, code: "RATE_LIMITED", message: "Too many requests", rid: rid });
+  },
 });
 
 const registerLimiter = rateLimit({
@@ -867,6 +872,11 @@ const registerLimiter = rateLimit({
   limit: 10,
   standardHeaders: true,
   legacyHeaders: false,
+  handler: function (req, res) {
+    const rid = String((req && (req.requestId || req.rid)) ? (req.requestId || req.rid) : "");
+    try { if (rid) res.set("X-Request-Id", rid); } catch (_) {}
+    return res.status(429).json({ ok: false, code: "RATE_LIMITED", message: "Too many requests", rid: rid });
+  },
 });
 
 const forgotPasswordLimiter = rateLimit({
@@ -874,6 +884,11 @@ const forgotPasswordLimiter = rateLimit({
   limit: 5,
   standardHeaders: true,
   legacyHeaders: false,
+  handler: function (req, res) {
+    const rid = String((req && (req.requestId || req.rid)) ? (req.requestId || req.rid) : "");
+    try { if (rid) res.set("X-Request-Id", rid); } catch (_) {}
+    return res.status(429).json({ ok: false, code: "RATE_LIMITED", message: "Too many requests", rid: rid });
+  },
 });
 
 const resetPasswordLimiter = rateLimit({
@@ -881,6 +896,11 @@ const resetPasswordLimiter = rateLimit({
   limit: 10,
   standardHeaders: true,
   legacyHeaders: false,
+  handler: function (req, res) {
+    const rid = String((req && (req.requestId || req.rid)) ? (req.requestId || req.rid) : "");
+    try { if (rid) res.set("X-Request-Id", rid); } catch (_) {}
+    return res.status(429).json({ ok: false, code: "RATE_LIMITED", message: "Too many requests", rid: rid });
+  },
 });
 
 const adminLimiter = rateLimit({
@@ -1082,7 +1102,7 @@ const corsOptions = {
   },
   credentials: true,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"],
+  allowedHeaders: ["Content-Type", "Authorization", "X-Admin-Reason", "X-Internal-Token", "X-Request-Id"],
   optionsSuccessStatus: 204,
 };
 
@@ -7048,7 +7068,11 @@ app.post("/api/comms/email-event", async (req, res) => {
   try {
     const secret = String(process.env.COMMS_WEBHOOK_SECRET || "");
     const got = String((req.headers && (req.headers["x-comms-secret"] || req.headers["X-Comms-Secret"])) || "");
-    if (!secret || got !== secret) return res.status(401).json({ ok: false });
+    if (!secret || got !== secret) {
+      const rid = String((req && (req.requestId || req.rid)) ? (req.requestId || req.rid) : "");
+      try { if (rid) res.set("X-Request-Id", rid); } catch (_) {}
+      return res.status(401).json({ ok: false, code: "UNAUTHORIZED", message: "Unauthorized", rid: rid });
+    }
 
     const body = req.body || {};
     const email = String(body.email || "").toLowerCase().trim();
