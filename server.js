@@ -7191,92 +7191,67 @@ async function withJobRun(db, jobName, fn, opts) {
 // Trigger idempotent job runs via scheduler (Render Cron / trusted caller).
 // Security: requires env INTERNAL_JOBS_TOKEN and header X-Internal-Token to match.
 // Note: This endpoint runs functions that are already safe/idempotent by design.
-app.all("/api/internal/jobs/run", async (req, res) => {
-
+function internalJobsGuardMiddleware(req, res, next) {
   const rid = String((req && (req.requestId || req.rid)) ? (req.requestId || req.rid) : __tstsRidNow());
   try { if (rid) res.set("X-Request-Id", rid); } catch (_) {}
 
-  // Guard 1: do not run until DB is ready
   if (typeof __dbReady !== "undefined" && __dbReady !== true) {
     try { __log("error", "internal_jobs_db_not_ready", { rid: rid, path: "/api/internal/jobs/run" }); } catch (_) {}
-    return res.status(503).json({ ok: false, error: "DB_NOT_READY", code: "DB_NOT_READY", message: "Database not ready", rid: rid });
+    return res.status(503).json({ ok: false, code: "DB_NOT_READY", message: "Database not ready", rid: rid });
   }
 
   const expected = String(process.env.INTERNAL_JOBS_TOKEN || "").trim();
   if (expected.length === 0) {
     try { __log("error", "internal_jobs_token_missing", { rid: rid, path: "/api/internal/jobs/run" }); } catch (_) {}
-    return res.status(500).json({ ok: false, error: "INTERNAL_JOBS_TOKEN_MISSING", code: "INTERNAL_JOBS_TOKEN_MISSING", message: "Internal jobs token missing", rid: rid });
+    return res.status(500).json({ ok: false, code: "MISCONFIGURED", message: "Internal jobs token missing", rid: rid });
   }
 
-  const got = String(
-    (req && req.headers && (req.headers["x-internal-token"] || req.headers["X-Internal-Token"])) || ""
-  ).trim();
-
+  const got = String((req && req.headers && (req.headers["x-internal-token"] || req.headers["X-Internal-Token"])) || "").trim();
   if (got.length === 0 || got !== expected) {
-    try { __log("error", "internal_jobs_unauthorized", { rid: undefined, path: "/api/internal/jobs/run" }); } catch (_) {}
-    return res.status(401).json({ ok: false, error: "UNAUTHORIZED", code: "UNAUTHORIZED", message: "Unauthorized" });
+    try { __log("error", "internal_jobs_unauthorized", { rid: rid, path: "/api/internal/jobs/run" }); } catch (_) {}
+    return res.status(401).json({ ok: false, code: "UNAUTHORIZED", message: "Unauthorized", rid: rid });
   }
 
-  // Guard 2: prevent overlapping runs in this process (set after auth)
   try {
     if (global && global.__tsts_internal_jobs_running === true) {
-      try { __log("error", "internal_jobs_busy", { rid: undefined, path: "/api/internal/jobs/run" }); } catch (_) {}
-      return res.status(409).json({ ok: false, error: "BUSY", code: "BUSY", message: "Busy" });
+      try { __log("error", "internal_jobs_busy", { rid: rid, path: "/api/internal/jobs/run" }); } catch (_) {}
+      return res.status(409).json({ ok: false, code: "BUSY", message: "Busy", rid: rid });
     }
     if (global) global.__tsts_internal_jobs_running = true;
   } catch (_) {}
 
-  try {
-    const ran = [];
-    const errors = [];
+  return next();
+}
 
-    // Respond immediately so cron callers never time out.
-    const queued = ["unpaid_booking_expiry_cleanup_v1", "payment_reconciliation_v1"];
-    try {
-      res.status(202).json({ ok: true, accepted: true, queued: queued });
-    } catch (_) {}
+app.post("/api/internal/jobs/run", internalJobsGuardMiddleware, async (req, res) => {
+  const rid = String((req && (req.requestId || req.rid)) ? (req.requestId || req.rid) : __tstsRidNow());
+  try { if (rid) res.set("X-Request-Id", rid); } catch (_) {}
 
-    // Fire-and-forget background run; results go to logs.
+  const queued = ["unpaid_booking_expiry_cleanup_v1", "payment_reconciliation_v1"];
+  try { res.status(202).json({ ok: true, accepted: true, queued: queued, rid: rid }); } catch (_) {}
+
   setTimeout(async () => {
     const ran = [];
     const errors = [];
 
     try {
-      try {
-        await runUnpaidBookingExpiryCleanupOnce_V1();
-        ran.push("unpaid_booking_expiry_cleanup_v1");
-      } catch (e) {
-        const msg = (e && e.message) ? String(e.message) : String(e);
-        errors.push({ job: "unpaid_booking_expiry_cleanup_v1", error: msg });
-      }
+      try { await runUnpaidBookingExpiryCleanupOnce_V1(); ran.push("unpaid_booking_expiry_cleanup_v1"); }
+      catch (e) { errors.push({ job: "unpaid_booking_expiry_cleanup_v1", error: String(e) }); }
 
-      try {
-        await runPaymentReconciliationOnce_V1();
-        ran.push("payment_reconciliation_v1");
-      } catch (e) {
-        const msg = (e && e.message) ? String(e.message) : String(e);
-        errors.push({ job: "payment_reconciliation_v1", error: msg });
-      }
+      try { await runPaymentReconciliationOnce_V1(); ran.push("payment_reconciliation_v1"); }
+      catch (e) { errors.push({ job: "payment_reconciliation_v1", error: String(e) }); }
 
-      const ok = errors.length == 0;
+      const ok = (errors.length === 0);
       try {
         __log(ok ? "info" : "error",
           ok ? "internal_jobs_async_ok" : "internal_jobs_async_fail",
-          { rid: undefined, path: "/api/internal/jobs/run", ran: ran, errors: errors }
+          { rid: rid, path: "/api/internal/jobs/run", ran: ran, errors: errors }
         );
       } catch (_) {}
     } finally {
-      // IMPORTANT: keep BUSY=true until async jobs finish
       try { if (global) global.__tsts_internal_jobs_running = false; } catch (_) {}
     }
   }, 0);
-
-  return;
-
-  } catch (e) {
-    // Safety: release BUSY only if handler fails before async scheduling
-    try { if (global) global.__tsts_internal_jobs_running = false; } catch (_) {}
-  }
 });
 
 
