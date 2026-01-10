@@ -27,7 +27,9 @@ function __tstsValidateEnv() {
   }
 
   if (raw.length === 0) {
-    try { console.warn("[TSTS][ENV] NODE_ENV missing; inferred=" + env); } catch (e) {}
+    try { console.warn("[TSTS][ENV] NODE_ENV missing; inferred=" + env); } catch (e) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
   }
 
   const requiredProd = [
@@ -50,7 +52,9 @@ function __tstsValidateEnv() {
     }
   } else {
     if (missing.length) {
-      try { console.warn("[TSTS][ENV] missing (dev allowed): " + missing.join(",")); } catch (e) {}
+      try { console.warn("[TSTS][ENV] missing (dev allowed): " + missing.join(",")); } catch (e) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
     }
   }
 
@@ -156,14 +160,18 @@ function __fireAndForgetEmail(payload) {
         try {
           const msg = (e && e.message) ? e.message : String(e);
           console.error("EMAIL_ASYNC_ERR", msg);
-        } catch (_) {}
+        } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
       });
     }
   } catch (e) {
     try {
       const msg = (e && e.message) ? e.message : String(e);
       console.error("EMAIL_DISPATCH_ERR", msg);
-    } catch (_) {}
+    } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
   }
 }
 
@@ -287,7 +295,9 @@ function __adminReason(req) {
     const h = (req && req.headers) ? req.headers : {};
     const v = (h && (h["x-admin-reason"] || h["X-Admin-Reason"])) ? String(h["x-admin-reason"] || h["X-Admin-Reason"]) : "";
     if (v && v.trim()) return v.trim().slice(0, 240);
-  } catch (_) {}
+  } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
   return "";
 }
 
@@ -327,7 +337,9 @@ async function __auditAdmin(req, action, meta, outcome) {
       error: err.slice(0, 800),
       meta: m
     });
-  } catch (_) {}
+  } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
 }
 
 
@@ -431,12 +443,16 @@ function __errDetails(e) {
               providerMessageId: "",
               error: String((sup && sup.reason) || "suppressed")
             });
-          } catch (_) {}
+          } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
         }
         __log("info", "email_suppressed_skip", { bookingId: bookingId || undefined, template, to });
         return false;
       }
-    } catch (_) {}
+    } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
   }
 
   // Exactly-once gate (bookingId+template unique index)
@@ -591,10 +607,14 @@ function __log(level, event, meta) {
       const st = (__als && typeof __als.getStore === "function") ? __als.getStore() : undefined;
       const r = (st && st.rid) ? String(st.rid) : "";
       if (r && r.trim()) rid = r.trim();
-    } catch (_) {}
+    } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
     try {
       if (rid && (m.rid == null)) m.rid = rid;
-    } catch (_) {}
+    } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
     const payload = { ts: new Date().toISOString(), level: lvl, event: ev };
     if (rid) payload.rid = rid;
     payload.meta = __redact(m, 0);
@@ -605,12 +625,16 @@ function __log(level, event, meta) {
     }
     const line = JSON.stringify(payload);
     if (lvl === "error") {
-      try { console.error(line); } catch (_) {}
+      try { console.error(line); } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
       return;
     }
     return;
   } catch (_) {
-    try { console.error("LOG_FAIL"); } catch (_) {}
+    try { console.error("LOG_FAIL"); } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
   }
 }
 
@@ -631,38 +655,52 @@ function __ridFromReq(req) {
 function __tstsDbReadyNow() {
   try {
     if (typeof global !== "undefined" && global && global.__tsts_db_connected === true) return true;
-  } catch (_) {}
+  } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
   try {
     if (typeof mongoose !== "undefined" && mongoose && mongoose.connection) return (mongoose.connection.readyState === 1);
-  } catch (_) {}
+  } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
   return false;
 }
 function __tstsRidNow() {
   try {
     const c = require("crypto");
     return c.randomBytes(12).toString("hex");
-  } catch (_) {}
+  } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
   try {
     return (Date.now().toString(16) + Math.random().toString(16).slice(2)).slice(0, 24);
-  } catch (_) {}
+  } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
   return "";
 }
 app.get("/health", (req, res) => {
   const rid = String((req && (req.requestId || req.rid)) ? (req.requestId || req.rid) : __tstsRidNow());
-  try { if (rid) res.set("X-Request-Id", rid); } catch (_) {}
+  try { if (rid) res.set("X-Request-Id", rid); } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
   return res.status(200).json({ ok: true, dbReady: __tstsDbReadyNow(), rid: rid });
 });
 app.get("/ready", (req, res) => {
   const dbReady = __tstsDbReadyNow();
   const rid = String((req && (req.requestId || req.rid)) ? (req.requestId || req.rid) : __tstsRidNow());
-  try { if (rid) res.set("X-Request-Id", rid); } catch (_) {}
+  try { if (rid) res.set("X-Request-Id", rid); } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
   return dbReady ? res.status(200).json({ ok: true, dbReady: true, rid: rid }) : res.status(503).json({ ok: false, dbReady: false, rid: rid });
 });
 
 app.use((req, res, next) => {
   const rid = __rid();
   req.requestId = rid;
-  try { res.set("X-Request-Id", rid); } catch (_) {}
+  try { res.set("X-Request-Id", rid); } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
 
   // Ensure all downstream logs can be correlated (async-safe)
   return __als.run({ rid: rid }, () => {
@@ -678,7 +716,9 @@ app.use((req, res, next) => {
           if (isString && statusCode >= 400) {
             return res.json({ message: String(payload || "Error") });
           }
-        } catch (_) {}
+        } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
         return __origSend(payload);
       };
 
@@ -702,10 +742,14 @@ app.use((req, res, next) => {
               payload.code = code;
             }
           }
-        } catch (_) {}
+        } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
         return __origJson(payload);
       };
-    } catch (_) {}
+    } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
 
     const start = Date.now();
     res.on("finish", () => {
@@ -767,7 +811,9 @@ function __validateEnvOrExit() {
       const runJobs = String(process.env.RUN_JOBS || "").toLowerCase().trim();
       const jobsOn = (runJobs === "1" || runJobs === "true" || runJobs === "yes" || runJobs === "on");
       if (jobsOn) req("INTERNAL_JOBS_TOKEN");
-    } catch (_) {}
+    } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
 
     if (isProd) req("FRONTEND_BASE_URL");
 
@@ -777,13 +823,17 @@ function __validateEnvOrExit() {
         console.error("ENV_GUARD_FAIL_MISSING", uniq.join(","));
         process.exit(1);
       } else {
-        try { console.warn("ENV_GUARD_WARN_MISSING", uniq.join(",")); } catch (_) {}
+        try { console.warn("ENV_GUARD_WARN_MISSING", uniq.join(",")); } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
       }
     }
   } catch (e) {
     const isProd = String(process.env.NODE_ENV || "").toLowerCase() === "production";
     if (isProd) {
-      try { console.error("ENV_GUARD_FATAL", (e && e.message) ? String(e.message) : String(e)); } catch (_) {}
+      try { console.error("ENV_GUARD_FATAL", (e && e.message) ? String(e.message) : String(e)); } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
       process.exit(1);
     }
   }
@@ -862,7 +912,9 @@ const loginLimiter = rateLimit({
   legacyHeaders: false,
   handler: function (req, res) {
     const rid = String((req && (req.requestId || req.rid)) ? (req.requestId || req.rid) : "");
-    try { if (rid) res.set("X-Request-Id", rid); } catch (_) {}
+    try { if (rid) res.set("X-Request-Id", rid); } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
     return res.status(429).json({ ok: false, code: "RATE_LIMITED", message: "Too many requests", rid: rid });
   },
 });
@@ -874,7 +926,9 @@ const registerLimiter = rateLimit({
   legacyHeaders: false,
   handler: function (req, res) {
     const rid = String((req && (req.requestId || req.rid)) ? (req.requestId || req.rid) : "");
-    try { if (rid) res.set("X-Request-Id", rid); } catch (_) {}
+    try { if (rid) res.set("X-Request-Id", rid); } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
     return res.status(429).json({ ok: false, code: "RATE_LIMITED", message: "Too many requests", rid: rid });
   },
 });
@@ -886,7 +940,9 @@ const forgotPasswordLimiter = rateLimit({
   legacyHeaders: false,
   handler: function (req, res) {
     const rid = String((req && (req.requestId || req.rid)) ? (req.requestId || req.rid) : "");
-    try { if (rid) res.set("X-Request-Id", rid); } catch (_) {}
+    try { if (rid) res.set("X-Request-Id", rid); } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
     return res.status(429).json({ ok: false, code: "RATE_LIMITED", message: "Too many requests", rid: rid });
   },
 });
@@ -898,7 +954,9 @@ const resetPasswordLimiter = rateLimit({
   legacyHeaders: false,
   handler: function (req, res) {
     const rid = String((req && (req.requestId || req.rid)) ? (req.requestId || req.rid) : "");
-    try { if (rid) res.set("X-Request-Id", rid); } catch (_) {}
+    try { if (rid) res.set("X-Request-Id", rid); } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
     return res.status(429).json({ ok: false, code: "RATE_LIMITED", message: "Too many requests", rid: rid });
   },
 });
@@ -942,7 +1000,9 @@ function __rlKey(req) {
 
 function __rlHandler(reason) {
   return async function(req, res) {
-    try { await __maybeStrikeAndMute(req, reason); } catch (_) {}
+    try { await __maybeStrikeAndMute(req, reason); } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
     return res.status(429).json({ message: "Too many requests" });
   };
 }
@@ -1241,7 +1301,9 @@ app.post(
           note: "stripe_webhook_verified",
           meta: { hasBookingId: Boolean(bid), hasStripeObjectId: Boolean(so) }
         });
-      } catch (_) {}
+      } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
 
       } catch (err) {
         __log("error", "stripe_webhook_sig_fail", { rid: __ridFromReq(req), path: (req && req.originalUrl) ? String(req.originalUrl) : undefined });
@@ -1256,7 +1318,9 @@ mongoose.connection == null || mongoose.connection.readyState !== 1) {
       const eventId = String((event && event.id) ? event.id : "");
       if (eventId.length === 0) return res.json({ received: true });
 
-      try { await __ensureStripeWebhookIndex(); } catch (_) {}
+      try { await __ensureStripeWebhookIndex(); } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
 
       const __adminEmail = () => {
         const a = (process && process.env && process.env.ADMIN_EMAIL) ? String(process.env.ADMIN_EMAIL).trim() : "";
@@ -1308,7 +1372,9 @@ mongoose.connection == null || mongoose.connection.readyState !== 1) {
 
         try {
           await evCol.updateOne({ eventId }, { $set: { data: (event && event.data) ? event.data : null } });
-        } catch (_) {}
+        } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
       } catch (e) {
         if (__isDuplicateKeyError(e)) {
           try {
@@ -1330,7 +1396,9 @@ mongoose.connection == null || mongoose.connection.readyState !== 1) {
         const session = (event && event.data && event.data.object) ? event.data.object : {};
         const bookingId = session.client_reference_id || (session.metadata && session.metadata.bookingId);
         if (!bookingId) {
-          try { await evCol.updateOne({ eventId }, { $set: { processedAt: new Date(), processingAt: null, error: "missing_booking_id" } }); } catch (_) {}
+          try { await evCol.updateOne({ eventId }, { $set: { processedAt: new Date(), processingAt: null, error: "missing_booking_id" } }); } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
           return res.json({ received: true });
         }
 
@@ -1391,14 +1459,18 @@ mongoose.connection == null || mongoose.connection.readyState !== 1) {
             const amt = (cents === null) ? "" : (cur + " " + (Number(cents) / 100).toFixed(2));
             if (to) __fireAndForgetEmail({ to, eventName: "INVOICE_RECEIPT_GUEST", category: "PAYMENTS", vars: { DASHBOARD_URL: __dashboardUrl(), Name: nm, DATE: date, EXPERIENCE_TITLE: title, AMOUNT: amt } });
           }
-        } catch (_) {}
+        } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
       }
 
       if (event.type === "checkout.session.async_payment_failed" || event.type === "checkout.session.expired") {
         const session = (event && event.data && event.data.object) ? event.data.object : {};
         const bookingId = session.client_reference_id || (session.metadata && session.metadata.bookingId);
         if (!bookingId) {
-          try { await evCol.updateOne({ eventId }, { $set: { processedAt: new Date(), processingAt: null, error: "missing_booking_id" } }); } catch (_) {}
+          try { await evCol.updateOne({ eventId }, { $set: { processedAt: new Date(), processingAt: null, error: "missing_booking_id" } }); } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
           return res.json({ received: true });
         }
 
@@ -1407,7 +1479,9 @@ mongoose.connection == null || mongoose.connection.readyState !== 1) {
         if (!booking) return res.json({ received: true });
 
         let full = null;
-        try { if (session && session.id) full = await stripe.checkout.sessions.retrieve(String(session.id), { expand: ["payment_intent"] }); } catch (_) {}
+        try { if (session && session.id) full = await stripe.checkout.sessions.retrieve(String(session.id), { expand: ["payment_intent"] }); } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
 
         const stripeStatus = String((session && session.payment_status) ? session.payment_status : "unpaid");
         const piObj = (full && full.payment_intent) ? full.payment_intent : (session && session.payment_intent ? session.payment_intent : null);
@@ -1458,7 +1532,9 @@ mongoose.connection == null || mongoose.connection.readyState !== 1) {
               if (to) __fireAndForgetEmail({ to, eventName: "PAYMENT_FAILED", category: "PAYMENTS", vars: { DASHBOARD_URL: __dashboardUrl(), Name: nm } });
             }
           }
-        } catch (_) {}
+        } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
 
         await booking.save();
         return res.json({ received: true });
@@ -1501,8 +1577,12 @@ mongoose.connection == null || mongoose.connection.readyState !== 1) {
               ERROR: String(msg || kind || "refund_failed"),
             };
             await __alertAdminOnce(BookingModel, booking._id, "comms.refundFailedAdminAlertSentAt", "REFUND_FAILED_ADMIN_ALERT", "PAYMENTS", vars);
-          } catch (_) {}
-        } catch (_) {}
+          } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
+        } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
       };
 
       if (event.type === "refund.failed") {
@@ -1629,7 +1709,9 @@ mongoose.connection == null || mongoose.connection.readyState !== 1) {
           try {
             const ch = await stripe.charges.retrieve(String(chargeId), { expand: ["payment_intent"] });
             if (ch && ch.payment_intent) pi = String((ch.payment_intent && (ch.payment_intent.id || ch.payment_intent)) || "");
-          } catch (_) {}
+          } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
         }
 
         if (!pi) return null;
@@ -1655,12 +1737,16 @@ mongoose.connection == null || mongoose.connection.readyState !== 1) {
 
         try {
           if (Number.isFinite(Number(d.created))) booking.dispute.createdAt = new Date(Number(d.created) * 1000);
-        } catch (_) {}
+        } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
 
         try {
           const due = (d.evidence_details && Number.isFinite(Number(d.evidence_details.due_by))) ? Number(d.evidence_details.due_by) : null;
           if (due !== null) booking.dispute.evidenceDueBy = new Date(due * 1000);
-        } catch (_) {}
+        } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
 
         booking.disputeEvents.push({
           at: new Date(),
@@ -1695,7 +1781,9 @@ mongoose.connection == null || mongoose.connection.readyState !== 1) {
                       "comms.disputeUpdatedAdminAlertSentAt";
 
           await __alertAdminOnce(BookingModel, booking._id, key, "DISPUTE_ADMIN_ALERT", "PAYMENTS", vars)
-        } catch (_) {}
+        } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
 
         return booking;
       };
@@ -1705,10 +1793,14 @@ mongoose.connection == null || mongoose.connection.readyState !== 1) {
         try {
           const BookingModel = mongoose.model("Booking");
           await __upsertDispute(BookingModel, dispute, String(event.type || ""));
-        } catch (_) {}
+        } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
       }
 
-      try { await evCol.updateOne({ eventId }, { $set: { processedAt: new Date(), processingAt: null, error: "" } }); } catch (_) {}
+      try { await evCol.updateOne({ eventId }, { $set: { processedAt: new Date(), processingAt: null, error: "" } }); } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
       return res.json({ received: true });
     } catch (e) {
       try {
@@ -1718,7 +1810,9 @@ mongoose.connection == null || mongoose.connection.readyState !== 1) {
             await evCol2.updateOne({ eventId }, { $set: { error: String((e && e.message) ? e.message : "webhook_error"), processingAt: null } });
           }
         }
-      } catch (_) {}
+      } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
       __log("error", "stripe_webhook_error", { rid: __ridFromReq(req), path: (req && req.originalUrl) ? String(req.originalUrl) : undefined });
       return res.status(500).send("Webhook handler error");
     }
@@ -1806,7 +1900,9 @@ app.use((req, res, next) => {
     if (wantsJson || isApi) {
       return res.status(404).json({ ok: false, error: "NOT_FOUND", code: "NOT_FOUND", message: "Not found" });
     }
-  } catch (_) {}
+  } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
   return res.status(404).send("Not found");
 });
 
@@ -1888,11 +1984,17 @@ function reTest(r, v){ try { return r.test(String(v||"")); } catch(_) { return f
 mongoose
   .connect(process.env.MONGO_URI)
   .then(async () => {
-  try { await ensureDefaultPolicyExists(); } catch (_) {}
-  try { await __ensureStripeWebhookIndex(); } catch (_) {}
+  try { await ensureDefaultPolicyExists(); } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
+  try { await __ensureStripeWebhookIndex(); } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
 __dbReady = true;
   __log("info", "db_connected", { rid: undefined, path: undefined });
-  try { global.__tsts_db_connected = true; } catch (_) {}
+  try { global.__tsts_db_connected = true; } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
 
 
 })
@@ -1990,7 +2092,9 @@ async function sendEmailWithInfo_Idempotent(db, args) {
         if (msg.includes("duplicate")) return { skipped: true };
       }
     }
-  } catch (_) {}
+  } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
   return await sendEmailWithInfo(args);
 }
 
@@ -2530,10 +2634,14 @@ try {
       if (this && this.isDeleted === true && (this.deletedAt == null)) {
         this.deletedAt = new Date();
       }
-    } catch (_) {}
+    } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
     return next();
   });
-} catch (_) {}
+} catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
 const User = mongoose.model("User", userSchema);
 
 // === L7_SOCIAL_AUDIT_V1 (append-only) ===
@@ -2555,10 +2663,14 @@ try {
       if (this && this.isDeleted === true && (this.deletedAt == null)) {
         this.deletedAt = new Date();
       }
-    } catch (_) {}
+    } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
     return next();
   });
-} catch (_) {}
+} catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
 const Experience = mongoose.model("Experience", experienceSchema);
 
 
@@ -2614,7 +2726,9 @@ const financialLedgerSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
-try { financialLedgerSchema.index({ eventId: 1, eventType: 1 }, { unique: true, sparse: true }); } catch (_) {}
+try { financialLedgerSchema.index({ eventId: 1, eventType: 1 }, { unique: true, sparse: true }); } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
 const FinancialLedger = mongoose.model("FinancialLedger", financialLedgerSchema);
 
 async function __ledgerAppendOnce(entry) {
@@ -2885,14 +2999,18 @@ async function maybeSendBookingExpiredComms(booking) {
     if (!booking) return;
     try {
       if (!booking.comms || typeof booking.comms !== "object") booking.comms = {};
-    } catch (_) {}
+    } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
 
     let __expiredGuestAlready = false;
     let __expiredHostAlready = false;
     try {
       __expiredGuestAlready = Boolean(booking.comms.bookingExpiredGuestSentAt);
       __expiredHostAlready = Boolean(booking.comms.bookingExpiredHostSentAt);
-    } catch (_) {}
+    } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
 
     const b = booking || {};
     const guestEmail = String(b.guestEmail || "").trim();
@@ -2907,7 +3025,9 @@ async function maybeSendBookingExpiredComms(booking) {
         const expHostId = (expDoc && expDoc.hostId) ? String(expDoc.hostId).trim() : "";
         if (expHostId.length > 0) hostDoc = await User.findById(expHostId);
       }
-    } catch (_) {}
+    } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
 
     const hostEmail = String((hostDoc && hostDoc.email) || "").trim();
     const hostName = String((hostDoc && hostDoc.name) || "").trim();
@@ -2949,7 +3069,9 @@ async function maybeSendBookingExpiredComms(booking) {
         upd[SET] = { "comms.bookingExpiredGuestSentAt": new Date() };
         const r = await Booking.updateOne(q, upd);
         __claimed = Boolean((r && (r.modifiedCount == 1)) || (r && (r.nModified == 1)));
-      } catch (_) {}
+      } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
       if (__claimed) {
         await sendEventEmail({
           eventName: "BOOKING_EXPIRED",
@@ -2982,7 +3104,9 @@ async function maybeSendBookingExpiredComms(booking) {
         upd[SET] = { "comms.bookingExpiredHostSentAt": new Date() };
         const r = await Booking.updateOne(q, upd);
         __claimed2 = Boolean((r && (r.modifiedCount == 1)) || (r && (r.nModified == 1)));
-      } catch (_) {}
+      } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
       if (__claimed2) {
         await sendEventEmail({
           eventName: "BOOKING_EXPIRED_HOST",
@@ -3004,7 +3128,9 @@ async function maybeSendRefundProcessedComms(booking) {
       if (!booking.comms || typeof booking.comms !== "object") booking.comms = {};
       const already = booking.comms.refundProcessedGuestSentAt ? new Date(booking.comms.refundProcessedGuestSentAt) : null;
       if (already) return;
-    } catch (_) {}
+    } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
 
     const b = booking || {};
     const guestEmail = String(b.guestEmail || "").trim();
@@ -3083,7 +3209,9 @@ async function maybeSendRefundProcessedComms(booking) {
         if (!booking.comms || typeof booking.comms !== "object") booking.comms = {};
         booking.comms.refundProcessedGuestSentAt = new Date();
         await booking.save();
-      } catch (_) {}
+      } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
     }
 
     void hostEmail;
@@ -3773,7 +3901,9 @@ if (!did && slotAlt && slot && slotAlt !== slot) {
     const rL = await CapacitySlot.updateOne(qLegacy, upd, { upsert: false });
     const matchedL = Number(rL && rL.matchedCount) || 0;
     did = Boolean(matchedL > 0);
-  } catch (_) {}
+  } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
 }
   if (did) return { ok: true, maxGuests: maxGuests };
 
@@ -3819,7 +3949,9 @@ if (slotAlt && slot && slotAlt !== slot) {
     const qLegacy = { experienceId: String(expId), bookingDate: d, timeSlot: slotAlt };
     qLegacy[OR] = q[OR];
     await CapacitySlot.updateOne(qLegacy, upd);
-  } catch (_) {}
+  } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
 }
 
 
@@ -3859,7 +3991,9 @@ async function __releaseCapacityOnceAtomic(booking, reasonTag) {
 
       const g = __getBookingGuestCount(booking);
       if (!expId || !dateStr || !slot || g <= 0) {
-        try { booking.capacityReleasedAt = booking.capacityReleasedAt || now; } catch (_) {}
+        try { booking.capacityReleasedAt = booking.capacityReleasedAt || now; } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
         return;
       }
 
@@ -3876,7 +4010,9 @@ async function __releaseCapacityOnceAtomic(booking, reasonTag) {
         } catch (_) {
           const rev = {};
           rev[UNSET] = { capacityReleasedAt: 1 };
-          try { await Booking.updateOne({ _id: booking._id, capacityReleasedAt: now }, rev); } catch (_) {}
+          try { await Booking.updateOne({ _id: booking._id, capacityReleasedAt: now }, rev); } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
         }
       }
     } catch (_) {
@@ -3884,8 +4020,12 @@ async function __releaseCapacityOnceAtomic(booking, reasonTag) {
       return;
     }
 
-    try { booking.capacityReleasedAt = booking.capacityReleasedAt || now; } catch (_) {}
-  } catch (_) {}
+    try { booking.capacityReleasedAt = booking.capacityReleasedAt || now; } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
+  } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
 }
 
 // L2_HOST_CANCEL_CANONICAL_V1:
@@ -3894,13 +4034,17 @@ async function __releaseCapacityOnceAtomic(booking, reasonTag) {
 async function __hostCancelBookingAtomic(booking, reasonTag, meta) {
   try {
     await __releaseCapacityOnceAtomic(booking, reasonTag || "host_cancel");
-  } catch (_) {}
+  } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
 
   try {
     if (meta && typeof meta === "object") {
       return await transitionBooking(booking, "cancelled_by_host", meta);
     }
-  } catch (_) {}
+  } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
 
   return await transitionBooking(booking, "cancelled_by_host");
 }
@@ -4136,7 +4280,9 @@ app.post("/api/auth/register", registerLimiter, async (req, res) => {
       } else {
         Promise.race([__p, __t]).catch(() => {});
       }
-    } catch (_) {}
+    } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
 
     const __resp = { success: true, token: signToken(user), user: sanitizeUser(user) };
 
@@ -4241,7 +4387,9 @@ app.get("/api/auth/verify-email", async (req, res) => {
       if (__dbgOk) {
         return res.json({ ok: true, dev: { welcomeEmail: String(__welcomeEmail || "") } });
       }
-    } catch (_) {}
+    } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
 
     return res.json({ ok: true });
   } catch (e) {
@@ -4370,7 +4518,9 @@ app.post("/api/auth/forgot-password", forgotPasswordLimiter, async (req, res) =>
           const __match = (a.length === b.length && acc === 0);
           return res.json({ ok: true, message: "If an account exists, you will receive instructions.", dbg: { hdrPresent: true, envPresent: (__s0.length > 0), minLenOk: __minLenOk, match: __match } });
         }
-      } catch (e) {}
+      } catch (e) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
 
     return res.json({ ok: true, message: "If an account exists, you will receive instructions." });
   } catch (e) {
@@ -4430,7 +4580,9 @@ app.post("/api/auth/reset-password", resetPasswordLimiter, async (req, res) => {
           }
         });
       }
-    } catch (_) {}
+    } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
 
     return res.json({ ok: true });
   } catch (e) {
@@ -4549,7 +4701,9 @@ app.post("/api/experiences", authMiddleware, async (req, res) => {
     const pc = String(postcode || "").trim();
     if (!reTest(/^[0-9]{4}$/, pc)) return res.status(400).json({ message: "Postcode must be 4 digits." });
     if (!String(addressLine || "").trim()) return res.status(400).json({ message: "Street address is required." });
-  } catch (_) {}
+  } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
 
   try {
     const body = req.body || {};
@@ -4893,10 +5047,16 @@ app.delete("/api/experiences/:id", authMiddleware, async (req, res) => {
   try {
     const bs = await Booking.find({ experienceId: String(exp._id) });
     for (const b of bs) {
-      try { await __releaseCapacityOnceAtomic(b, "experience_delete"); } catch (_) {}
-      try { await __hostCancelBookingAtomic(b, "host_cancel"); } catch (_) {}
+      try { await __releaseCapacityOnceAtomic(b, "experience_delete"); } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
+      try { await __hostCancelBookingAtomic(b, "host_cancel"); } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
     }
-  } catch (_) {}
+  } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
 
   exp.isDeleted = true;
   exp.deletedAt = new Date();
@@ -5057,7 +5217,9 @@ app.post("/api/experiences/:id/book", authMiddleware, bookingCreateLimiter, asyn
     if (meId && hostId && blocked.includes(String(hostId))) {
       return res.status(403).json({ message: "Blocked" });
     }
-  } catch (_) {}
+  } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
 
   try {
     const h = await UserModel.findById(hostId).select("blockedUserIds").lean();
@@ -5065,7 +5227,9 @@ app.post("/api/experiences/:id/book", authMiddleware, bookingCreateLimiter, asyn
     if (meId && hostId && hBlocked.includes(String(meId))) {
       return res.status(403).json({ message: "Blocked" });
     }
-  } catch (_) {}
+  } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
 
   const { numGuests, isPrivate, bookingDate, timeSlot, guestNotes, promoCode } = req.body || {};
   let guests = Number.parseInt(numGuests, 10) || 1;
@@ -5447,8 +5611,12 @@ app.post("/api/experiences/:id/book", authMiddleware, bookingCreateLimiter, asyn
   hostPayoutCents = Number(pricingSnapshot.hostPayoutCents) || 0;
   adminSubsidyCents = Number(pricingSnapshot.adminSubsidyCents) || 0;
 
-  try { if (promoApplied && typeof promoApplied === "object") promoApplied.amountOffCents = promoOffCents; } catch (_) {}
-  try { if (promoRedemptionPending && typeof promoRedemptionPending === "object") promoRedemptionPending.amountOffCents = promoOffCents; } catch (_) {}
+  try { if (promoApplied && typeof promoApplied === "object") promoApplied.amountOffCents = promoOffCents; } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
+  try { if (promoRedemptionPending && typeof promoRedemptionPending === "object") promoRedemptionPending.amountOffCents = promoOffCents; } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
 
   const pricingHash = require("crypto").createHash("sha256").update(JSON.stringify(pricingSnapshot)).digest("hex");
 
@@ -5516,7 +5684,9 @@ app.post("/api/experiences/:id/book", authMiddleware, bookingCreateLimiter, asyn
   try {
     await booking.save();
   } catch (e) {
-    try { await releaseCapacitySlot(String(exp._id), bookingDateStr, timeSlotStr, guests); } catch (_) {}
+    try { await releaseCapacitySlot(String(exp._id), bookingDateStr, timeSlotStr, guests); } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
     throw e;
   }
 
@@ -5532,7 +5702,9 @@ app.post("/api/experiences/:id/book", authMiddleware, bookingCreateLimiter, asyn
         createdAt: promoRedemptionPending.createdAt ? new Date(promoRedemptionPending.createdAt) : new Date()
       });
     }
-  } catch (_) {}
+  } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
   // Comms: booking request submitted (guest)
   try {
     const __guestEmail = (req.user && req.user.email) ? String(req.user.email).trim() : "";
@@ -5551,7 +5723,9 @@ app.post("/api/experiences/:id/book", authMiddleware, bookingCreateLimiter, asyn
         }
       });
     }
-  } catch (_) {}
+  } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
 
   try {
     const baseUrl = __requirePublicUrl();
@@ -5601,7 +5775,9 @@ app.post("/api/experiences/:id/book", authMiddleware, bookingCreateLimiter, asyn
   } catch (e) {
     try {
       await releaseCapacitySlot(String(exp._id), bookingDateStr, timeSlotStr, guests);
-    } catch (_) {}
+    } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
 
     // Do not leave an orphan pending_payment booking without a Stripe session.
     try {
@@ -5609,7 +5785,9 @@ app.post("/api/experiences/:id/book", authMiddleware, bookingCreateLimiter, asyn
       booking.expiredAt = new Date();
       await booking.save();
       await transitionBooking(booking, "expired", { reason: "stripe_checkout_error", suppressComms: true });
-    } catch (_) {}
+    } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
 
     __log("error", "stripe_checkout_error", { rid: __ridFromReq(req), path: (req && req.originalUrl) ? req.originalUrl : undefined });
     res.status(500).json({ message: "Payment initialization failed" });
@@ -5655,7 +5833,9 @@ app.post("/api/bookings/verify", bookingVerifyLimiter, async (req, res) => {
         booking.policyPublishedAt = (snap && snap.publishedAt) ? new Date(snap.publishedAt) : null;
         await booking.save();
       }
-    } catch (_) {}
+    } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
     await maybeSendBookingConfirmedComms(booking);
     return res.json({ status: "confirmed" });
   }
@@ -5829,7 +6009,9 @@ app.get("/api/my/bookings", authMiddleware, async (req, res) => {
     res.set("Deprecation", "true");
     res.set("Sunset", "Sat, 01 Feb 2026 00:00:00 GMT");
     res.set("Link", "</api/bookings/my-bookings>; rel=\"canonical\"");
-  } catch (_) {}
+  } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
   return getMyBookings(req, res);
 });
 
@@ -5849,8 +6031,12 @@ app.post("/api/bookings/:id/cancel", authMiddleware, async (req, res) => {
 
       // L2_CANCEL_RELEASE_CAPACITY: release reserved capacity once (idempotent + atomic claim)
       await __releaseCapacityOnceAtomic(booking, "guest_cancel");
-      try { booking.capacityReleasedAt = booking.capacityReleasedAt || new Date(); } catch (_) {}
-      try { await booking.save(); } catch (_) {}
+      try { booking.capacityReleasedAt = booking.capacityReleasedAt || new Date(); } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
+      try { await booking.save(); } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
       return res.json({
         message: "Already cancelled",
         refund: booking.refundDecision || { status: "none", amountCents: 0, currency: "aud", percent: 0 },
@@ -5870,7 +6056,9 @@ app.post("/api/bookings/:id/cancel", authMiddleware, async (req, res) => {
 
     // L7_FIX_CANCEL_ORDER_V1: release reserved capacity BEFORE status transition (idempotent + atomic claim)
     await __releaseCapacityOnceAtomic(booking, "guest_cancel");
-    try { booking.capacityReleasedAt = booking.capacityReleasedAt || new Date(); } catch (_) {}
+    try { booking.capacityReleasedAt = booking.capacityReleasedAt || new Date(); } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
 
     await transitionBooking(booking, "cancelled");
     booking.cancellationReason = "User requested cancellation";
@@ -5944,7 +6132,9 @@ app.post("/api/bookings/:id/cancel", authMiddleware, async (req, res) => {
         refundCents: refundCents,
         refundPercent: refundPercent,
       });
-    } catch (_) {}
+    } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
 
     // If already paid and refund is due, initiate Stripe refund server-side (idempotent)
     try {
@@ -5968,7 +6158,9 @@ app.post("/api/bookings/:id/cancel", authMiddleware, async (req, res) => {
         booking.refundDecision.lastError = String((e && e.message) ? e.message : "refund_initiation_error").slice(0, 240);
         booking.refundDecision.stripeRefundStatus = "error";
         booking.refundDecision.status = "refund_failed";
-      } catch (_) {}
+      } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
       __log("error", "refund_initiation_failed", { rid: undefined, path: undefined });
       // Do not fail cancellation if refund initiation fails; webhook/retry/admin can reconcile.
     }
@@ -6728,7 +6920,9 @@ app.patch("/api/admin/reports/:id", adminMiddleware, requireAdminReason, async (
   }
 });
 app.get("/api/admin/stats", adminMiddleware, requireAdminReason, async (req, res) => {
-  try { await __auditAdmin(req, "admin_stats", {}, { ok: true }); } catch (_) {}
+  try { await __auditAdmin(req, "admin_stats", {}, { ok: true }); } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
 
   const revenueDocs = await Booking.find({ status: "confirmed" }, "pricing");
   res.json({
@@ -6741,7 +6935,9 @@ app.get("/api/admin/stats", adminMiddleware, requireAdminReason, async (req, res
 
 // Admin bookings
 app.get("/api/admin/bookings", adminMiddleware, requireAdminReason, async (req, res) => {
-  try { await __auditAdmin(req, "admin_bookings_list", {}, { ok: true }); } catch (_) {}
+  try { await __auditAdmin(req, "admin_bookings_list", {}, { ok: true }); } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
 
   try {
     const bookings = await Booking.find()
@@ -6775,7 +6971,9 @@ app.get("/api/recommendations", authMiddleware, async (req, res) => {
 
 // Admin users
 app.get("/api/admin/users", adminMiddleware, requireAdminReason, async (req, res) => {
-  try { await __auditAdmin(req, "admin_users_list", {}, { ok: true }); } catch (_) {}
+  try { await __auditAdmin(req, "admin_users_list", {}, { ok: true }); } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
 
   try {
     const users = await User.find({ isDeleted: { $ne: true } }).sort({ createdAt: -1 });
@@ -6786,7 +6984,9 @@ app.get("/api/admin/users", adminMiddleware, requireAdminReason, async (req, res
 });
 
 app.delete("/api/admin/users/:id", adminMiddleware, requireAdminReason, async (req, res) => {
-  try { await __auditAdmin(req, "admin_user_delete", { targetType: "user", targetId: String(req.params.id || "" ) }, { ok: true }); } catch (_) {}
+  try { await __auditAdmin(req, "admin_user_delete", { targetType: "user", targetId: String(req.params.id || "" ) }, { ok: true }); } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
 
   try {
     const userIdParam = __cleanId(req.params.id, 64);
@@ -6799,11 +6999,15 @@ app.delete("/api/admin/users/:id", adminMiddleware, requireAdminReason, async (r
     try {
       const cur = Number.isFinite(Number(user.tokenVersion)) ? Number(user.tokenVersion) : 0;
       user.tokenVersion = cur + 1;
-    } catch (_) {}
+    } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
     try {
       user.accountStatusChangedAt = new Date();
       user.accountStatusReason = String(__adminReason(req) || "admin_soft_delete").slice(0, 240);
-    } catch (_) {}
+    } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
     await user.save();
     res.json({ message: "User banned/deleted." });
   } catch (err) {
@@ -6812,7 +7016,9 @@ app.delete("/api/admin/users/:id", adminMiddleware, requireAdminReason, async (r
 });
 
 app.get("/api/admin/experiences", adminMiddleware, requireAdminReason, async (req, res) => {
-  try { await __auditAdmin(req, "admin_experiences_list", {}, { ok: true }); } catch (_) {}
+  try { await __auditAdmin(req, "admin_experiences_list", {}, { ok: true }); } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
 
   try {
     const exps = await Experience.find({ isDeleted: false }).sort({ createdAt: -1 });
@@ -6823,7 +7029,9 @@ app.get("/api/admin/experiences", adminMiddleware, requireAdminReason, async (re
 });
 
 app.patch("/api/admin/experiences/:id/toggle", adminMiddleware, requireAdminReason, async (req, res) => {
-  try { await __auditAdmin(req, "admin_experience_toggle", { targetType: "experience", targetId: String(req.params.id || "" ) }, { ok: true }); } catch (_) {}
+  try { await __auditAdmin(req, "admin_experience_toggle", { targetType: "experience", targetId: String(req.params.id || "" ) }, { ok: true }); } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
 
   try {
     const expId = __cleanId(req.params.id, 64);
@@ -6932,7 +7140,9 @@ function startPaymentReconciliationLoop_V1() {
   if (global.__tsts_payment_recon_started_v1 === true) return;
   global.__tsts_payment_recon_started_v1 = true;
 let __payment_recon_inflight_v1 = false;
-  try { __log("info", "job_runner_started", { job: "payment_reconciliation_v1" }); } catch (_) {}
+  try { __log("info", "job_runner_started", { job: "payment_reconciliation_v1" }); } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
   setTimeout(() => { runPaymentReconciliationOnce_V1().catch(() => {}); }, 30 * 1000);
   setInterval(() => {
   if (__payment_recon_inflight_v1) return;
@@ -6990,20 +7200,26 @@ async function runUnpaidBookingExpiryCleanupOnce_V1() {
                 const r2 = await Booking.updateOne({ _id: b._id, capacityReleasedAt: null }, claimUpd);
                 claimed = Boolean(r2 && (Number(r2.modifiedCount) > 0 || Number(r2.nModified) > 0));
               } catch (e) {
-                try { __log("warn", "unpaid_expiry_step_failed", { step: "claim_capacityReleasedAt", bookingId: String(b._id || ""), err: String((e && e.message) ? e.message : e) }); } catch (_) {}
+                try { __log("warn", "unpaid_expiry_step_failed", { step: "claim_capacityReleasedAt", bookingId: String(b._id || ""), err: String((e && e.message) ? e.message : e) }); } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
               }
               if (claimed) {
                 let releasedOk = false;
                 try { await releaseCapacitySlot(expId, dateStr, slot, g); releasedOk = true; } catch (e) {
                   releasedOk = false;
-                  try { __log("warn", "unpaid_expiry_step_failed", { step: "release_capacity", bookingId: String(b._id || ""), experienceId: String(expId || ""), bookingDate: String(dateStr || ""), timeSlot: String(slot || ""), guests: Number(g || 0), err: String((e && e.message) ? e.message : e) }); } catch (_) {}
+                  try { __log("warn", "unpaid_expiry_step_failed", { step: "release_capacity", bookingId: String(b._id || ""), experienceId: String(expId || ""), bookingDate: String(dateStr || ""), timeSlot: String(slot || ""), guests: Number(g || 0), err: String((e && e.message) ? e.message : e) }); } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
                 }
                 if (!releasedOk) {
                   const UNSET = String.fromCharCode(36) + "unset";
                   const revertUpd = {};
                   revertUpd[UNSET] = { capacityReleasedAt: 1 };
                   try { await Booking.updateOne({ _id: b._id, capacityReleasedAt: now }, revertUpd); } catch (e) {
-                    try { __log("warn", "unpaid_expiry_step_failed", { step: "revert_capacityReleasedAt", bookingId: String(b._id || ""), err: String((e && e.message) ? e.message : e) }); } catch (_) {}
+                    try { __log("warn", "unpaid_expiry_step_failed", { step: "revert_capacityReleasedAt", bookingId: String(b._id || ""), err: String((e && e.message) ? e.message : e) }); } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
                   }
                 }
               }
@@ -7011,19 +7227,29 @@ async function runUnpaidBookingExpiryCleanupOnce_V1() {
                 const bookingDoc = await Booking.findById(String(b._id || ""));
                 if (bookingDoc) {
                   try { await maybeSendBookingExpiredComms(bookingDoc); } catch (e) {
-                    try { __log("warn", "unpaid_expiry_step_failed", { step: "send_expired_comms", bookingId: String(b._id || ""), err: String((e && e.message) ? e.message : e) }); } catch (_) {}
+                    try { __log("warn", "unpaid_expiry_step_failed", { step: "send_expired_comms", bookingId: String(b._id || ""), err: String((e && e.message) ? e.message : e) }); } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
                   }
                 }
               } catch (e) {
-                try { __log("warn", "unpaid_expiry_step_failed", { step: "load_booking_for_comms", bookingId: String(b._id || ""), err: String((e && e.message) ? e.message : e) }); } catch (_) {}
+                try { __log("warn", "unpaid_expiry_step_failed", { step: "load_booking_for_comms", bookingId: String(b._id || ""), err: String((e && e.message) ? e.message : e) }); } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
               }
-            } catch (_) {}
+            } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
 
           }
-        } catch (_) {}
+        } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
       }
     }
-  } catch (_) {}
+  } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
 }
 
 function startUnpaidBookingExpiryCleanupLoop_V1() {
@@ -7034,7 +7260,9 @@ function startUnpaidBookingExpiryCleanupLoop_V1() {
 
   try {
     startJobs((level, msg, meta) => {
-      try { __log(level, msg, meta || {}); } catch (_) {}
+      try { __log(level, msg, meta || {}); } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
     });
 
     setTimeout(() => {
@@ -7070,7 +7298,9 @@ app.post("/api/comms/email-event", async (req, res) => {
     const got = String((req.headers && (req.headers["x-comms-secret"] || req.headers["X-Comms-Secret"])) || "");
     if (!secret || got !== secret) {
       const rid = String((req && (req.requestId || req.rid)) ? (req.requestId || req.rid) : "");
-      try { if (rid) res.set("X-Request-Id", rid); } catch (_) {}
+      try { if (rid) res.set("X-Request-Id", rid); } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
       return res.status(401).json({ ok: false, code: "UNAUTHORIZED", message: "Unauthorized", rid: rid });
     }
 
@@ -7085,18 +7315,26 @@ app.post("/api/comms/email-event", async (req, res) => {
     if (!email) return res.status(400).json({ ok: false, message: "email required" });
 
     if (event === "bounced" || event === "hard_bounce") {
-      try { await EmailSuppression.updateOne({ email }, { $set: { reason: reason || "hard_bounce" } }, { upsert: true }); } catch (_) {}
+      try { await EmailSuppression.updateOne({ email }, { $set: { reason: reason || "hard_bounce" } }, { upsert: true }); } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
       if (bookingId) {
-        try { await EmailDelivery.updateOne({ bookingId, template }, { $set: { state: "bounced", providerMessageId, error: reason || "bounced" } }); } catch (_) {}
+        try { await EmailDelivery.updateOne({ bookingId, template }, { $set: { state: "bounced", providerMessageId, error: reason || "bounced" } }); } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
       }
       __log("info", "email_bounce_recorded", { email, bookingId: bookingId || undefined, template, reason });
       return res.json({ ok: true });
     }
 
     if (event === "suppressed") {
-      try { await EmailSuppression.updateOne({ email }, { $set: { reason: reason || "suppressed" } }, { upsert: true }); } catch (_) {}
+      try { await EmailSuppression.updateOne({ email }, { $set: { reason: reason || "suppressed" } }, { upsert: true }); } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
       if (bookingId) {
-        try { await EmailDelivery.updateOne({ bookingId, template }, { $set: { state: "suppressed", providerMessageId, error: reason || "suppressed" } }); } catch (_) {}
+        try { await EmailDelivery.updateOne({ bookingId, template }, { $set: { state: "suppressed", providerMessageId, error: reason || "suppressed" } }); } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
       }
       __log("info", "email_suppressed_recorded", { email, bookingId: bookingId || undefined, template, reason });
       return res.json({ ok: true });
@@ -7104,7 +7342,9 @@ app.post("/api/comms/email-event", async (req, res) => {
 
     if (event === "failed") {
       if (bookingId) {
-        try { await EmailDelivery.updateOne({ bookingId, template }, { $set: { state: "failed", providerMessageId, error: reason || "failed" } }); } catch (_) {}
+        try { await EmailDelivery.updateOne({ bookingId, template }, { $set: { state: "failed", providerMessageId, error: reason || "failed" } }); } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
       }
       __log("error", "email_failed_recorded", { email, bookingId: bookingId || undefined, template, reason });
       return res.json({ ok: true });
@@ -7112,7 +7352,9 @@ app.post("/api/comms/email-event", async (req, res) => {
 
     if (event === "delivered") {
       if (bookingId) {
-        try { await EmailDelivery.updateOne({ bookingId, template }, { $set: { state: "delivered", providerMessageId } }); } catch (_) {}
+        try { await EmailDelivery.updateOne({ bookingId, template }, { $set: { state: "delivered", providerMessageId } }); } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
       }
       __log("info", "email_delivered_recorded", { email, bookingId: bookingId || undefined, template });
       return res.json({ ok: true });
@@ -7185,7 +7427,8 @@ async function withJobRun(db, jobName, fn, opts) {
       { $set: { status: "completed", finishedAt: new Date() } }
     );
   } catch (err) {
-    const errStr = (err && err.stack) ? String(err.stack) : String(err);
+    const isProd = String(process.env.NODE_ENV || "").toLowerCase() === "production";
+    const errStr = (isProd ? ((err && err.message) ? String(err.message) : String(err)) : ((err && err.stack) ? String(err.stack) : String(err)));
     await runs.updateOne(
       { runId: runId },
       { $set: { status: "failed", finishedAt: new Date(), error: errStr } }
@@ -7196,7 +7439,9 @@ async function withJobRun(db, jobName, fn, opts) {
       error: errStr,
       at: new Date()
     });
-    try { __log("error", "job_failed", { jobName, runId }); } catch (_) {}
+    try { __log("error", "job_failed", { jobName, runId }); } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
     throw err;
   } finally {
     await locks.updateOne(
@@ -7217,42 +7462,58 @@ async function withJobRun(db, jobName, fn, opts) {
 // Note: This endpoint runs functions that are already safe/idempotent by design.
 function internalJobsGuardMiddleware(req, res, next) {
   const rid = String((req && (req.requestId || req.rid)) ? (req.requestId || req.rid) : __tstsRidNow());
-  try { if (rid) res.set("X-Request-Id", rid); } catch (_) {}
+  try { if (rid) res.set("X-Request-Id", rid); } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
 
   if (typeof __dbReady !== "undefined" && __dbReady !== true) {
-    try { __log("error", "internal_jobs_db_not_ready", { rid: rid, path: "/api/internal/jobs/run" }); } catch (_) {}
+    try { __log("error", "internal_jobs_db_not_ready", { rid: rid, path: "/api/internal/jobs/run" }); } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
     return res.status(503).json({ ok: false, code: "DB_NOT_READY", message: "Database not ready", rid: rid });
   }
 
   const expected = String(process.env.INTERNAL_JOBS_TOKEN || "").trim();
   if (expected.length === 0) {
-    try { __log("error", "internal_jobs_token_missing", { rid: rid, path: "/api/internal/jobs/run" }); } catch (_) {}
+    try { __log("error", "internal_jobs_token_missing", { rid: rid, path: "/api/internal/jobs/run" }); } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
     return res.status(500).json({ ok: false, code: "MISCONFIGURED", message: "Internal jobs token missing", rid: rid });
   }
 
   const got = String((req && req.headers && (req.headers["x-internal-token"] || req.headers["X-Internal-Token"])) || "").trim();
   if (got.length === 0 || got !== expected) {
-    try { __log("error", "internal_jobs_unauthorized", { rid: rid, path: "/api/internal/jobs/run" }); } catch (_) {}
+    try { __log("error", "internal_jobs_unauthorized", { rid: rid, path: "/api/internal/jobs/run" }); } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
     return res.status(401).json({ ok: false, code: "UNAUTHORIZED", message: "Unauthorized", rid: rid });
   }
 
   try {
     if (global && global.__tsts_internal_jobs_running === true) {
-      try { __log("error", "internal_jobs_busy", { rid: rid, path: "/api/internal/jobs/run" }); } catch (_) {}
+      try { __log("error", "internal_jobs_busy", { rid: rid, path: "/api/internal/jobs/run" }); } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
       return res.status(409).json({ ok: false, code: "BUSY", message: "Busy", rid: rid });
     }
     if (global) global.__tsts_internal_jobs_running = true;
-  } catch (_) {}
+  } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
 
   return next();
 }
 
 app.post("/api/internal/jobs/run", internalJobsGuardMiddleware, async (req, res) => {
   const rid = String((req && (req.requestId || req.rid)) ? (req.requestId || req.rid) : __tstsRidNow());
-  try { if (rid) res.set("X-Request-Id", rid); } catch (_) {}
+  try { if (rid) res.set("X-Request-Id", rid); } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
 
   const queued = ["unpaid_booking_expiry_cleanup_v1", "payment_reconciliation_v1"];
-  try { res.status(202).json({ ok: true, accepted: true, queued: queued, rid: rid }); } catch (_) {}
+  try { res.status(202).json({ ok: true, accepted: true, queued: queued, rid: rid }); } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
 
   setTimeout(async () => {
     const ran = [];
@@ -7271,9 +7532,13 @@ app.post("/api/internal/jobs/run", internalJobsGuardMiddleware, async (req, res)
           ok ? "internal_jobs_async_ok" : "internal_jobs_async_fail",
           { rid: rid, path: "/api/internal/jobs/run", ran: ran, errors: errors }
         );
-      } catch (_) {}
+      } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
     } finally {
-      try { if (global) global.__tsts_internal_jobs_running = false; } catch (_) {}
+      try { if (global) global.__tsts_internal_jobs_running = false; } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
     }
   }, 0);
 });
@@ -7295,8 +7560,12 @@ async function __startServerAfterDb() {
 
     // Start job loops only after DB is ready
     // jobs start after db_connected
-    try { startUnpaidBookingExpiryCleanupLoop_V1(); } catch (_) {}
-    try { startPaymentReconciliationLoop_V1(); } catch (_) {}
+    try { startUnpaidBookingExpiryCleanupLoop_V1(); } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
+    try { startPaymentReconciliationLoop_V1(); } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
 
   } catch (e) {
     console.error("STARTUP_FATAL", (e && e.message) ? e.message : String(e));
@@ -7499,8 +7768,12 @@ app.get(
             esc(r.updatedAt)
           ].join("\,"));
         }
-        try { res.set("Content-Type", "text/csv; charset=utf-8"); } catch (_) {}
-        try { res.set("Content-Disposition", "attachment; filename=bookings_export.csv"); } catch (_) {}
+        try { res.set("Content-Type", "text/csv; charset=utf-8"); } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
+        try { res.set("Content-Disposition", "attachment; filename=bookings_export.csv"); } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
         return res.status(200).send(out.join("\n"));
       }
 
@@ -7514,7 +7787,9 @@ app.get(
   if (__httpServerStarted) return;
   __httpServerStarted = true;
       app.listen(PORT, () => {
-        try { __log("info", "server_listen", { rid: undefined, path: undefined }); } catch (_) {}
+        try { __log("info", "server_listen", { rid: undefined, path: undefined }); } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
       });
 }
 __startHttpServerOnce();
@@ -7606,7 +7881,9 @@ async function transitionBooking(booking, nextStatus, meta = {}) {
   // Keep in-memory doc consistent with persisted transition
   try {
     Object.assign(booking, updates);
-  } catch (_) {}
+  } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
 
   await booking.updateOne({ $set: updates });
 
