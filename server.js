@@ -159,7 +159,7 @@ function __fireAndForgetEmail(payload) {
       p.catch(function(e) {
         try {
           const msg = (e && e.message) ? e.message : String(e);
-          console.error("EMAIL_ASYNC_ERR", msg);
+          try { __log("error", "email_async_err", { rid: __tstsRidNow(), msg: String(msg) }); } catch (_) {}
         } catch (_) {
     try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
   }
@@ -168,7 +168,7 @@ function __fireAndForgetEmail(payload) {
   } catch (e) {
     try {
       const msg = (e && e.message) ? e.message : String(e);
-      console.error("EMAIL_DISPATCH_ERR", msg);
+      try { __log("error", "email_dispatch_err", { rid: __tstsRidNow(), msg: String(msg) }); } catch (_) {}
     } catch (_) {
     try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
   }
@@ -2912,7 +2912,7 @@ async function maybeSendBookingConfirmedComms(booking) {
     await booking.save();
   } catch (e) {
     const msg = e && e.message ? e.message : String(e);
-    console.error("COMMS_CONFIRM_ERR", msg);
+    try { __log("error", "comms_confirm_err", { rid: __tstsRidNow(), msg: String(msg) }); } catch (_) {}
   }
 }
 
@@ -2988,7 +2988,7 @@ async function maybeSendBookingCancelledComms(booking) {
     }
   } catch (e) {
     const msg = e && e.message ? e.message : String(e);
-    console.error("COMMS_CANCEL_ERR", msg);
+    try { __log("error", "comms_cancel_err", { rid: __tstsRidNow(), msg: String(msg) }); } catch (_) {}
   }
 }
 
@@ -3117,7 +3117,7 @@ async function maybeSendBookingExpiredComms(booking) {
       }
     }
   } catch (e) {
-    console.error("COMMS_EXPIRED_ERR", (e && e.message) ? e.message : String(e));
+    try { __log("error", "comms_expired_err", { rid: __tstsRidNow(), error: String((e && e.message) ? e.message : String(e)) }); } catch (_) {}
   }
 }
 
@@ -3218,7 +3218,7 @@ async function maybeSendRefundProcessedComms(booking) {
     void hostName;
   } catch (e) {
     const msg = e && e.message ? e.message : String(e);
-    console.error("COMMS_REFUND_ERR", msg);
+    try { __log("error", "comms_refund_err", { rid: __tstsRidNow(), msg: String(msg) }); } catch (_) {}
   }
 }
 
@@ -3294,7 +3294,7 @@ async function maybeSendBookingCancelledByHostComms(booking) {
     }
   } catch (e) {
     const msg = e && e.message ? e.message : String(e);
-    console.error("COMMS_CANCEL_HOST_ERR", msg);
+    try { __log("error", "comms_cancel_host_err", { rid: __tstsRidNow(), msg: String(msg) }); } catch (_) {}
   }
 }
 
@@ -6232,7 +6232,7 @@ app.get("/api/reviews", async (req, res) => {
 
     return res.json({ ok: true, page: page, limit: limit, count: reviews.length, reviews: reviews });
   } catch (e) {
-    console.error("GET /api/reviews failed:", e);
+    try { __log("error", "reviews_fetch_failed", { rid: __tstsRidNow(), error: String((e && e.message) ? e.message : String(e)) }); } catch (_) {}
     return res.status(500).json({ ok: false, error: "REVIEWS_FETCH_FAILED" });
   }
 });
@@ -7047,33 +7047,40 @@ app.patch("/api/admin/experiences/:id/toggle", adminMiddleware, requireAdminReas
 });
 
 app.get("/api/users/:userId/profile", async (req, res) => {
+  const rid = String((req && (req.requestId || req.rid)) ? (req.requestId || req.rid) : __tstsRidNow());
+  try { if (rid) res.set("X-Request-Id", rid); } catch (_) {}
+
   try {
     const userIdParam = __cleanId(req.params.userId, 64);
-    if (!userIdParam) return res.status(400).json({ message: "Invalid userId" });
+    if (!userIdParam) {
+      return res.status(400).json({ ok: false, code: "INVALID_USER_ID", message: "Invalid userId", rid: rid });
+    }
 
     const meId = req.user && (req.user._id || req.user.id);
     const isAdmin = !!(req.user && req.user.isAdmin);
-    const isSelf = !!(meId && String(meId) == String(userIdParam));
+    const isSelf = !!(meId && String(meId) === String(userIdParam));
 
     const user = await User.findById(userIdParam)
       .select("name profilePic bio handle publicProfile createdAt discoverable blockedUserIds")
       .lean();
 
-    if (!user) return res.status(404).json({ message: "User not found" });
+    if (!user) {
+      return res.status(404).json({ ok: false, code: "NOT_FOUND", message: "User not found", rid: rid });
+    }
 
     if (!isSelf && !isAdmin) {
       if (__canDiscoverUser(user) !== true) {
-        return res.status(404).json({ message: "User not found" });
+        return res.status(404).json({ ok: false, code: "NOT_FOUND", message: "User not found", rid: rid });
       }
 
       if (meId) {
         try {
           const meDoc = await User.findById(meId).select("blockedUserIds").lean();
           if (__isBlockedPair(meDoc, user, meId, userIdParam) === true) {
-            return res.status(404).json({ message: "User not found" });
+            return res.status(404).json({ ok: false, code: "NOT_FOUND", message: "User not found", rid: rid });
           }
         } catch (_e) {
-          return res.status(404).json({ message: "User not found" });
+          return res.status(404).json({ ok: false, code: "NOT_FOUND", message: "User not found", rid: rid });
         }
       }
     }
@@ -7089,7 +7096,14 @@ app.get("/api/users/:userId/profile", async (req, res) => {
 
     return res.json(out);
   } catch (err) {
-    return res.status(500).json({ ok: false, error: "profile_fetch_failed", code: "PROFILE_FETCH_FAILED", message: "Error fetching profile" });
+    try {
+      __log("error", "profile_fetch_failed", {
+        rid: rid,
+        path: "/api/users/:userId/profile",
+        error: (err && err.message) ? String(err.message) : String(err)
+      });
+    } catch (_) {}
+    return res.status(500).json({ ok: false, code: "PROFILE_FETCH_FAILED", message: "Error fetching profile", rid: rid });
   }
 });
 
@@ -7293,76 +7307,102 @@ function startUnpaidBookingExpiryCleanupLoop_V1() {
 
 // TSTS_VERSION_ENDPOINT
 app.post("/api/comms/email-event", async (req, res) => {
+  const rid = String((req && (req.requestId || req.rid)) ? (req.requestId || req.rid) : __tstsRidNow());
+  try { if (rid) res.set("X-Request-Id", rid); } catch (_) {}
+
   try {
-    const secret = String(process.env.COMMS_WEBHOOK_SECRET || "");
-    const got = String((req.headers && (req.headers["x-comms-secret"] || req.headers["X-Comms-Secret"])) || "");
+    const secret = String(process.env.EMAIL_EVENT_SECRET || "").trim();
+    const got = String((req && req.headers && (req.headers["x-email-event-secret"] || req.headers["X-Email-Event-Secret"])) || "").trim();
     if (!secret || got !== secret) {
-      const rid = String((req && (req.requestId || req.rid)) ? (req.requestId || req.rid) : "");
-      try { if (rid) res.set("X-Request-Id", rid); } catch (_) {
-    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
-  }
       return res.status(401).json({ ok: false, code: "UNAUTHORIZED", message: "Unauthorized", rid: rid });
     }
 
-    const body = req.body || {};
-    const email = String(body.email || "").toLowerCase().trim();
-    const event = String(body.event || "").toLowerCase().trim(); // bounced | delivered | failed | suppressed
-    const reason = String(body.reason || "");
-    const bookingId = String(body.bookingId || "").trim();
-    const template = String(body.template || "EVENT_EMAIL").trim();
-    const providerMessageId = String(body.providerMessageId || "");
-
-    if (!email) return res.status(400).json({ ok: false, message: "email required" });
-
-    if (event === "bounced" || event === "hard_bounce") {
-      try { await EmailSuppression.updateOne({ email }, { $set: { reason: reason || "hard_bounce" } }, { upsert: true }); } catch (_) {
-    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
-  }
-      if (bookingId) {
-        try { await EmailDelivery.updateOne({ bookingId, template }, { $set: { state: "bounced", providerMessageId, error: reason || "bounced" } }); } catch (_) {
-    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
-  }
-      }
-      __log("info", "email_bounce_recorded", { email, bookingId: bookingId || undefined, template, reason });
-      return res.json({ ok: true });
+    const email = String((req && req.body && req.body.email) ? req.body.email : "").trim().toLowerCase();
+    if (!email) {
+      return res.status(400).json({ ok: false, code: "INVALID_INPUT", message: "email required", rid: rid });
     }
 
-    if (event === "suppressed") {
-      try { await EmailSuppression.updateOne({ email }, { $set: { reason: reason || "suppressed" } }, { upsert: true }); } catch (_) {
-    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
-  }
-      if (bookingId) {
-        try { await EmailDelivery.updateOne({ bookingId, template }, { $set: { state: "suppressed", providerMessageId, error: reason || "suppressed" } }); } catch (_) {
-    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
-  }
-      }
-      __log("info", "email_suppressed_recorded", { email, bookingId: bookingId || undefined, template, reason });
-      return res.json({ ok: true });
+    const eventRaw = String((req && req.body && req.body.event) ? req.body.event : "").trim().toLowerCase();
+    if (!eventRaw) {
+      return res.status(400).json({ ok: false, code: "INVALID_INPUT", message: "event required", rid: rid });
     }
 
-    if (event === "failed") {
-      if (bookingId) {
-        try { await EmailDelivery.updateOne({ bookingId, template }, { $set: { state: "failed", providerMessageId, error: reason || "failed" } }); } catch (_) {
-    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
-  }
-      }
-      __log("error", "email_failed_recorded", { email, bookingId: bookingId || undefined, template, reason });
-      return res.json({ ok: true });
+    const bookingId = String((req && req.body && req.body.bookingId) ? req.body.bookingId : "").trim();
+    const template = String((req && req.body && req.body.template) ? req.body.template : "EVENT_EMAIL").trim();
+    const providerMessageId = String((req && req.body && req.body.providerMessageId) ? req.body.providerMessageId : "").trim();
+    const reason = String((req && req.body && req.body.reason) ? req.body.reason : "").trim();
+
+    const allowed = ["delivered", "bounce", "bounced", "complaint", "suppressed", "unsubscribe", "unsubscribed", "failed"];
+    if (allowed.indexOf(eventRaw) < 0) {
+      return res.status(400).json({ ok: false, code: "INVALID_EVENT", message: "unknown event", rid: rid });
     }
 
-    if (event === "delivered") {
-      if (bookingId) {
-        try { await EmailDelivery.updateOne({ bookingId, template }, { $set: { state: "delivered", providerMessageId } }); } catch (_) {
-    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
-  }
+    const toState = (ev) => {
+      if (ev === "delivered") return "delivered";
+      if (ev === "failed") return "failed";
+      if (ev === "bounce" || ev === "bounced") return "bounced";
+      if (ev === "complaint") return "complaint";
+      if (ev === "suppressed") return "suppressed";
+      if (ev === "unsubscribe" || ev === "unsubscribed") return "unsubscribed";
+      return "received";
+    };
+
+    const state = toState(eventRaw);
+
+    if (state !== "delivered" && state !== "received") {
+      const supReason = reason ? reason : state;
+      try {
+        await EmailSuppression.updateOne({ email: email }, { $set: { reason: supReason } }, { upsert: true });
+      } catch (e) {
+        try {
+          __log("warn", "email_event_webhook_db_fail", {
+            rid: rid,
+            op: "EmailSuppression.updateOne",
+            email: email,
+            state: state,
+            error: (e && e.message) ? String(e.message) : String(e)
+          });
+        } catch (_) {}
       }
-      __log("info", "email_delivered_recorded", { email, bookingId: bookingId || undefined, template });
-      return res.json({ ok: true });
     }
 
-    return res.status(400).json({ ok: false, message: "unknown event" });
+    if (bookingId) {
+      const upd = {
+        state: state,
+        providerMessageId: providerMessageId,
+        error: reason
+      };
+      try {
+        await EmailDelivery.updateOne({ bookingId: bookingId, template: template }, { $set: upd });
+      } catch (e) {
+        try {
+          __log("warn", "email_event_webhook_db_fail", {
+            rid: rid,
+            op: "EmailDelivery.updateOne",
+            bookingId: bookingId,
+            template: template,
+            state: state,
+            error: (e && e.message) ? String(e.message) : String(e)
+          });
+        } catch (_) {}
+      }
+    }
+
+    try {
+      __log("info", "email_event_processed", {
+        rid: rid,
+        email: email,
+        event: eventRaw,
+        state: state,
+        bookingId: bookingId ? bookingId : undefined,
+        template: template ? template : undefined
+      });
+    } catch (_) {}
+
+    return res.status(200).json({ ok: true, rid: rid });
   } catch (e) {
-    return res.status(500).json({ ok: false });
+    try { __log("error", "email_event_failed", { rid: rid, error: (e && e.message) ? String(e.message) : String(e) }); } catch (_) {}
+    return res.status(500).json({ ok: false, code: "EMAIL_EVENT_FAILED", message: "Server error", rid: rid });
   }
 });
 
@@ -7713,6 +7753,9 @@ app.get(
   adminMiddleware,
   requireAdminReason,
   async (req, res) => {
+    const rid = String((req && (req.requestId || req.rid)) ? (req.requestId || req.rid) : __tstsRidNow());
+    try { if (rid) res.set("X-Request-Id", rid); } catch (_) {}
+
     try {
       const format = String((req.query && req.query.format) ? req.query.format : "json").toLowerCase();
       const limRaw = (req.query && req.query.limit) ? req.query.limit : "1000";
@@ -7741,14 +7784,26 @@ app.get(
         const header = [
           "id","experienceId","guestId","hostId","guestName","guestEmail","numGuests","bookingDate","timeSlot","status","paymentStatus","stripeSessionId","stripePaymentIntentId","createdAt","updatedAt"
         ];
+
+        const protectCsv = (txt) => {
+          if (!txt) return txt;
+          const first = txt[0];
+          if (first === "=" || first === "+" || first === "-" || first === "@") {
+            return String.fromCharCode(39) + txt;
+          }
+          return txt;
+        };
+
         const esc = (v) => {
-          const x = (v == null) ? "" : String(v);
-          const needs = (x.indexOf("\,") >= 0) || (x.indexOf("\"") >= 0) || (x.indexOf("\n") >= 0);
+          const raw = (v == null) ? "" : String(v);
+          const x = protectCsv(raw);
+          const needs = (x.indexOf(",") >= 0) || (x.indexOf("\"") >= 0) || (x.indexOf("\n") >= 0);
           const y = x.replace(/"/g, "\"\"");
           return needs ? ("\"" + y + "\"") : y;
         };
+
         const out = [];
-        out.push(header.join("\,"));
+        out.push(header.join(","));
         for (const r of (rows || [])) {
           out.push([
             esc(r._id),
@@ -7766,20 +7821,25 @@ app.get(
             esc(r.stripePaymentIntentId),
             esc(r.createdAt),
             esc(r.updatedAt)
-          ].join("\,"));
+          ].join(","));
         }
-        try { res.set("Content-Type", "text/csv; charset=utf-8"); } catch (_) {
-    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
-  }
-        try { res.set("Content-Disposition", "attachment; filename=bookings_export.csv"); } catch (_) {
-    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
-  }
+
+        try { res.set("Content-Type", "text/csv; charset=utf-8"); } catch (_) {}
+        try { res.set("Content-Disposition", "attachment; filename=bookings_export.csv"); } catch (_) {}
         return res.status(200).send(out.join("\n"));
+
       }
 
-      return res.json({ ok: true, count: (rows || []).length, rows: rows || [] });
-    } catch (_) {
-      return res.status(500).json({ message: "Server error" });
+      return res.json({ ok: true, rid: rid, count: (rows || []).length, rows: rows || [] });
+    } catch (e) {
+      try {
+        __log("error", "admin_export_bookings_failed", {
+          rid: rid,
+          path: "/api/admin/export/bookings",
+          error: (e && e.message) ? String(e.message) : String(e)
+        });
+      } catch (_) {}
+      return res.status(500).json({ ok: false, code: "EXPORT_FAILED", message: "Export failed", rid: rid });
     }
   }
 );
