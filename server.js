@@ -7895,6 +7895,14 @@ app.get(
   }
 );
 
+// BUILD FINGERPRINT (deploy verification)
+app.get("/sha", (req, res) => {
+  const rid = String((req && (req.requestId || req.rid)) ? (req.requestId || req.rid) : __tstsRidNow());
+  try { if (rid) res.set("X-Request-Id", rid); } catch (_) {}
+  const sha = (process.env.RENDER_GIT_COMMIT || process.env.COMMIT_SHA || process.env.GIT_SHA || process.env.SHA || "unknown");
+  return res.status(200).json({ ok: true, sha: String(sha), rid: rid });
+});
+
   if (__httpServerStarted) return;
   __httpServerStarted = true;
       app.listen(PORT, () => {
