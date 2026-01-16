@@ -6533,14 +6533,33 @@ app.post("/api/bookmarks/:experienceId", authMiddleware, async (req, res) => {
   const { experienceId } = req.params;
   const userId = req.user._id;
 
-  const existing = await Bookmark.findOne({ userId, experienceId });
-  if (existing) {
-    await Bookmark.findByIdAndDelete(existing._id);
-    return res.json({ message: "Removed" });
+  // Validate experienceId format using existing pattern
+  const cleanId = __cleanId(experienceId, 64);
+  if (!cleanId) return res.status(400).json({ ok: false, code: "INVALID_EXPERIENCE_ID", message: "Invalid experienceId", rid: __ridFromReq(req) });
+
+  // Validate experience existence
+  const experience = await Experience.findById(cleanId);
+  if (!experience) return res.status(404).json({ ok: false, code: "EXPERIENCE_NOT_FOUND", message: "Experience not found", rid: __ridFromReq(req) });
+
+  // Check if experience is disabled or unpublished
+  if (experience.isDisabled || experience.isUnpublished) {
+    // Allow if user is admin or host
+    const isAdmin = req.user.role === 'admin';
+    const isHost = String(experience.hostId) === String(userId);
+    
+    if (!isAdmin && !isHost) {
+      return res.status(403).json({ ok: false, code: "EXPERIENCE_NOT_AVAILABLE", message: "Experience not available", rid: __ridFromReq(req) });
+    }
   }
 
-  await Bookmark.create({ userId, experienceId });
-  res.json({ message: "Added" });
+  const existing = await Bookmark.findOne({ userId, experienceId: cleanId });
+  if (existing) {
+    await Bookmark.findByIdAndDelete(existing._id);
+    return res.json({ ok: true, message: "Removed" });
+  }
+
+  await Bookmark.create({ userId, experienceId: cleanId });
+  return res.json({ ok: true, message: "Added" });
 });
 
 app.get("/api/my/bookmarks/details", authMiddleware, async (req, res) => {
@@ -6700,11 +6719,6 @@ app.post("/api/social/requests/:id/reject", authMiddleware, socialGuard, async (
   }
 });
 
-app.post("/api/social/requests/:id/block", authMiddleware, socialGuard, async (req, res) => {
-  try {
-    const connId = __cleanId(req.params.id, 64);
-    if (!connId) return res.status(400).json({ message: "Invalid requestId" });
-
 // SOCIAL_USER_BLOCK_TSTS (Batch6 G1)
 app.post("/api/social/block-user", authMiddleware, socialGuard, connectLimiter, async (req, res) => {
   try {
@@ -6723,6 +6737,12 @@ app.post("/api/social/block-user", authMiddleware, socialGuard, connectLimiter, 
     return res.status(500).json({ message: "Server error" });
   }
 });
+
+// Social: accept / reject / block
+app.post("/api/social/requests/:id/block", authMiddleware, socialGuard, async (req, res) => {
+  try {
+    const connId = __cleanId(req.params.id, 64);
+    if (!connId) return res.status(400).json({ message: "Invalid requestId" });
 
     const c = await Connection.findById(connId);
     if (!c) return res.status(404).json({ message: "Not found" });
@@ -6754,6 +6774,41 @@ app.get("/api/social/connections", authMiddleware, socialGuard, async (req, res)
       out.push({ _id: c._id, user: await minimalUserCard(otherId) });
     }
     return res.json(out);
+  } catch (e) {
+    return res.status(500).json({ message: "Server error" });
+  }
+});
+
+// Social: remove connection
+app.post("/api/social/connections/:userId/remove", authMiddleware, socialGuard, async (req, res) => {
+  try {
+    const targetUserId = __cleanId(req.params.userId, 64);
+    if (!targetUserId) return res.status(400).json({ message: "Invalid userId" });
+
+    const meId = String(req.user._id);
+    if (targetUserId === meId) return res.status(400).json({ message: "Cannot remove connection with yourself" });
+
+    // Find an accepted connection between the users
+    const connection = await Connection.findOne({
+      status: "accepted",
+      $or: [
+        { requesterId: meId, addresseeId: targetUserId },
+        { requesterId: targetUserId, addresseeId: meId }
+      ]
+    });
+
+    if (!connection) return res.status(404).json({ message: "Connection not found" });
+
+    // Use existing social safety check
+    const targetUser = await User.findById(targetUserId).select("_id blockedUserIds").lean();
+    if (__isBlockedPair(req.user, targetUser, meId, targetUserId) === true) {
+      return res.status(403).json({ message: "Cannot remove connection" });
+    }
+
+    // Delete the connection
+    await Connection.findByIdAndDelete(connection._id);
+
+    return res.json({ ok: true });
   } catch (e) {
     return res.status(500).json({ message: "Server error" });
   }
