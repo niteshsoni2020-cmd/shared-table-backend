@@ -652,6 +652,20 @@ function __ridFromReq(req) {
   }
 }
 
+// BE-YELLOW-01: Structured error helper for consistent error responses
+function __err(res, code, status, err, meta) {
+  try {
+    const rid = __tstsRidNow();
+    const statusCode = Number.isFinite(Number(status)) ? Number(status) : 500;
+    const errorCode = String(code || "SERVER_ERROR").toUpperCase();
+    const errMsg = (err && err.message) ? String(err.message) : (typeof err === "string" ? err : "");
+    __log("error", errorCode.toLowerCase(), { rid, code: errorCode, status: statusCode, error: errMsg, ...(meta || {}) });
+    return res.status(statusCode).json({ ok: false, error: errorCode, code: errorCode, message: errMsg || "Server error", rid });
+  } catch (_) {
+    return res.status(500).json({ ok: false, error: "SERVER_ERROR", code: "SERVER_ERROR", message: "Server error" });
+  }
+}
+
 function __tstsCodeFromStatus(statusCode) {
   const sc = Number(statusCode || 0);
   if (sc === 400) return "BAD_REQUEST";
@@ -1427,9 +1441,9 @@ mongoose.connection == null || mongoose.connection.readyState !== 1) {
 
         try {
           await evCol.updateOne({ eventId }, { $set: { data: (event && event.data) ? event.data : null } });
-        } catch (_) {
-    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
-  }
+        } catch (dataErr) {
+          __log("warn", "webhook_ledger_data_update_failed", { rid: __tstsRidNow(), eventId, error: (dataErr && dataErr.message) || String(dataErr) });
+        }
       } catch (e) {
         if (__isDuplicateKeyError(e)) {
           try {
@@ -1451,15 +1465,20 @@ mongoose.connection == null || mongoose.connection.readyState !== 1) {
         const session = (event && event.data && event.data.object) ? event.data.object : {};
         const bookingId = session.client_reference_id || (session.metadata && session.metadata.bookingId);
         if (!bookingId) {
-          try { await evCol.updateOne({ eventId }, { $set: { processedAt: new Date(), processingAt: null, error: "missing_booking_id" } }); } catch (_) {
-    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
-  }
+          try { await evCol.updateOne({ eventId }, { $set: { processedAt: new Date(), processingAt: null, status: "error", error: "missing_booking_id" } }); } catch (ledgerErr) {
+            __log("warn", "webhook_ledger_update_failed", { rid: __tstsRidNow(), eventId, handler: "checkout.session.completed", error: (ledgerErr && ledgerErr.message) || String(ledgerErr) });
+          }
           return res.json({ received: true });
         }
 
         const BookingModel = mongoose.model("Booking");
         const booking = await BookingModel.findById(bookingId);
-        if (!booking) return res.json({ received: true });
+        if (!booking) {
+          try { await evCol.updateOne({ eventId }, { $set: { processedAt: new Date(), processingAt: null, status: "ignored_not_found", error: "booking_not_found" } }); } catch (ledgerErr) {
+            __log("warn", "webhook_ledger_update_failed", { rid: __tstsRidNow(), eventId, handler: "checkout.session.completed", error: (ledgerErr && ledgerErr.message) || String(ledgerErr) });
+          }
+          return res.json({ received: true });
+        }
 
         booking.stripeSessionId = String(session.id || booking.stripeSessionId || "");
 
@@ -1494,10 +1513,15 @@ mongoose.connection == null || mongoose.connection.readyState !== 1) {
         booking.currency = String(booking.currency || "aud").toLowerCase();
         await booking.save();
 
+        // BE-RED-02: Mark event as successfully processed
+        try { await evCol.updateOne({ eventId }, { $set: { processedAt: new Date(), processingAt: null, status: "success", error: "" } }); } catch (ledgerErr) {
+          __log("warn", "webhook_ledger_update_failed", { rid: __tstsRidNow(), eventId, handler: "checkout.session.completed", error: (ledgerErr && ledgerErr.message) || String(ledgerErr) });
+        }
+
         try {
           if (!booking.comms || typeof booking.comms !== "object") booking.comms = {};
           const when = new Date();
-          const gate = await Booking.findOneAndUpdate(
+          const gate = await BookingModel.findOneAndUpdate(
             { _id: booking._id, $or: [ { "comms.invoiceReceiptGuestSentAt": { $exists: false } }, { "comms.invoiceReceiptGuestSentAt": null } ] },
             { $set: { "comms.invoiceReceiptGuestSentAt": when } },
             { new: true }
@@ -1514,29 +1538,106 @@ mongoose.connection == null || mongoose.connection.readyState !== 1) {
             const amt = (cents === null) ? "" : (cur + " " + (Number(cents) / 100).toFixed(2));
             if (to) __fireAndForgetEmail({ to, eventName: "INVOICE_RECEIPT_GUEST", category: "PAYMENTS", vars: { DASHBOARD_URL: __dashboardUrl(), Name: nm, DATE: date, EXPERIENCE_TITLE: title, AMOUNT: amt } });
           }
-        } catch (_) {
-    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
-  }
+        } catch (commsErr) {
+          __log("warn", "webhook_comms_failed", { rid: __tstsRidNow(), eventId, handler: "checkout.session.completed", bookingId: String(booking._id), error: (commsErr && commsErr.message) || String(commsErr) });
+        }
+      }
+
+      if (event.type === "payment_intent.succeeded") {
+        const paymentIntent = (event && event.data && event.data.object) ? event.data.object : {};
+        const piId = paymentIntent.id;
+        
+        if (!piId) {
+          try { await evCol.updateOne({ eventId }, { $set: { processedAt: new Date(), processingAt: null, status: "error", error: "missing_payment_intent_id" } }); } catch (ledgerErr) {
+            __log("warn", "webhook_ledger_update_failed", { rid: __tstsRidNow(), eventId, handler: "payment_intent.succeeded", error: (ledgerErr && ledgerErr.message) || String(ledgerErr) });
+          }
+          return res.json({ received: true });
+        }
+
+        const BookingModel = mongoose.model("Booking");
+        const booking = await BookingModel.findOne({ stripePaymentIntentId: piId });
+        if (!booking) {
+          try { await evCol.updateOne({ eventId }, { $set: { processedAt: new Date(), processingAt: null, status: "ignored_not_found", error: "booking_not_found" } }); } catch (ledgerErr) {
+            __log("warn", "webhook_ledger_update_failed", { rid: __tstsRidNow(), eventId, handler: "payment_intent.succeeded", error: (ledgerErr && ledgerErr.message) || String(ledgerErr) });
+          }
+          return res.json({ received: true });
+        }
+
+        // BE-RED-03: Guard booking state transitions - do not resurrect terminal states
+        const curStatus = String(booking.status || "").toLowerCase();
+        const terminalStates = ["cancelled", "canceled", "refunded", "expired"];
+        if (terminalStates.includes(curStatus)) {
+          __log("info", "stripe_webhook_skip_terminal_state", { rid: __ridFromReq(req), bookingId: String(booking._id), status: curStatus, eventId });
+          try { await evCol.updateOne({ eventId }, { $set: { processedAt: new Date(), processingAt: null, status: "skipped_terminal_state", error: "" } }); } catch (ledgerErr) {
+            __log("warn", "webhook_ledger_update_failed", { rid: __tstsRidNow(), eventId, handler: "payment_intent.succeeded", error: (ledgerErr && ledgerErr.message) || String(ledgerErr) });
+          }
+          return res.json({ received: true });
+        }
+
+        // BE-RED-03: Idempotent exit if already confirmed
+        if (curStatus === "confirmed" && booking.paymentStatus === "paid") {
+          __log("info", "stripe_webhook_already_confirmed", { rid: __ridFromReq(req), bookingId: String(booking._id), eventId });
+          try { await evCol.updateOne({ eventId }, { $set: { processedAt: new Date(), processingAt: null, status: "success_idempotent", error: "" } }); } catch (ledgerErr) {
+            __log("warn", "webhook_ledger_update_failed", { rid: __tstsRidNow(), eventId, handler: "payment_intent.succeeded", error: (ledgerErr && ledgerErr.message) || String(ledgerErr) });
+          }
+          return res.json({ received: true });
+        }
+
+        // Update booking status to confirmed
+        booking.status = "confirmed";
+        booking.paymentStatus = "paid";
+        booking.confirmedAt = new Date();
+        
+        await booking.save();
+
+        // BE-RED-02: Mark event as successfully processed
+        try { await evCol.updateOne({ eventId }, { $set: { processedAt: new Date(), processingAt: null, status: "success", error: "" } }); } catch (ledgerErr) {
+          __log("warn", "webhook_ledger_update_failed", { rid: __tstsRidNow(), eventId, handler: "payment_intent.succeeded", error: (ledgerErr && ledgerErr.message) || String(ledgerErr) });
+        }
+
+        try {
+          if (!booking.comms || typeof booking.comms !== "object") booking.comms = {};
+          const when = new Date();
+          const gate = await BookingModel.findOneAndUpdate(
+            { _id: booking._id, $or: [ { "comms.bookingConfirmedGuestSentAt": { $exists: false } }, { "comms.bookingConfirmedGuestSentAt": null } ] },
+            { $set: { "comms.bookingConfirmedGuestSentAt": when } },
+            { new: true }
+          );
+          if (gate) {
+            const to = booking.guestEmail ? String(booking.guestEmail).trim() : "";
+            const nm = booking.guestName ? String(booking.guestName).trim() : "";
+            const date = booking.bookingDate ? String(booking.bookingDate).trim() : "";
+            const title = booking.experienceTitle ? String(booking.experienceTitle).trim() : (booking.title ? String(booking.title).trim() : "");
+            if (to) __fireAndForgetEmail({ to, eventName: "BOOKING_CONFIRMED_GUEST", category: "PAYMENTS", vars: { DASHBOARD_URL: __dashboardUrl(), Name: nm, DATE: date, EXPERIENCE_TITLE: title } });
+          }
+        } catch (commsErr) {
+          __log("warn", "webhook_comms_failed", { rid: __tstsRidNow(), eventId, handler: "payment_intent.succeeded", bookingId: String(booking._id), error: (commsErr && commsErr.message) || String(commsErr) });
+        }
       }
 
       if (event.type === "checkout.session.async_payment_failed" || event.type === "checkout.session.expired") {
         const session = (event && event.data && event.data.object) ? event.data.object : {};
         const bookingId = session.client_reference_id || (session.metadata && session.metadata.bookingId);
         if (!bookingId) {
-          try { await evCol.updateOne({ eventId }, { $set: { processedAt: new Date(), processingAt: null, error: "missing_booking_id" } }); } catch (_) {
-    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
-  }
+          try { await evCol.updateOne({ eventId }, { $set: { processedAt: new Date(), processingAt: null, status: "error", error: "missing_booking_id" } }); } catch (ledgerErr) {
+            __log("warn", "webhook_ledger_update_failed", { rid: __tstsRidNow(), eventId, handler: event.type, error: (ledgerErr && ledgerErr.message) || String(ledgerErr) });
+          }
           return res.json({ received: true });
         }
 
         const BookingModel = mongoose.model("Booking");
         const booking = await BookingModel.findById(String(bookingId));
-        if (!booking) return res.json({ received: true });
+        if (!booking) {
+          try { await evCol.updateOne({ eventId }, { $set: { processedAt: new Date(), processingAt: null, status: "ignored_not_found", error: "booking_not_found" } }); } catch (ledgerErr) {
+            __log("warn", "webhook_ledger_update_failed", { rid: __tstsRidNow(), eventId, handler: event.type, error: (ledgerErr && ledgerErr.message) || String(ledgerErr) });
+          }
+          return res.json({ received: true });
+        }
 
         let full = null;
-        try { if (session && session.id) full = await stripe.checkout.sessions.retrieve(String(session.id), { expand: ["payment_intent"] }); } catch (_) {
-    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
-  }
+        try { if (session && session.id) full = await stripe.checkout.sessions.retrieve(String(session.id), { expand: ["payment_intent"] }); } catch (stripeErr) {
+          __log("warn", "webhook_stripe_retrieve_failed", { rid: __tstsRidNow(), eventId, handler: event.type, sessionId: session.id, error: (stripeErr && stripeErr.message) || String(stripeErr) });
+        }
 
         const stripeStatus = String((session && session.payment_status) ? session.payment_status : "unpaid");
         const piObj = (full && full.payment_intent) ? full.payment_intent : (session && session.payment_intent ? session.payment_intent : null);
@@ -1576,7 +1677,7 @@ mongoose.connection == null || mongoose.connection.readyState !== 1) {
           const isFail2 = (piStatus === "requires_payment_method" || piStatus === "canceled" || piStatus === "cancelled");
           if (isExpired || (isFail2 && stripeStatus !== "paid")) {
             const when = new Date();
-            const gate = await Booking.findOneAndUpdate(
+            const gate = await BookingModel.findOneAndUpdate(
               { _id: booking._id, $or: [ { "comms.paymentFailedSentAt": { $exists: false } }, { "comms.paymentFailedSentAt": null } ] },
               { $set: { "comms.paymentFailedSentAt": when } },
               { new: true }
@@ -1587,11 +1688,17 @@ mongoose.connection == null || mongoose.connection.readyState !== 1) {
               if (to) __fireAndForgetEmail({ to, eventName: "PAYMENT_FAILED", category: "PAYMENTS", vars: { DASHBOARD_URL: __dashboardUrl(), Name: nm } });
             }
           }
-        } catch (_) {
-    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
-  }
+        } catch (commsErr) {
+          __log("warn", "webhook_comms_failed", { rid: __tstsRidNow(), eventId, handler: event.type, bookingId: String(booking._id), error: (commsErr && commsErr.message) || String(commsErr) });
+        }
 
         await booking.save();
+
+        // BE-RED-02: Mark event as successfully processed
+        try { await evCol.updateOne({ eventId }, { $set: { processedAt: new Date(), processingAt: null, status: "success", error: "" } }); } catch (ledgerErr) {
+          __log("warn", "webhook_ledger_update_failed", { rid: __tstsRidNow(), eventId, handler: event.type, error: (ledgerErr && ledgerErr.message) || String(ledgerErr) });
+        }
+
         return res.json({ received: true });
       }
 
