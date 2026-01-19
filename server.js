@@ -5281,6 +5281,7 @@ app.get("/api/experiences", async (req, res) => {
     const minPrice = qv.minPrice;
     const maxPrice = qv.maxPrice;
     const category = qv.category;
+    const hostId = qv.hostId;
     const page = qv.page;
     const limit = qv.limit;
 
@@ -5303,6 +5304,12 @@ app.get("/api/experiences", async (req, res) => {
     if (qTok) query.title = { $regex: __escapeRegexLiteral(qTok), $options: "i" };
 
     if (category && CATEGORY_PILLARS.includes(category)) query.tags = { $in: [category] };
+
+    const hostTok = __cleanId(hostId, 64);
+    if (hostTok) {
+      if (!/^[a-fA-F0-9]{24}$/.test(hostTok)) return res.status(400).json({ message: "Invalid hostId" });
+      query.hostId = hostTok;
+    }
 
     const minP = Number(minPrice);
     const maxP = Number(maxPrice);
@@ -6729,9 +6736,10 @@ app.post("/api/bookmarks/:experienceId", authMiddleware, async (req, res) => {
   if (!experience) return res.status(404).json({ ok: false, code: "EXPERIENCE_NOT_FOUND", message: "Experience not found", rid: __ridFromReq(req) });
 
   // Check if experience is disabled or unpublished
-  if (experience.isDisabled || experience.isUnpublished) {
+  const isUnavailable = (experience.isDeleted === true) || (experience.isPaused === true);
+  if (isUnavailable) {
     // Allow if user is admin or host
-    const isAdmin = req.user.role === 'admin';
+    const isAdmin = Boolean(req.user && (req.user.isAdmin === true || String(req.user.role || "").toLowerCase() === "admin"));
     const isHost = String(experience.hostId) === String(userId);
     
     if (!isAdmin && !isHost) {
@@ -7221,12 +7229,35 @@ app.get("/api/admin/stats", adminMiddleware, requireAdminReason, async (req, res
     try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
   }
 
-  const revenueDocs = await Booking.find({ status: "confirmed" }, "pricing");
+  const [userCount, expCount, bookingCount, hostIds, revenueAgg] = await Promise.all([
+    User.countDocuments(),
+    Experience.countDocuments(),
+    Booking.countDocuments(),
+    Experience.distinct("hostId", { isDeleted: false }),
+    Booking.aggregate([
+      { $match: { $or: [{ status: "confirmed" }, { paymentStatus: "paid" }] } },
+      {
+        $project: {
+          cents: {
+            $ifNull: [
+              "$pricing.totalCents",
+              { $ifNull: ["$pricingSnapshot.totalCents", { $ifNull: ["$feeBreakdown.totalCents", 0] }] }
+            ]
+          }
+        }
+      },
+      { $group: { _id: null, totalCents: { $sum: "$cents" } } }
+    ])
+  ]);
+  const totalCents = (revenueAgg && revenueAgg[0] && Number(revenueAgg[0].totalCents)) || 0;
+  const totalRevenue = Number((totalCents / 100).toFixed(2));
+  const hostCount = Array.isArray(hostIds) ? hostIds.filter((h) => String(h || "").trim()).length : 0;
   res.json({
-    userCount: await User.countDocuments(),
-    expCount: await Experience.countDocuments(),
-    bookingCount: await Booking.countDocuments(),
-    totalRevenue: revenueDocs.reduce((acc, b) => acc + (b.pricing && b.pricing.totalPrice ? b.pricing.totalPrice : 0), 0),
+    userCount,
+    hostCount,
+    expCount,
+    bookingCount,
+    totalRevenue,
   });
 });
 
@@ -7248,6 +7279,7 @@ app.get("/api/admin/bookings", adminMiddleware, requireAdminReason, async (req, 
         ? b.toObject({ virtuals: true })
         : (b || {});
       if (o && typeof o === "object") delete o.guestEmail;
+      if (o && o.guestId && typeof o.guestId === "object") o.guestId = adminSafeUser(o.guestId);
       if (o && o.user && typeof o.user === "object") o.user = adminSafeUser(o.user);
       return o;
     });
@@ -7274,7 +7306,12 @@ app.get("/api/admin/users", adminMiddleware, requireAdminReason, async (req, res
 
   try {
     const users = await User.find({ isDeleted: { $ne: true } }).sort({ createdAt: -1 });
-    return res.json((users || []).map(u => adminSafeUser(u)));
+    const out = (users || []).map((u) => {
+      const safe = adminSafeUser(u);
+      if (u && u.email) safe.email = String(u.email || "");
+      return safe;
+    });
+    return res.json(out);
   } catch (err) {
     return res.status(500).json({ message: "Server error" });
   }
