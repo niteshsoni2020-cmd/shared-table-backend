@@ -2050,6 +2050,14 @@ app.use((err, req, res, next) => {
   return next(err);
 });
 
+// BUILD FINGERPRINT (deploy verification)
+app.get("/sha", (req, res) => {
+  const rid = String((req && (req.requestId || req.rid)) ? (req.requestId || req.rid) : __tstsRidNow());
+  try { if (rid) res.set("X-Request-Id", rid); } catch (_) {}
+  const sha = (process.env.RENDER_GIT_COMMIT || process.env.COMMIT_SHA || process.env.GIT_SHA || process.env.SHA || "unknown");
+  return res.status(200).json({ ok: true, sha: String(sha), rid: rid });
+});
+
 // L11_JSON_404_HANDLER_V1
 // Ensure missing routes return JSON when caller expects JSON (or for /api/*).
 // This allows the res.json shim to inject rid + stable code (NOT_FOUND).
@@ -5263,42 +5271,81 @@ app.delete("/api/experiences/:id", authMiddleware, async (req, res) => {
 
 // Experiences: Search (filters + pillars)
 app.get("/api/experiences", async (req, res) => {
-  const { city, q, sort, date, minPrice, maxPrice, category } = req.query;
-  let query = { isPaused: false, isDeleted: false };
+  const rid = __ridFromReq(req);
+  try {
+    const qv = (req && req.query) ? req.query : {};
+    const city = qv.city;
+    const q = qv.q;
+    const sort = qv.sort;
+    const date = qv.date;
+    const minPrice = qv.minPrice;
+    const maxPrice = qv.maxPrice;
+    const category = qv.category;
+    const page = qv.page;
+    const limit = qv.limit;
 
-  if (city) query.city = { $regex: city, $options: "i" };
-  if (q) query.title = { $regex: q, $options: "i" };
+    let query = { isPaused: false, isDeleted: false };
 
-  if (category && CATEGORY_PILLARS.includes(category)) query.tags = { $in: [category] };
+    const __safeTok = (v, maxLen) => {
+      const t = String(v || "").trim();
+      if (!t) return "";
+      return t.slice(0, maxLen);
+    };
 
-  if (minPrice || maxPrice) {
-    query.price = {};
-    if (minPrice) query.price.$gte = Number(minPrice);
-    if (maxPrice) query.price.$lte = Number(maxPrice);
+    const __escapeRegexLiteral = (s) => {
+      return String(s).replace(/[.*+?^${}()|[\]\\]/g, (m) => "\\" + m);
+    };
+
+    const cityTok = __safeTok(city, 60);
+    if (cityTok) query.city = { $regex: __escapeRegexLiteral(cityTok), $options: "i" };
+
+    const qTok = __safeTok(q, 80);
+    if (qTok) query.title = { $regex: __escapeRegexLiteral(qTok), $options: "i" };
+
+    if (category && CATEGORY_PILLARS.includes(category)) query.tags = { $in: [category] };
+
+    const minP = Number(minPrice);
+    const maxP = Number(maxPrice);
+    if (Number.isFinite(minP) || Number.isFinite(maxP)) {
+      query.price = {};
+      if (Number.isFinite(minP)) query.price.$gte = minP;
+      if (Number.isFinite(maxP)) query.price.$lte = maxP;
+      if (Object.keys(query.price).length === 0) delete query.price;
+    }
+
+    if (date) {
+      const dateStr = String(date).trim();
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return res.status(400).json({ message: "Invalid date filter (YYYY-MM-DD)." });
+
+      query.startDate = { $lte: dateStr };
+      query.endDate = { $gte: dateStr };
+
+      const d = new Date(dateStr + "T00:00:00Z");
+      const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+      query.availableDays = { $in: [days[d.getUTCDay()]] };
+    }
+
+    let sortObj = {};
+    if (sort === "price_asc") sortObj.price = 1;
+    if (sort === "rating_desc") sortObj.averageRating = -1;
+
+    const pageN = Number.isFinite(Number(page)) ? Math.max(1, Math.floor(Number(page))) : 1;
+    const limitN = Number.isFinite(Number(limit)) ? Math.min(50, Math.max(1, Math.floor(Number(limit)))) : 50;
+    const skipN = (pageN - 1) * limitN;
+
+    const exps = await Experience.find(query)
+      .sort(sortObj)
+      .skip(skipN)
+      .limit(limitN)
+      .maxTimeMS(5000)
+      .lean();
+
+    const safe = (exps || []).map((e) => stripExperiencePrivateFields(e));
+    return res.json(safe);
+  } catch (err) {
+    try { __log("error", "experiences_list_failed", { rid: rid, path: "/api/experiences", error: String((err && err.message) ? err.message : err) }); } catch (_) {}
+    return res.status(500).json({ message: "Failed to load experiences" });
   }
-
-  if (date) {
-    const dateStr = String(date).trim();
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return res.status(400).json({ message: "Invalid date filter (YYYY-MM-DD)." });
-
-    query.startDate = { $lte: dateStr };
-    query.endDate = { $gte: dateStr };
-
-    const d = new Date(dateStr + "T00:00:00Z");
-    const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-    query.availableDays = { $in: [days[d.getUTCDay()]] };
-  }
-
-  let sortObj = {};
-  if (sort === "price_asc") sortObj.price = 1;
-  if (sort === "rating_desc") sortObj.averageRating = -1;
-
-  query.isDeleted = false;
-  query.isPaused = false;
-
-  const exps = await Experience.find(query).sort(sortObj);
-  const safe = (exps || []).map(e => stripExperiencePrivateFields((e.toObject ? e.toObject() : e)));
-  res.json(safe);
 });
 
 // Experience detail
@@ -8091,13 +8138,6 @@ app.get(
   }
 );
 
-// BUILD FINGERPRINT (deploy verification)
-app.get("/sha", (req, res) => {
-  const rid = String((req && (req.requestId || req.rid)) ? (req.requestId || req.rid) : __tstsRidNow());
-  try { if (rid) res.set("X-Request-Id", rid); } catch (_) {}
-  const sha = (process.env.RENDER_GIT_COMMIT || process.env.COMMIT_SHA || process.env.GIT_SHA || process.env.SHA || "unknown");
-  return res.status(200).json({ ok: true, sha: String(sha), rid: rid });
-});
 
   if (__httpServerStarted) return;
   __httpServerStarted = true;
