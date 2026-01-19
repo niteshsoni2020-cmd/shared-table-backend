@@ -4760,6 +4760,39 @@ app.get("/api/auth/me", authMiddleware, async (req, res) => {
   }
 });
 
+// G2: Cloudinary signed upload signature endpoint
+app.post("/api/uploads/cloudinary-signature", authMiddleware, async (req, res) => {
+  try {
+    const timestamp = Math.round(Date.now() / 1000);
+    const cloudName = String(process.env.CLOUDINARY_CLOUD_NAME || "").trim();
+    const apiKey = String(process.env.CLOUDINARY_API_KEY || "").trim();
+    const apiSecret = String(process.env.CLOUDINARY_API_SECRET || "").trim();
+
+    if (!cloudName || !apiKey || !apiSecret) {
+      return res.status(500).json({ message: "Cloudinary not configured" });
+    }
+
+    const paramsToSign = {
+      timestamp: timestamp,
+      folder: "shared-table-uploads",
+      resource_type: "image"
+    };
+
+    const signature = cloudinary.utils.api_sign_request(paramsToSign, apiSecret);
+
+    return res.json({
+      timestamp: timestamp,
+      signature: signature,
+      apiKey: apiKey,
+      cloudName: cloudName,
+      folder: "shared-table-uploads"
+    });
+  } catch (e) {
+    __log("error", "cloudinary_signature_error", { rid: __ridFromReq(req), error: (e && e.message) || String(e) });
+    return res.status(500).json({ message: "Signature generation failed" });
+  }
+});
+
 // Auth: Update profile (allowlist)
 app.put("/api/auth/update", authMiddleware, async (req, res) => {
   try {
