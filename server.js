@@ -5429,7 +5429,8 @@ app.get("/api/experiences/:id", async (req, res) => {
     if (exp.isPaused) return res.status(404).json({ message: "Not found" });
     const safe = stripExperiencePrivateFields((exp.toObject ? exp.toObject() : exp));
     return res.json(safe);
-  } catch {
+  } catch (err) {
+    try { __log("warn", "experience_detail_error", { rid: __ridFromReq(req), error: String((err && err.message) ? err.message : err) }); } catch (_) {}
     res.status(404).json({ message: "Not found" });
   }
 });

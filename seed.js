@@ -139,8 +139,7 @@ const seed = async () => {
       bio: 'Demo host profile used only to showcase experiences on The Shared Table Story.',
       location: 'Melbourne',
       // Neutral table / food scene instead of a human face
-      profilePic:
-        'https://images.unsplash.com/photo-1576402187878-974f70c890a5?q=80&w=200&auto=format&fit=crop',
+      profilePic: '',  // No external dependency - use default avatar
     });
 
     const guests = [];
@@ -175,8 +174,7 @@ const seed = async () => {
         tags: ['Culture', 'Food'],
         description:
           'Celebrate Christmas Eve like a local in Melbourne. Fresh prawns, roast pork with crackling, pavlova for dessert, and a relaxed summer evening around a shared table.',
-        imageUrl:
-          'https://images.unsplash.com/photo-1576402187878-974f70c890a5?q=80&w=800&auto=format&fit=crop',
+        imageUrl: '',  // Uses experience-default.jpg fallback
         availableDays: ['Fri', 'Sat', 'Sun'],
         startDate: START_OF_YEAR,
         endDate: END_OF_YEAR,
@@ -188,8 +186,7 @@ const seed = async () => {
         tags: ['Nature'],
         description:
           "Discover hidden laneway cafés, street art, and third-wave coffee spots. Perfect for solo travellers who want to explore Melbourne's coffee culture without a tour bus.",
-        imageUrl:
-          'https://images.unsplash.com/photo-1497935586351-b67a49e012bf?auto=format&fit=crop&w=900&q=80',
+        imageUrl: '',  // Uses experience-default.jpg fallback
         availableDays: ['Sat', 'Sun'],
         startDate: START_OF_YEAR,
         endDate: END_OF_YEAR,
@@ -201,8 +198,7 @@ const seed = async () => {
         tags: ['Food'],
         description:
           'Hand-rolled pasta, good wine, and golden-hour views. Share a slow, lingering dinner on a balcony overlooking the water in Sydney.',
-        imageUrl:
-          'https://images.unsplash.com/photo-1556910103-1c02745a30bf?auto=format&fit=crop&w=900&q=80',
+        imageUrl: '',  // Uses experience-default.jpg fallback
         availableDays: ['Fri', 'Sat'],
         startDate: START_OF_YEAR,
         endDate: END_OF_YEAR,
