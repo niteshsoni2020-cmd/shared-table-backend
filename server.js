@@ -1017,6 +1017,30 @@ const forgotPasswordLimiter = rateLimit({
   },
 });
 
+const forgotPasswordEmailLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: function (req) {
+    try {
+      const emailRaw = (req && req.body && req.body.email) ? String(req.body.email) : "";
+      const email = emailRaw.toLowerCase().trim();
+      if (email) return "fp_email:" + email;
+    } catch (_) {}
+    try { return __rlKey(req); } catch (_) {}
+    return "";
+  },
+  handler: function (req, res) {
+    const rid = String((req && (req.requestId || req.rid)) ? (req.requestId || req.rid) : "");
+    try { if (rid) res.set("X-Request-Id", rid); } catch (_) {
+      try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+    }
+    return res.status(429).json({ ok: false, code: "RATE_LIMITED", message: "Too many requests", rid: rid });
+  },
+});
+
+
 const resetPasswordLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   limit: 10,
@@ -1030,6 +1054,30 @@ const resetPasswordLimiter = rateLimit({
     return res.status(429).json({ ok: false, code: "RATE_LIMITED", message: "Too many requests", rid: rid });
   },
 });
+
+const resetPasswordEmailLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: function (req) {
+    try {
+      const emailRaw = (req && req.body && req.body.email) ? String(req.body.email) : "";
+      const email = emailRaw.toLowerCase().trim();
+      if (email) return "rp_email:" + email;
+    } catch (_) {}
+    try { return __rlKey(req); } catch (_) {}
+    return "";
+  },
+  handler: function (req, res) {
+    const rid = String((req && (req.requestId || req.rid)) ? (req.requestId || req.rid) : "");
+    try { if (rid) res.set("X-Request-Id", rid); } catch (_) {
+      try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+    }
+    return res.status(429).json({ ok: false, code: "RATE_LIMITED", message: "Too many requests", rid: rid });
+  },
+});
+
 
 const adminLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -4664,7 +4712,7 @@ app.post("/api/auth/login", loginLimiter, async (req, res) => {
 // Auth: Current user
 
 // Auth: Forgot Password (privacy-safe)
-app.post("/api/auth/forgot-password", forgotPasswordLimiter, async (req, res) => {
+app.post("/api/auth/forgot-password", forgotPasswordLimiter, forgotPasswordEmailLimiter, async (req, res) => {
   try {
     const emailRaw = (req.body && req.body.email) ? String(req.body.email) : "";
     const email = emailRaw.toLowerCase().trim();
@@ -4687,7 +4735,7 @@ app.post("/api/auth/forgot-password", forgotPasswordLimiter, async (req, res) =>
       const hasResend = String(process.env.RESEND_API_KEY || "").trim().length > 0;
       const canEmail = hasSmtp || hasResend;
       const frontendBase = String(process.env.FRONTEND_BASE_URL || "http://localhost:3000").replace(/\/$/, "");
-      const resetUrl = `${frontendBase}/reset-password?email=${encodeURIComponent(email)}&token=${encodeURIComponent(token)}`;
+      const resetUrl = `${frontendBase}/reset-password?email=${encodeURIComponent(email)}#token=${encodeURIComponent(token)}`;
       if (canEmail) {
         // Do not block the HTTP response on email delivery (email can hang on misconfig)
         try {
@@ -4762,7 +4810,7 @@ app.post("/api/auth/forgot-password", forgotPasswordLimiter, async (req, res) =>
 });
 
 // Auth: Reset Password
-app.post("/api/auth/reset-password", resetPasswordLimiter, async (req, res) => {
+app.post("/api/auth/reset-password", resetPasswordLimiter, resetPasswordEmailLimiter, async (req, res) => {
   try {
     const emailRaw = (req.body && req.body.email) ? String(req.body.email) : "";
     const tokenRaw = (req.body && req.body.token) ? String(req.body.token) : "";
