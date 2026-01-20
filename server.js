@@ -4567,6 +4567,69 @@ app.get("/api/auth/verify-email", async (req, res) => {
   }
 });
 
+// Auth: Resend Verification Email
+app.post("/api/auth/resend-verification", forgotPasswordLimiter, async (req, res) => {
+  try {
+    const emailRaw = (req.body && req.body.email) ? String(req.body.email) : "";
+    const email = emailRaw.toLowerCase().trim();
+
+    // Always respond OK (do not leak account existence)
+    if (!email) {
+      return res.json({ ok: true, message: "If your email is registered, you will receive a new verification link." });
+    }
+
+    const user = await User.findOne({ email });
+
+    // Privacy-safe: always return same message regardless of user existence
+    if (!user) {
+      return res.json({ ok: true, message: "If your email is registered, you will receive a new verification link." });
+    }
+
+    // If already verified, no need to resend
+    if (user.emailVerified === true) {
+      return res.json({ ok: true, message: "If your email is registered, you will receive a new verification link." });
+    }
+
+    // If account is deleted or not active, still return generic message
+    if (user.isDeleted === true) {
+      return res.json({ ok: true, message: "If your email is registered, you will receive a new verification link." });
+    }
+    const st = String(user.accountStatus || "active");
+    if (st && st !== "active") {
+      return res.json({ ok: true, message: "If your email is registered, you will receive a new verification link." });
+    }
+
+    // Generate new verification token
+    const vtoken = crypto.randomBytes(32).toString("hex");
+    const vhash = crypto.createHash("sha256").update(vtoken).digest("hex");
+    user.emailVerificationTokenHash = vhash;
+    user.emailVerificationRequestedAt = new Date();
+    user.emailVerificationExpiresAt = new Date(Date.now() + 30 * 60 * 1000); // 30 minutes
+    await user.save();
+
+    // Send verification email (non-blocking)
+    try {
+      const verifyUrlFrontend = __frontendBaseUrl() + "/verify-email?email=" + encodeURIComponent(String(user.email || "")) + "&token=" + encodeURIComponent(String(vtoken || ""));
+
+      const __p = __sendEventEmailTracked({
+        eventName: "EMAIL_VERIFICATION",
+        category: "SECURITY",
+        to: String(user.email || ""),
+        vars: { Name: String(user.name || "there"), VERIFY_EMAIL_URL: String(verifyUrlFrontend || "") }
+      }, { rid: __ridFromReq(req), source: "auth_resend_verification" });
+      const __t = new Promise((_, rej) => setTimeout(() => rej(new Error("email_timeout")), 6000));
+      Promise.race([__p, __t]).catch(() => {});
+    } catch (_) {
+      try { __log("warn", "resend_verification_email_error", { rid: __ridFromReq(req) }); } catch (_) {}
+    }
+
+    return res.json({ ok: true, message: "If your email is registered, you will receive a new verification link." });
+  } catch (e) {
+    __log("error", "auth_resend_verification_error", { rid: __ridFromReq(req), path: (req && req.originalUrl) ? req.originalUrl : undefined });
+    return res.status(500).json({ ok: false, message: "Server error" });
+  }
+});
+
 app.post("/api/auth/login", loginLimiter, async (req, res) => {
   try {
     const { email, password } = req.body || {};
