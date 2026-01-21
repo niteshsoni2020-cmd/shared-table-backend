@@ -4471,8 +4471,8 @@ app.post("/api/auth/register", registerLimiter, async (req, res) => {
           return scheme + "://" + host;
         } catch (_) { return ""; }
       })();
-      const verifyUrlBackend = (__apiBase || "") + "/api/auth/verify-email?email=" + encodeURIComponent(String(user.email || "")) + "&token=" + encodeURIComponent(String(vtoken || ""));
-      const verifyUrlFrontend = __frontendBaseUrl() + "/verify-email?email=" + encodeURIComponent(String(user.email || "")) + "&token=" + encodeURIComponent(String(vtoken || ""));
+      const verifyUrlBackend = (__apiBase || "") + "/api/auth/verify-email?email=" + encodeURIComponent(String(user.email || "")) + "#token=" + encodeURIComponent(String(vtoken || ""));
+      const verifyUrlFrontend = __frontendBaseUrl() + "/verify-email?email=" + encodeURIComponent(String(user.email || "")) + "#token=" + encodeURIComponent(String(vtoken || ""));
       __verifyUrl = String(verifyUrlFrontend || "");
 
       const __need = ["Name", "VERIFY_EMAIL_URL"];
@@ -4533,10 +4533,11 @@ app.post("/api/auth/register", registerLimiter, async (req, res) => {
 // Auth: Login
 
 // Auth: Verify Email
-app.get("/api/auth/verify-email", async (req, res) => {
+// Auth: Verify Email (STATE CHANGE MUST BE POST)
+app.post("/api/auth/verify-email", async (req, res) => {
   try {
-    const emailRaw = (req.query && req.query.email) ? String(req.query.email) : "";
-    const tokenRaw = (req.query && req.query.token) ? String(req.query.token) : "";
+    const emailRaw = (req.body && req.body.email) ? String(req.body.email) : "";
+    const tokenRaw = (req.body && req.body.token) ? String(req.body.token) : "";
     const email = emailRaw.toLowerCase().trim();
     const token = tokenRaw.trim();
     if (!email || !token) return res.status(400).json({ message: "Invalid or expired token" });
@@ -4550,7 +4551,6 @@ app.get("/api/auth/verify-email", async (req, res) => {
     const th = crypto.createHash("sha256").update(token).digest("hex");
     const __stored = String(user.emailVerificationTokenHash || "");
     const __th = String(th || "");
-    const __tok = String(token || "");
     const __ok = (!!__stored && !!__th && (__th === __stored));
     if (!__ok) {
       return res.status(400).json({ message: "Invalid or expired token" });
@@ -4606,13 +4606,18 @@ app.get("/api/auth/verify-email", async (req, res) => {
         return res.json({ ok: true, dev: { welcomeEmail: String(__welcomeEmail || "") } });
       }
     } catch (_) {
-    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
-  }
+      try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+    }
 
     return res.json({ ok: true });
   } catch (e) {
     return res.status(500).json({ message: "Server error" });
   }
+});
+
+// Back-compat: GET must NOT change state (email prefetchers may hit GET links)
+app.get("/api/auth/verify-email", async (req, res) => {
+  return res.status(405).json({ message: "Use POST /api/auth/verify-email" });
 });
 
 // Auth: Resend Verification Email
@@ -4657,7 +4662,7 @@ app.post("/api/auth/resend-verification", forgotPasswordLimiter, async (req, res
 
     // Send verification email (non-blocking)
     try {
-      const verifyUrlFrontend = __frontendBaseUrl() + "/verify-email?email=" + encodeURIComponent(String(user.email || "")) + "&token=" + encodeURIComponent(String(vtoken || ""));
+      const verifyUrlFrontend = __frontendBaseUrl() + "/verify-email?email=" + encodeURIComponent(String(user.email || "")) + "#token=" + encodeURIComponent(String(vtoken || ""));
 
       const __p = __sendEventEmailTracked({
         eventName: "EMAIL_VERIFICATION",
@@ -7408,6 +7413,222 @@ app.get("/api/recommendations", authMiddleware, async (req, res) => {
   if (exps.length > 0) return res.json(exps);
   const fallback = await Experience.find({ isPaused: false, isDeleted: false }).limit(4);
   res.json(fallback);
+});
+
+// Curations (truthful navigation collections)
+app.get("/api/curations", authMiddleware, async (req, res) => {
+  try {
+    const userId = String((req.auth && req.auth.userId) || (req.user && req.user._id) || "");
+    if (!userId) return res.status(401).json({ message: "Invalid user" });
+
+    const collections = [];
+
+    function mostCommon(arr) {
+      const m = new Map();
+      (arr || []).forEach((x) => {
+        const k = String(x || "").trim();
+        if (!k) return;
+        m.set(k, (m.get(k) || 0) + 1);
+      });
+      let best = "";
+      let bestN = 0;
+      for (const [k, n] of m.entries()) {
+        if (n > bestN) { best = k; bestN = n; }
+      }
+      return best;
+    }
+
+    async function countAvailable(filters) {
+      const q = { isPaused: false, isDeleted: false };
+
+      if (filters && filters.city) {
+        try { q.city = new RegExp(String(filters.city), "i"); } catch (_) {}
+      }
+      if (filters && filters.category) {
+        q.tags = { $in: [String(filters.category)] };
+      } else if (filters && filters.q) {
+        const qTok = String(filters.q).trim();
+        if (qTok) {
+          const r = new RegExp(qTok, "i");
+          q.$or = [
+            { title: r },
+            { description: r },
+            { tags: r },
+            { city: r }
+          ];
+        }
+      }
+      if (filters && filters.minPrice != null) q.price = Object.assign({}, q.price || {}, { $gte: Number(filters.minPrice) });
+      if (filters && filters.maxPrice != null) q.price = Object.assign({}, q.price || {}, { $lte: Number(filters.maxPrice) });
+
+      if (filters && filters.date) {
+        const d = new Date(String(filters.date) + "T00:00:00");
+        if (!Number.isNaN(d.getTime())) {
+          q.startDate = { $lte: d };
+          q.endDate = { $gte: d };
+        }
+      }
+
+      try {
+        return await Experience.countDocuments(q).maxTimeMS(5000);
+      } catch (_) {
+        return 0;
+      }
+    }
+
+    // 1) USER: Similar to recent bookings (strongest)
+    const recentBookings = await Booking.find({ guestId: userId })
+      .sort({ createdAt: -1 })
+      .limit(20);
+
+    const bookedExpIds = (recentBookings || []).map((b) => String(b.experienceId || "")).filter(Boolean);
+    const bookedExps = bookedExpIds.length ? await Experience.find({ _id: { $in: bookedExpIds }, isPaused: false, isDeleted: false }).limit(50) : [];
+
+    if (bookedExps.length) {
+      const cities = bookedExps.map((e) => e.city);
+      const tags = [];
+      bookedExps.forEach((e) => (e.tags || []).forEach((t) => tags.push(t)));
+
+      const city = mostCommon(cities);
+      const pillar = mostCommon(tags.filter((t) => (CATEGORY_PILLARS || []).includes(String(t))));
+      const tag = pillar || mostCommon(tags);
+
+      const filters = {};
+      if (city) filters.city = city;
+      if (pillar) filters.category = pillar;
+      else if (tag) filters.q = tag;
+
+      const count = await countAvailable(filters);
+      if (count > 0) {
+        collections.push({
+          id: "similar_to_you",
+          title: (filters.category && filters.city) ? `${filters.category} experiences in ${filters.city}` :
+                 (filters.q && filters.city) ? `${filters.q} experiences in ${filters.city}` :
+                 (filters.category) ? `${filters.category} experiences` :
+                 (filters.q) ? `${filters.q} experiences` : "Explore",
+          subtitle: "Available now",
+          filters,
+          count
+        });
+      }
+    }
+
+    // 2) USER: New since last booking (availability-first)
+    const lastBooking = recentBookings && recentBookings[0] ? recentBookings[0] : null;
+    if (lastBooking && lastBooking.createdAt instanceof Date) {
+      const since = lastBooking.createdAt;
+      const newCount = await Experience.countDocuments({ isPaused: false, isDeleted: false, createdAt: { $gt: since } }).maxTimeMS(5000).catch(() => 0);
+      if (newCount > 0) {
+        const filters2 = {};
+        const count = await countAvailable(filters2);
+        if (count > 0) {
+          collections.push({
+            id: "new_since_last",
+            title: "New experiences",
+            subtitle: "Since your last booking",
+            filters: filters2,
+            count
+          });
+        }
+      }
+    }
+
+    // 3) USER: From bookmarks
+    const bm = await Bookmark.find({ userId: userId }).limit(50);
+    const bmIds = (bm || []).map((x) => String(x.experienceId || "")).filter(Boolean);
+    const bmExps = bmIds.length ? await Experience.find({ _id: { $in: bmIds }, isPaused: false, isDeleted: false }).limit(50) : [];
+
+    if (bmExps.length) {
+      const cities = bmExps.map((e) => e.city);
+      const tags = [];
+      bmExps.forEach((e) => (e.tags || []).forEach((t) => tags.push(t)));
+
+      const city = mostCommon(cities);
+      const pillar = mostCommon(tags.filter((t) => (CATEGORY_PILLARS || []).includes(String(t))));
+      const tag = pillar || mostCommon(tags);
+
+      const filters = {};
+      if (city) filters.city = city;
+      if (pillar) filters.category = pillar;
+      else if (tag) filters.q = tag;
+
+      const count = await countAvailable(filters);
+      if (count > 0) {
+        collections.push({
+          id: "from_bookmarks",
+          title: (filters.category && filters.city) ? `${filters.category} experiences in ${filters.city}` :
+                 (filters.q && filters.city) ? `${filters.q} experiences in ${filters.city}` :
+                 (filters.category) ? `${filters.category} experiences` :
+                 (filters.q) ? `${filters.q} experiences` : "Explore",
+          subtitle: "From your bookmarks",
+          filters,
+          count
+        });
+      }
+    }
+
+    // 4) SOCIAL: Active in your circle (opt-in, can be 1 connection)
+    const conns = await Connection.find({
+      status: "accepted",
+      $or: [{ requesterId: userId }, { addresseeId: userId }]
+    }).limit(200);
+
+    const friendIds = (conns || []).map((c) => {
+      const r = String(c.requesterId || "");
+      const a = String(c.addresseeId || "");
+      return r === userId ? a : r;
+    }).filter(Boolean);
+
+    if (friendIds.length) {
+      const shareUsers = await User.find({ _id: { $in: friendIds }, showExperiencesToFriends: true }).select("_id").limit(200);
+      const shareIds = (shareUsers || []).map((u) => String(u._id || "")).filter(Boolean);
+
+      if (shareIds.length) {
+        const socialBookings = await Booking.find({
+          guestId: { $in: shareIds },
+          visibilityToFriends: true
+        }).sort({ createdAt: -1 }).limit(50);
+
+        const socialExpIds = (socialBookings || []).map((b) => String(b.experienceId || "")).filter(Boolean);
+        const socialExps = socialExpIds.length ? await Experience.find({ _id: { $in: socialExpIds }, isPaused: false, isDeleted: false }).limit(50) : [];
+
+        if (socialExps.length) {
+          const cities = socialExps.map((e) => e.city);
+          const tags = [];
+          socialExps.forEach((e) => (e.tags || []).forEach((t) => tags.push(t)));
+
+          const city = mostCommon(cities);
+          const pillar = mostCommon(tags.filter((t) => (CATEGORY_PILLARS || []).includes(String(t))));
+          const tag = pillar || mostCommon(tags);
+
+          const filters = {};
+          if (city) filters.city = city;
+          if (pillar) filters.category = pillar;
+          else if (tag) filters.q = tag;
+
+          const count = await countAvailable(filters);
+          if (count > 0) {
+            collections.push({
+              id: "active_in_circle",
+              title: (filters.category && filters.city) ? `${filters.category} experiences in ${filters.city}` :
+                     (filters.q && filters.city) ? `${filters.q} experiences in ${filters.city}` :
+                     (filters.category) ? `${filters.category} experiences` :
+                     (filters.q) ? `${filters.q} experiences` : "Explore",
+              subtitle: "Recently active in your connections (opt-in)",
+              filters,
+              count
+            });
+          }
+        }
+      }
+    }
+
+    const out = collections.slice(0, 3);
+    return res.json({ collections: out });
+  } catch (err) {
+    try { __log("warn", "curations_error", { rid: __ridFromReq(req), error: String((err && err.message) ? err.message : err) }); } catch (_) {}
+    return res.status(500).json({ collections: [] });
+  }
 });
 
 // Admin users
