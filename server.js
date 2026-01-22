@@ -3879,7 +3879,10 @@ async function isHost(userId) {
 function sanitizeUser(u) {
   const obj = (u && typeof u.toObject === "function") ? u.toObject({ virtuals: true }) : (u || {});
   const role = String(obj.role || "");
-  const roleIsHost = role.toLowerCase() === "host";
+  const roleLower = String(role || "").toLowerCase();
+  const roleIsHost = roleLower === "host";
+  const roleIsAdmin = roleLower === "admin";
+  const isAdmin = (!!obj.isAdmin) || (obj.admin === true) || roleIsAdmin;
 
   // SELF DTO ONLY (PRIVATE): allowlist fields; DO NOT leak internal/security fields
   return {
@@ -3892,6 +3895,7 @@ function sanitizeUser(u) {
 
     role,
     isHost: roleIsHost,
+    isAdmin: isAdmin,
     isPremiumHost: !!obj.isPremiumHost,
     vacationMode: !!obj.vacationMode,
 
@@ -4415,6 +4419,10 @@ app.post("/api/auth/register", registerLimiter, async (req, res) => {
       if (Object.prototype.hasOwnProperty.call(body, k) && typeof body[k] !== "undefined") clean[k] = body[k];
     }
     if (typeof clean.handle !== "undefined") clean.handle = String(clean.handle || "").trim().toLowerCase();
+    if (typeof clean.name !== "undefined") clean.name = String(clean.name || "").trim().slice(0, 100);
+    if (typeof clean.handle !== "undefined") clean.handle = String(clean.handle || "").trim().slice(0, 32);
+    if (typeof clean.mobile !== "undefined") clean.mobile = String(clean.mobile || "").trim().slice(0, 40);
+    if (typeof clean.profilePic !== "undefined") clean.profilePic = String(clean.profilePic || "").trim().slice(0, 600);
     if (typeof clean.email !== "undefined") clean.email = String(clean.email).toLowerCase().trim();
     const emailNorm = String(body.email || "").toLowerCase().trim();
     const pwRaw = (typeof body.password === "undefined") ? "" : String(body.password || "");
@@ -4525,6 +4533,10 @@ app.post("/api/auth/register", registerLimiter, async (req, res) => {
 
     return res.status(201).json(__resp);
   } catch (e) {
+    if (__isDuplicateKeyError(e)) {
+      __log("warn", "auth_register_duplicate", { rid: __ridFromReq(req), path: (req && req.originalUrl) ? req.originalUrl : undefined });
+      return res.status(400).json({ message: "Handle taken", code: "handle_taken" });
+    }
     __log("error", "auth_register_error", { rid: __ridFromReq(req), path: (req && req.originalUrl) ? req.originalUrl : undefined });
     res.status(500).json({ message: "Error" });
   }
@@ -4918,7 +4930,7 @@ app.post("/api/uploads/cloudinary-signature", authMiddleware, async (req, res) =
 });
 
 // Auth: Update profile (allowlist)
-app.put("/api/auth/update", authMiddleware, async (req, res) => {
+app.put("/api/auth/update", authMiddleware, authLimiter, async (req, res) => {
   try {
     const body = req.body || {};
     if (__isPlainObject(body) === false) return res.status(400).json({ message: "Invalid payload" });
@@ -4970,11 +4982,11 @@ app.put("/api/auth/update", authMiddleware, async (req, res) => {
       return out;
     };
 
-    if (typeof updates.name !== "undefined") updates.name = __toStrSafe(updates.name);
-    if (typeof updates.bio !== "undefined") updates.bio = __toStrSafe(updates.bio);
-    if (typeof updates.location !== "undefined") updates.location = __toStrSafe(updates.location);
-    if (typeof updates.mobile !== "undefined") updates.mobile = __toStrSafe(updates.mobile);
-    if (typeof updates.profilePic !== "undefined") updates.profilePic = __toStrSafe(updates.profilePic);
+    if (typeof updates.name !== "undefined") updates.name = __toStrSafe(updates.name).slice(0, 100);
+    if (typeof updates.bio !== "undefined") updates.bio = __toStrSafe(updates.bio).slice(0, 500);
+    if (typeof updates.location !== "undefined") updates.location = __toStrSafe(updates.location).slice(0, 120);
+    if (typeof updates.mobile !== "undefined") updates.mobile = __toStrSafe(updates.mobile).slice(0, 40);
+    if (typeof updates.profilePic !== "undefined") updates.profilePic = __toStrSafe(updates.profilePic).slice(0, 600);
 
     if (typeof updates.allowHandleSearch !== "undefined") updates.allowHandleSearch = __toBool(updates.allowHandleSearch);
     if (typeof updates.showExperiencesToFriends !== "undefined") updates.showExperiencesToFriends = __toBool(updates.showExperiencesToFriends);
@@ -5007,6 +5019,10 @@ app.put("/api/auth/update", authMiddleware, async (req, res) => {
     const user = await User.findByIdAndUpdate(req.user._id, { $set: updates }, { new: true });
     return res.json({ user: sanitizeUser(user) });
   } catch (e) {
+    if (__isDuplicateKeyError(e)) {
+      __log("warn", "auth_update_duplicate", { rid: __ridFromReq(req), path: (req && req.originalUrl) ? req.originalUrl : undefined });
+      return res.status(400).json({ message: "Handle taken", code: "handle_taken" });
+    }
     __log("error", "auth_update_error", { rid: __ridFromReq(req), path: (req && req.originalUrl) ? req.originalUrl : undefined });
     return res.status(500).json({ message: "Update failed" });
   }
@@ -7713,7 +7729,7 @@ app.patch("/api/admin/experiences/:id/toggle", adminMiddleware, requireAdminReas
   }
 });
 
-app.get("/api/users/:userId/profile", async (req, res) => {
+app.get("/api/users/:userId/profile", authMiddleware, async (req, res) => {
   const rid = String((req && (req.requestId || req.rid)) ? (req.requestId || req.rid) : __tstsRidNow());
   try { if (rid) res.set("X-Request-Id", rid); } catch (_) {}
 
@@ -7756,7 +7772,7 @@ app.get("/api/users/:userId/profile", async (req, res) => {
     const out = {
       name: user.name,
       profilePic: user.profilePic,
-      bio: user.publicProfile ? user.bio : "",
+      bio: (isSelf || (req.user && (req.user.isAdmin === true || String(req.user.role || "").toLowerCase() === "admin")) || user.publicProfile) ? user.bio : "",
       handle: user.handle,
       publicProfile: user.publicProfile,
       createdAt: user.createdAt
