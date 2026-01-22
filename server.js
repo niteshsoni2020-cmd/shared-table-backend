@@ -5588,6 +5588,9 @@ app.get("/api/experiences", async (req, res) => {
     if (sort === "price_asc") sortObj = { price: 1, createdAt: -1 };
     if (sort === "rating_desc") sortObj = { averageRating: -1, reviewCount: -1, createdAt: -1 };
 
+    const primarySort = sortObj;
+    const safeSortFallback = { _id: -1 };
+
     const pageN = Number.isFinite(Number(page)) ? Math.max(1, Math.floor(Number(page))) : 1;
     const limitN = Number.isFinite(Number(limit)) ? Math.min(50, Math.max(1, Math.floor(Number(limit)))) : 50;
     const skipN = (pageN - 1) * limitN;
@@ -5653,13 +5656,25 @@ app.get("/api/experiences", async (req, res) => {
       return res.json(safe);
     }
 
-    const exps = await Experience.find(query)
-      .select(projection)
-      .sort(sortObj)
-      .skip(skipN)
-      .limit(limitN)
-      .maxTimeMS(5000)
-      .lean();
+    let exps = null;
+    try {
+      exps = await Experience.find(query)
+        .select(projection)
+        .sort(primarySort)
+        .skip(skipN)
+        .limit(limitN)
+        .maxTimeMS(3500)
+        .lean();
+    } catch (e1) {
+      try { __log("warn", "experiences_primary_query_failed_fallback_sort", { rid: rid, error: String((e1 && e1.message) ? e1.message : e1) }); } catch (_) {}
+      exps = await Experience.find(query)
+        .select(projection)
+        .sort(safeSortFallback)
+        .skip(skipN)
+        .limit(limitN)
+        .maxTimeMS(3500)
+        .lean();
+    }
 
     const safe = (exps || []).map((e) => mapExperiencePublic(e));
     return res.json(safe);
