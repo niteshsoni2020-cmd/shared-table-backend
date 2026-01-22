@@ -940,6 +940,37 @@ app.disable("x-powered-by");
 app.use(
   helmet({
     crossOriginResourcePolicy: false,
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        scriptSrc: ["'self'", "'unsafe-inline'", "https://js.stripe.com", "https://cdn.tailwindcss.com", "https://kit.fontawesome.com"],
+        styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com", "https://cdn.tailwindcss.com"],
+        imgSrc: ["'self'", "data:", "blob:", "https://res.cloudinary.com", "https://*.stripe.com"],
+        fontSrc: ["'self'", "https://fonts.gstatic.com", "https://ka-f.fontawesome.com"],
+        connectSrc: ["'self'", "https://api.stripe.com", "https://api.cloudinary.com"],
+        frameSrc: ["'self'", "https://js.stripe.com", "https://hooks.stripe.com"],
+        objectSrc: ["'none'"],
+        baseUri: ["'self'"],
+        formAction: ["'self'"],
+        upgradeInsecureRequests: [],
+      },
+    },
+    strictTransportSecurity: {
+      maxAge: 31536000,
+      includeSubDomains: true,
+      preload: true,
+    },
+    referrerPolicy: {
+      policy: "strict-origin-when-cross-origin",
+    },
+    permissionsPolicy: {
+      features: {
+        geolocation: [],
+        camera: [],
+        microphone: [],
+        payment: ["self", "https://js.stripe.com"],
+      },
+    },
   })
 );
 
@@ -3593,6 +3624,38 @@ async function authMiddleware(req, res, next) {
   }
 }
 
+async function optionalAuthMiddleware(req, res, next) {
+  const authHeader = req.headers["authorization"];
+  if (!authHeader) return next();
+
+  const parts = String(authHeader).split(" ");
+  if (parts.length !== 2 || parts[0] !== "Bearer") return next();
+
+  const token = parts[1];
+  try {
+    if (!JWT_SECRET) return next();
+    const payload = jwt.verify(token, JWT_SECRET);
+    const userId = String(payload.userId || "");
+    if (!userId) return next();
+
+    const user = await User.findById(userId);
+    if (!user) return next();
+    if (user.isDeleted === true) return next();
+    if (user.emailVerified !== true) return next();
+
+    const st = String(user.accountStatus || "active");
+    if (st && st !== "active") return next();
+
+    const tv = Number.isFinite(Number(user.tokenVersion)) ? Number(user.tokenVersion) : 0;
+    const ptv = Number.isFinite(Number(payload.tv)) ? Number(payload.tv) : 0;
+    if (ptv !== tv) return next();
+
+    req.user = user;
+    req.auth = { userId };
+  } catch (_) {}
+  next();
+}
+
 
 function adminSafeUser(u) {
   if (!u || typeof u !== "object") return u;
@@ -4480,7 +4543,7 @@ app.post("/api/auth/register", registerLimiter, async (req, res) => {
         } catch (_) { return ""; }
       })();
       const verifyUrlBackend = (__apiBase || "") + "/api/auth/verify-email?email=" + encodeURIComponent(String(user.email || "")) + "#token=" + encodeURIComponent(String(vtoken || ""));
-      const verifyUrlFrontend = __frontendBaseUrl() + "/verify-email?email=" + encodeURIComponent(String(user.email || "")) + "#token=" + encodeURIComponent(String(vtoken || ""));
+      const verifyUrlFrontend = __frontendBaseUrl() + "/verify-email.html?email=" + encodeURIComponent(String(user.email || "")) + "#token=" + encodeURIComponent(String(vtoken || ""));
       __verifyUrl = String(verifyUrlFrontend || "");
 
       const __need = ["Name", "VERIFY_EMAIL_URL"];
@@ -4510,7 +4573,9 @@ app.post("/api/auth/register", registerLimiter, async (req, res) => {
     try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
   }
 
-    const __resp = { success: true, token: signToken(user), user: sanitizeUser(user) };
+    const __t = signToken(user);
+    const __u = sanitizeUser(user);
+    const __resp = { ok: true, data: { token: __t, user: __u }, token: __t, user: __u };
 
     const __vdbgSecret = String(process.env.VERIFY_DEBUG_SECRET || "").trim();
     const __vdbgHeader = String((req.headers && (req.headers["x-verify-debug-secret"] || req.headers["X-Verify-Debug-Secret"])) || "").trim();
@@ -4674,7 +4739,7 @@ app.post("/api/auth/resend-verification", forgotPasswordLimiter, async (req, res
 
     // Send verification email (non-blocking)
     try {
-      const verifyUrlFrontend = __frontendBaseUrl() + "/verify-email?email=" + encodeURIComponent(String(user.email || "")) + "#token=" + encodeURIComponent(String(vtoken || ""));
+      const verifyUrlFrontend = __frontendBaseUrl() + "/verify-email.html?email=" + encodeURIComponent(String(user.email || "")) + "#token=" + encodeURIComponent(String(vtoken || ""));
 
       const __p = __sendEventEmailTracked({
         eventName: "EMAIL_VERIFICATION",
@@ -4717,12 +4782,14 @@ app.post("/api/auth/login", loginLimiter, async (req, res) => {
 
 
     const ok = await bcrypt.compare(String(password), String(user.password || ""));
-    if (!ok) return res.status(401).json({ message: "Invalid credentials" });
+    if (!ok) return res.status(401).json({ ok: false, error: "INVALID_CREDENTIALS", message: "Invalid credentials" });
 
-    return res.json({ token: signToken(user), user: sanitizeUser(user) });
+    const __t = signToken(user);
+    const __u = sanitizeUser(user);
+    return res.json({ ok: true, data: { token: __t, user: __u }, token: __t, user: __u });
   } catch (e) {
     __log("error", "auth_login_error", { rid: __ridFromReq(req), path: (req && req.originalUrl) ? req.originalUrl : undefined });
-    return res.status(500).json({ message: "Login failed" });
+    return res.status(500).json({ ok: false, error: "LOGIN_FAILED", message: "Login failed" });
   }
 });
 
@@ -4752,7 +4819,7 @@ app.post("/api/auth/forgot-password", forgotPasswordLimiter, forgotPasswordEmail
       const hasResend = String(process.env.RESEND_API_KEY || "").trim().length > 0;
       const canEmail = hasSmtp || hasResend;
       const frontendBase = String(process.env.FRONTEND_BASE_URL || "http://localhost:3000").replace(/\/$/, "");
-      const resetUrl = `${frontendBase}/reset-password?email=${encodeURIComponent(email)}#token=${encodeURIComponent(token)}`;
+      const resetUrl = `${frontendBase}/reset-password.html?email=${encodeURIComponent(email)}#token=${encodeURIComponent(token)}`;
       if (canEmail) {
         // Do not block the HTTP response on email delivery (email can hang on misconfig)
         try {
@@ -6177,7 +6244,7 @@ app.post("/api/experiences/:id/book", authMiddleware, bookingCreateLimiter, asyn
 });
 
 // Booking verify
-app.post("/api/bookings/verify", bookingVerifyLimiter, async (req, res) => {
+app.post("/api/bookings/verify", optionalAuthMiddleware, bookingVerifyLimiter, async (req, res) => {
   const bid = __cleanId(((req.body || {}).bookingId), 80);
   const sid = __cleanId(((req.body || {}).sessionId), 120);
   if (bid.length === 0) return res.status(400).json({ status: "invalid_booking_id" });
@@ -7729,7 +7796,7 @@ app.patch("/api/admin/experiences/:id/toggle", adminMiddleware, requireAdminReas
   }
 });
 
-app.get("/api/users/:userId/profile", authMiddleware, async (req, res) => {
+app.get("/api/users/:userId/profile", optionalAuthMiddleware, async (req, res) => {
   const rid = String((req && (req.requestId || req.rid)) ? (req.requestId || req.rid) : __tstsRidNow());
   try { if (rid) res.set("X-Request-Id", rid); } catch (_) {}
 
