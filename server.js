@@ -532,6 +532,14 @@ const CATEGORY_PILLARS = ["Culture", "Food", "Nature"];
 // 1. Initialize App
 const app = express();
 
+process.on("unhandledRejection", (reason) => {
+  try { __log("error", "process_unhandledRejection", { rid: undefined, path: undefined, error: String(reason) }); } catch (_) {}
+});
+process.on("uncaughtException", (err) => {
+  try { __log("error", "process_uncaughtException", { rid: undefined, path: undefined, error: String((err && err.message) ? err.message : err) }); } catch (_) {}
+});
+
+
 
 // TRUST_PROXY_TSTS
 app.set("trust proxy", 1);
@@ -2241,6 +2249,25 @@ mongoose
   }
 __dbReady = true;
   __log("info", "db_connected", { rid: undefined, path: undefined });
+
+  if (String(process.env.TSTS_ENSURE_INDEXES || "").trim() === "1") {
+    try {
+      __log("info", "db_sync_indexes_queued", { rid: undefined, path: undefined });
+      setTimeout(() => {
+        (async () => {
+          try {
+            __log("info", "db_sync_indexes_start", { rid: undefined, path: undefined });
+            await Experience.syncIndexes();
+            __log("info", "db_sync_indexes_done", { rid: undefined, path: undefined });
+          } catch (e) {
+            __log("warn", "db_sync_indexes_failed", { rid: undefined, path: undefined, error: String((e && e.message) ? e.message : e) });
+          }
+        })();
+      }, 0);
+    } catch (e) {
+      __log("warn", "db_sync_indexes_queue_failed", { rid: undefined, path: undefined, error: String((e && e.message) ? e.message : e) });
+    }
+  }
   try { global.__tsts_db_connected = true; } catch (_) {
     try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
   }
@@ -2376,7 +2403,7 @@ async function sendEmail({ to, subject, html, text }) {
 
 
 // 5. SCHEMAS
-const schemaOpts = { toJSON: { virtuals: true }, toObject: { virtuals: true } };
+const schemaOpts = { toJSON: { virtuals: true }, toObject: { virtuals: true }, autoIndex: false };
 
 const notificationSchema = new mongoose.Schema(
   {
@@ -2481,6 +2508,18 @@ const experienceSchema = new mongoose.Schema(
   },
   schemaOpts
 );
+
+// Indexes: keep /api/experiences fast under load
+try {
+  experienceSchema.index({ isPaused: 1, isDeleted: 1, createdAt: -1 });
+  experienceSchema.index({ hostId: 1, isPaused: 1, isDeleted: 1, createdAt: -1 });
+  experienceSchema.index({ tags: 1, isPaused: 1, isDeleted: 1, createdAt: -1 });
+  experienceSchema.index({ isPaused: 1, isDeleted: 1, price: 1 });
+  experienceSchema.index({ isPaused: 1, isDeleted: 1, averageRating: -1 });
+  experienceSchema.index({ city: 1, isPaused: 1, isDeleted: 1, createdAt: -1 });
+} catch (_) {
+  try { __log("warn", "experience_index_declare_failed", { rid: __tstsRidNow() }); } catch (_) {}
+}
 
 const bookingSchema = new mongoose.Schema(
   {
@@ -2920,7 +2959,26 @@ try {
 } catch (_) {
     try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
   }
+// Query performance indexes (declared in code; created only when explicitly synced)
+experienceSchema.index({ isPaused: 1, isDeleted: 1, createdAt: -1 });
+experienceSchema.index({ city: 1, isPaused: 1, isDeleted: 1, createdAt: -1 });
+experienceSchema.index({ tags: 1, isPaused: 1, isDeleted: 1, createdAt: -1 });
+experienceSchema.index({ hostId: 1, isPaused: 1, isDeleted: 1, createdAt: -1 });
+experienceSchema.index({ startDate: 1, endDate: 1, availableDays: 1, isPaused: 1, isDeleted: 1 });
+experienceSchema.index({ title: "text", description: "text" }, { name: "experience_text", weights: { title: 10, description: 3 } });
+
 const Experience = mongoose.model("Experience", experienceSchema);
+
+const EXPERIENCE_PUBLIC_FIELDS = ["_id", "hostId", "hostName", "hostPic", "title", "description", "city", "suburb", "postcode", "price", "maxGuests", "startDate", "endDate", "availableDays", "isPaused", "isDeleted", "tags", "timeSlots", "imageUrl", "images", "dynamicDiscounts", "averageRating", "reviewCount", "createdAt"];
+const EXPERIENCE_PUBLIC_PROJECTION = EXPERIENCE_PUBLIC_FIELDS.join(" ");
+const mapExperiencePublic = (e) => {
+  if (!e) return e;
+  const out = {};
+  for (const k of EXPERIENCE_PUBLIC_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(e, k)) out[k] = e[k];
+  }
+  return out;
+};
 
 
 function stripExperiencePrivateFields(expObj) {
@@ -5492,15 +5550,10 @@ app.get("/api/experiences", async (req, res) => {
       return t.slice(0, maxLen);
     };
 
-    const __escapeRegexLiteral = (s) => {
-      return String(s).replace(/[.*+?^${}()|[\]\\]/g, (m) => "\\" + m);
-    };
-
     const cityTok = __safeTok(city, 60);
-    if (cityTok) query.city = { $regex: __escapeRegexLiteral(cityTok), $options: "i" };
+    if (cityTok) query.city = cityTok;
 
     const qTok = __safeTok(q, 80);
-    if (qTok) query.title = { $regex: __escapeRegexLiteral(qTok), $options: "i" };
 
     if (category && CATEGORY_PILLARS.includes(category)) query.tags = { $in: [category] };
 
@@ -5526,33 +5579,96 @@ app.get("/api/experiences", async (req, res) => {
       query.startDate = { $lte: dateStr };
       query.endDate = { $gte: dateStr };
 
-      const d = new Date(dateStr + "T00:00:00Z");
+      const dte = new Date(dateStr + "T00:00:00Z");
       const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-      query.availableDays = { $in: [days[d.getUTCDay()]] };
+      query.availableDays = { $in: [days[dte.getUTCDay()]] };
     }
 
-    let sortObj = {};
-    if (sort === "price_asc") sortObj.price = 1;
-    if (sort === "rating_desc") sortObj.averageRating = -1;
+    let sortObj = { createdAt: -1 };
+    if (sort === "price_asc") sortObj = { price: 1, createdAt: -1 };
+    if (sort === "rating_desc") sortObj = { averageRating: -1, reviewCount: -1, createdAt: -1 };
 
     const pageN = Number.isFinite(Number(page)) ? Math.max(1, Math.floor(Number(page))) : 1;
     const limitN = Number.isFinite(Number(limit)) ? Math.min(50, Math.max(1, Math.floor(Number(limit)))) : 50;
     const skipN = (pageN - 1) * limitN;
 
+    const projection = EXPERIENCE_PUBLIC_PROJECTION;
+
+    if (qTok) {
+      try {
+        const textQuery = { ...query, $text: { $search: qTok } };
+        const exps = await Experience.find(textQuery)
+          .select(projection)
+          .sort({ score: { $meta: "textScore" }, createdAt: -1 })
+          .skip(skipN)
+          .limit(limitN)
+          .maxTimeMS(5000)
+          .lean();
+
+        const safe = (exps || []).map((e) => mapExperiencePublic(e));
+        return res.json(safe);
+      } catch (errText) {
+        const msg = String((errText && errText.message) ? errText.message : errText).toLowerCase();
+        const isTextIndexMissing = msg.includes("text index") || msg.includes("no text index") || msg.includes("text search");
+        if (!isTextIndexMissing) throw errText;
+        try { __log("warn", "experiences_text_index_missing_fallback_scan", { rid: rid }); } catch (_) {}
+      }
+
+      const needle = String(qTok).toLowerCase();
+      const BATCH = 100;
+      const SCAN_CAP = 2000;
+      let scanned = 0;
+      let cursorSkip = 0;
+      let matches = [];
+
+      while ((matches.length < (skipN + limitN)) && (scanned < SCAN_CAP)) {
+        const docs = await Experience.find(query)
+          .select(projection)
+          .sort(sortObj)
+          .skip(cursorSkip)
+          .limit(BATCH)
+          .maxTimeMS(5000)
+          .lean();
+
+        if (!docs || docs.length === 0) break;
+
+        scanned += docs.length;
+        cursorSkip += docs.length;
+
+        const found = docs.filter((e) => {
+          const hay = String((e && e.title) ? e.title : "") + " " + String((e && e.description) ? e.description : "");
+          return hay.toLowerCase().includes(needle);
+        });
+
+        if (found && found.length) matches = matches.concat(found);
+        if (docs.length < BATCH) break;
+      }
+
+      if (scanned >= SCAN_CAP) {
+        try { __log("warn", "experiences_search_scan_cap_reached", { rid: rid, scanCap: SCAN_CAP, batch: BATCH }); } catch (_) {}
+      }
+
+      const paged = (matches || []).slice(skipN, skipN + limitN);
+      const safe = (paged || []).map((e) => mapExperiencePublic(e));
+      return res.json(safe);
+    }
+
     const exps = await Experience.find(query)
+      .select(projection)
       .sort(sortObj)
       .skip(skipN)
       .limit(limitN)
       .maxTimeMS(5000)
       .lean();
 
-    const safe = (exps || []).map((e) => stripExperiencePrivateFields(e));
+    const safe = (exps || []).map((e) => mapExperiencePublic(e));
     return res.json(safe);
   } catch (err) {
     try { __log("error", "experiences_list_failed", { rid: rid, path: "/api/experiences", error: String((err && err.message) ? err.message : err) }); } catch (_) {}
     return res.status(500).json({ message: "Failed to load experiences" });
   }
 });
+
 
 // Experience detail
 app.get("/api/experiences/:id", async (req, res) => {
