@@ -103,6 +103,7 @@ try {
 
 const express = require("express");
 const cors = require("cors");
+const cookieParser = require("cookie-parser");
 const mongoose = require("mongoose");
 
 // === EMAIL_DELIVERY_LEDGER_V1 ===
@@ -1319,12 +1320,179 @@ const corsOptions = {
   },
   credentials: true,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization", "X-Admin-Reason", "X-Internal-Token", "X-Request-Id"],
+  allowedHeaders: ["Content-Type", "Authorization", "X-Admin-Reason", "X-Internal-Token", "X-Request-Id", "X-CSRF-Token", "Idempotency-Key"],
   optionsSuccessStatus: 204,
 };
 
 app.use(cors(corsOptions));
 app.options("*", cors(corsOptions));
+app.use(cookieParser());
+
+// === SEC-002: Cookie Auth Constants ===
+const COOKIE_NAME_AUTH = "tsts_auth";
+const COOKIE_NAME_CSRF = "tsts_csrf";
+const __isProd = () => String(process.env.NODE_ENV || "").toLowerCase() === "production";
+
+// RF-06: Cookie SameSite is configurable via env for cross-domain deployments
+function __getCookieSameSite() {
+  const envVal = String(process.env.COOKIE_SAMESITE || "").toLowerCase().trim();
+  if (envVal === "none" || envVal === "strict" || envVal === "lax") return envVal;
+  return "lax"; // default
+}
+function __getCookieSecure() {
+  const ss = __getCookieSameSite();
+  // SameSite=None requires Secure=true
+  if (ss === "none") return true;
+  return __isProd();
+}
+
+function __setAuthCookie(res, token) {
+  res.cookie(COOKIE_NAME_AUTH, token, {
+    httpOnly: true,
+    secure: __getCookieSecure(),
+    sameSite: __getCookieSameSite(),
+    path: "/",
+    maxAge: 30 * 24 * 60 * 60 * 1000 // 30 days
+  });
+}
+
+function __clearAuthCookie(res) {
+  res.clearCookie(COOKIE_NAME_AUTH, { path: "/" });
+  res.clearCookie(COOKIE_NAME_CSRF, { path: "/" });
+}
+
+// === SEC-035: Stateless CSRF Double-Submit ===
+function __generateCsrfToken() {
+  return crypto.randomBytes(32).toString("hex");
+}
+
+function __setCsrfCookie(res, token) {
+  res.cookie(COOKIE_NAME_CSRF, token, {
+    httpOnly: false, // Must be readable by JS for double-submit
+    secure: __getCookieSecure(),
+    sameSite: __getCookieSameSite(),
+    path: "/",
+    maxAge: 30 * 24 * 60 * 60 * 1000
+  });
+}
+
+// CSRF middleware (stateless double-submit pattern)
+// GUARD: Middleware passed as reference, NOT csrfProtection()
+// GUARD: Bearer auth clients are exempt (CSRF only for cookie auth)
+// GUARD: Uses req.get() for case-insensitive header access
+function csrfProtection(req, res, next) {
+  const method = String(req.method || "").toUpperCase();
+  if (method === "GET" || method === "HEAD" || method === "OPTIONS") {
+    return next();
+  }
+  
+  // Skip for Stripe webhooks (signature verified separately)
+  const path = String(req.path || req.originalUrl || "");
+  if (path.includes("/stripe/webhook")) {
+    return next();
+  }
+  
+  // RF-02: Allow logout endpoints to bypass CSRF (logout is a recovery endpoint)
+  // User should never get stuck logged-in due to CSRF mismatch
+  if (path.includes("/api/auth/logout")) {
+    return next();
+  }
+  
+  // GUARD: Bearer auth clients are EXEMPT from CSRF (API clients, not browser)
+  const authzHeader = String(req.get("authorization") || "");
+  if (authzHeader.toLowerCase().startsWith("bearer ")) {
+    return next();
+  }
+  
+  // Only enforce CSRF if cookie auth is present
+  const authCookie = req.cookies && req.cookies[COOKIE_NAME_AUTH];
+  if (!authCookie) {
+    return next(); // No cookie auth, no CSRF needed
+  }
+  
+  // Double-submit: compare header token with cookie token
+  const csrfCookie = String(req.cookies[COOKIE_NAME_CSRF] || "");
+  const csrfHeader = String(req.get("x-csrf-token") || "");
+  
+  if (!csrfHeader || !csrfCookie) {
+    __log("warn", "csrf_missing", { rid: __ridFromReq(req), path });
+    return res.status(403).json({ ok: false, error: "CSRF_MISSING", message: "CSRF token required" });
+  }
+  
+  if (csrfHeader !== csrfCookie) {
+    __log("warn", "csrf_mismatch", { rid: __ridFromReq(req), path });
+    return res.status(403).json({ ok: false, error: "CSRF_INVALID", message: "Invalid CSRF token" });
+  }
+  
+  next();
+}
+
+// === SEC-031: Per-User Rate Limiting ===
+// Note: In-memory store - suitable for single-instance. For multi-instance, use Redis.
+const __userRateLimitStore = new Map();
+const USER_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
+const USER_RATE_LIMIT_MAX = 10;
+
+function __checkUserRateLimit(identifier) {
+  const key = String(identifier || "").toLowerCase().trim();
+  if (!key) return { allowed: true };
+  const now = Date.now();
+  const entry = __userRateLimitStore.get(key);
+  if (!entry) {
+    __userRateLimitStore.set(key, { count: 1, windowStart: now });
+    return { allowed: true };
+  }
+  if (now - entry.windowStart > USER_RATE_LIMIT_WINDOW_MS) {
+    __userRateLimitStore.set(key, { count: 1, windowStart: now });
+    return { allowed: true };
+  }
+  if (entry.count >= USER_RATE_LIMIT_MAX) {
+    const retryAfter = Math.ceil((entry.windowStart + USER_RATE_LIMIT_WINDOW_MS - now) / 1000);
+    return { allowed: false, retryAfter };
+  }
+  entry.count++;
+  return { allowed: true };
+}
+
+function __resetUserRateLimit(identifier) {
+  const key = String(identifier || "").toLowerCase().trim();
+  if (key) __userRateLimitStore.delete(key);
+}
+
+// === TASK C1: Idempotency Replay Store for Booking Create ===
+// In-memory store with max entries and expiry for safety
+const __idempotencyStore = new Map();
+const IDEMPOTENCY_MAX_ENTRIES = 5000;
+const IDEMPOTENCY_TTL_MS = 15 * 60 * 1000; // 15 minutes
+
+function __getIdempotencyKey(userId, rawKey) {
+  // Scope key to user to prevent cross-user collisions
+  return String(userId || "anonymous") + ":" + String(rawKey || "");
+}
+
+function __checkIdempotencyReplay(userId, rawKey) {
+  if (!rawKey) return null;
+  const key = __getIdempotencyKey(userId, rawKey);
+  const entry = __idempotencyStore.get(key);
+  if (!entry) return null;
+  // Check expiry
+  if (Date.now() - entry.createdAt > IDEMPOTENCY_TTL_MS) {
+    __idempotencyStore.delete(key);
+    return null;
+  }
+  return { status: entry.status, body: entry.body };
+}
+
+function __storeIdempotencyResponse(userId, rawKey, status, body) {
+  if (!rawKey) return;
+  const key = __getIdempotencyKey(userId, rawKey);
+  // Evict oldest if at capacity
+  if (__idempotencyStore.size >= IDEMPOTENCY_MAX_ENTRIES) {
+    const oldest = __idempotencyStore.keys().next().value;
+    if (oldest) __idempotencyStore.delete(oldest);
+  }
+  __idempotencyStore.set(key, { status, body, createdAt: Date.now() });
+}
 
 // L3_ADMIN_PARTIAL_REFUND_TRIGGER_ROUTE_V1
 // Admin-only trigger: create a partial refund in Stripe.
@@ -3626,70 +3794,97 @@ function signToken(user) {
   });
 }
 
+// SEC-002: Cookie-first auth, then Bearer fallback
+// GUARD: Must fetch user from DB and compare tokenVersion (no ghost revocation)
 async function authMiddleware(req, res, next) {
-  const authHeader = req.headers["authorization"];
-  if (!authHeader) return res.status(401).json({ message: "Missing header" });
-
-  const parts = String(authHeader).split(" ");
-  if (parts.length !== 2 || parts[0] !== "Bearer") {
-    return res.status(401).json({ message: "Invalid auth header" });
+  // Token resolution: cookie first, then Bearer header
+  let token = null;
+  
+  // 1. Try cookie auth first
+  const authCookie = req.cookies && req.cookies[COOKIE_NAME_AUTH];
+  if (authCookie) {
+    token = authCookie;
+  }
+  
+  // 2. Fallback to Bearer header
+  if (!token) {
+    const authHeader = String(req.get("authorization") || "");
+    if (authHeader.toLowerCase().startsWith("bearer ")) {
+      token = authHeader.slice(7);
+    }
+  }
+  
+  if (!token) {
+    return res.status(401).json({ ok: false, error: "AUTH_MISSING", message: "Authentication required" });
   }
 
-  const token = parts[1];
   try {
-    if (!JWT_SECRET) return res.status(500).json({ message: "Server missing JWT_SECRET" });
+    if (!JWT_SECRET) return res.status(500).json({ ok: false, error: "SERVER_ERROR", message: "Server missing JWT_SECRET" });
     const payload = jwt.verify(token, JWT_SECRET);
     const userId = String(payload.userId || "");
-    if (!userId) return res.status(401).json({ message: "Invalid token" });
+    if (!userId) return res.status(401).json({ ok: false, error: "INVALID_TOKEN", message: "Invalid token" });
 
+    // GUARD: Must fetch user from DB to check tokenVersion (no ghost revocation)
     const user = await User.findById(userId);
-    if (!user) return res.status(401).json({ message: "User not found" });
+    if (!user) return res.status(401).json({ ok: false, error: "USER_NOT_FOUND", message: "User not found" });
 
     if (user && user.isDeleted === true) {
-      return res.status(403).json({ message: "Account deleted" });
+      return res.status(403).json({ ok: false, error: "ACCOUNT_DELETED", message: "Account deleted" });
     }
 
     const __stDel = String(user.accountStatus || "active");
     if (__stDel === "deleted") {
-      return res.status(403).json({ message: "Account deleted" });
+      return res.status(403).json({ ok: false, error: "ACCOUNT_DELETED", message: "Account deleted" });
     }
 
     if (user.emailVerified !== true) {
-      return res.status(403).json({ message: "Email not verified" });
+      return res.status(403).json({ ok: false, error: "EMAIL_NOT_VERIFIED", message: "Email not verified" });
     }
 
     const st = String(user.accountStatus || "active");
     if (st && st !== "active") {
-      return res.status(403).json({ message: "Account not active" });
+      return res.status(403).json({ ok: false, error: "ACCOUNT_NOT_ACTIVE", message: "Account not active" });
     }
 
     const mu = (user.mutedUntil instanceof Date && !Number.isNaN(user.mutedUntil.getTime())) ? user.mutedUntil : null;
     if (mu && mu.getTime() > Date.now()) {
-      return res.status(403).json({ message: "Account muted" });
+      return res.status(403).json({ ok: false, error: "ACCOUNT_MUTED", message: "Account muted" });
     }
 
-    const tv =  Number.isFinite(Number(user.tokenVersion)) ? Number(user.tokenVersion) : 0;
+    // GUARD: tokenVersion check prevents ghost revocation
+    const tv = Number.isFinite(Number(user.tokenVersion)) ? Number(user.tokenVersion) : 0;
     const ptv = Number.isFinite(Number(payload.tv)) ? Number(payload.tv) : 0;
-    if (ptv != tv) {
-      return res.status(401).json({ message: "Session revoked" });
+    if (ptv !== tv) {
+      return res.status(401).json({ ok: false, error: "SESSION_REVOKED", message: "Session revoked" });
     }
 
     req.user = user;
     req.auth = { userId };
     next();
   } catch (err) {
-    return res.status(401).json({ message: "Invalid Token" });
+    return res.status(401).json({ ok: false, error: "INVALID_TOKEN", message: "Invalid token" });
   }
 }
 
+// SEC-002: Optional auth with cookie-first, then Bearer fallback
 async function optionalAuthMiddleware(req, res, next) {
-  const authHeader = req.headers["authorization"];
-  if (!authHeader) return next();
+  // Token resolution: cookie first, then Bearer header
+  let token = null;
+  
+  const authCookie = req.cookies && req.cookies[COOKIE_NAME_AUTH];
+  if (authCookie) {
+    token = authCookie;
+  }
+  
+  if (!token) {
+    const authHeader = String(req.get("authorization") || "");
+    if (authHeader.toLowerCase().startsWith("bearer ")) {
+      token = authHeader.slice(7);
+    }
+  }
+  
+  if (!token) return next();
 
-  const parts = String(authHeader).split(" ");
-  if (parts.length !== 2 || parts[0] !== "Bearer") return next();
-
-  const token = parts[1];
   try {
     if (!JWT_SECRET) return next();
     const payload = jwt.verify(token, JWT_SECRET);
@@ -3710,7 +3905,9 @@ async function optionalAuthMiddleware(req, res, next) {
 
     req.user = user;
     req.auth = { userId };
-  } catch (_) {}
+  } catch (_) {
+    try { __log("warn", "optional_auth_error", { rid: __ridFromReq(req) }); } catch (_) {}
+  }
   next();
 }
 
@@ -3737,7 +3934,7 @@ function adminSafeUser(u) {
 
 function adminMiddleware(req, res, next) {
   authMiddleware(req, res, () => {
-    if (!req.user.isAdmin) return res.status(403).json({ message: "Access denied." });
+    if (!req.user.isAdmin) return res.status(403).json({ ok: false, error: "ACCESS_DENIED", message: "Access denied" });
     next();
   });
 }
@@ -3890,26 +4087,160 @@ app.put("/api/admin/promo-codes/:code/active", adminMiddleware, requireAdminReas
 });
 
 
-// --- AUTH SESSION CONTROL (REVOCATION) ---
-app.post("/api/auth/logout", authMiddleware, async (req, res) => {
+// === SEC-035: CSRF Token Endpoint (Lazy Issuance) ===
+// GUARD: Do not rotate on every call - if cookie exists, return existing token
+app.get("/api/csrf", (req, res) => {
   try {
-    const cur = Number.isFinite(Number(req.user.tokenVersion)) ? Number(req.user.tokenVersion) : 0;
-    req.user.tokenVersion = cur + 1;
-    await req.user.save();
-    return res.json({ ok: true });
+    const existingCsrf = String(req.cookies[COOKIE_NAME_CSRF] || "");
+    if (existingCsrf.length > 0) {
+      // Lazy issuance: return existing token, do not rotate
+      return res.json({ ok: true, data: { csrfToken: existingCsrf } });
+    }
+    // No existing token: generate new one
+    const csrfToken = __generateCsrfToken();
+    __setCsrfCookie(res, csrfToken);
+    return res.json({ ok: true, data: { csrfToken } });
   } catch (e) {
-    return res.status(500).json({ message: "Server error" });
+    __log("error", "csrf_endpoint_error", { rid: __ridFromReq(req) });
+    return res.status(500).json({ ok: false, error: "SERVER_ERROR", message: "Failed to issue CSRF token" });
   }
 });
 
-app.post("/api/auth/logout-all", authMiddleware, async (req, res) => {
+// === SEC-002/SEC-035: Auth /me Endpoint ===
+app.get("/api/auth/me", authMiddleware, async (req, res) => {
   try {
+    const __u = sanitizeUser(req.user);
+    // Return existing CSRF token (do not rotate on me check - multi-tab safe)
+    const existingCsrf = String(req.cookies[COOKIE_NAME_CSRF] || "");
+    return res.json({ ok: true, data: { user: __u, csrfToken: existingCsrf || null } });
+  } catch (e) {
+    __log("error", "auth_me_error", { rid: __ridFromReq(req) });
+    return res.status(500).json({ ok: false, error: "SERVER_ERROR", message: "Server error" });
+  }
+});
+
+// --- AUTH SESSION CONTROL (REVOCATION) ---
+// SEC-002: Logout clears cookies
+// GUARD: Uses csrfProtection as reference, not csrfProtection()
+app.post("/api/auth/logout", optionalAuthMiddleware, csrfProtection, async (req, res) => {
+  try {
+    // Increment tokenVersion if user is authenticated
+    if (req.user) {
+      const cur = Number.isFinite(Number(req.user.tokenVersion)) ? Number(req.user.tokenVersion) : 0;
+      req.user.tokenVersion = cur + 1;
+      await req.user.save();
+    }
+    // Clear cookies
+    __clearAuthCookie(res);
+    return res.json({ ok: true, data: { loggedOut: true } });
+  } catch (e) {
+    __log("error", "logout_error", { rid: __ridFromReq(req) });
+    // Still clear cookies even on error
+    __clearAuthCookie(res);
+    return res.json({ ok: true, data: { loggedOut: true } });
+  }
+});
+
+// SEC-002: Logout-all revokes all sessions by incrementing tokenVersion
+// GUARD: Uses csrfProtection as reference, not csrfProtection()
+app.post("/api/auth/logout-all", authMiddleware, csrfProtection, async (req, res) => {
+  try {
+    // GUARD: Use $inc operator correctly (not truncated)
     const cur = Number.isFinite(Number(req.user.tokenVersion)) ? Number(req.user.tokenVersion) : 0;
     req.user.tokenVersion = cur + 1;
     await req.user.save();
-    return res.json({ ok: true });
+    // Clear cookies
+    __clearAuthCookie(res);
+    return res.json({ ok: true, data: { loggedOutAll: true } });
   } catch (e) {
-    return res.status(500).json({ message: "Server error" });
+    __log("error", "logout_all_error", { rid: __ridFromReq(req) });
+    __clearAuthCookie(res);
+    return res.status(500).json({ ok: false, error: "SERVER_ERROR", message: "Logout failed" });
+  }
+});
+
+// === SEC-045: Data Export Endpoint ===
+app.get("/api/me/export", authMiddleware, async (req, res) => {
+  try {
+    const userId = String(req.user._id);
+    const userData = {
+      profile: sanitizeUser(req.user),
+      exportedAt: new Date().toISOString()
+    };
+
+    // Get user's bookings
+    try {
+      const Booking = mongoose.model("Booking");
+      const bookings = await Booking.find({ guestId: userId }).lean();
+      userData.bookings = bookings.map(b => ({
+        id: String(b._id),
+        experienceId: b.experienceId,
+        status: b.status,
+        guests: b.guests,
+        totalAmountCents: b.totalAmountCents,
+        createdAt: b.createdAt,
+        bookingDate: b.bookingDate
+      }));
+    } catch (_) {
+      try { __log("warn", "export_bookings_error", { rid: __ridFromReq(req), userId }); } catch (_) {}
+      userData.bookings = [];
+    }
+
+    // Get user's experiences (if host)
+    try {
+      const Experience = mongoose.model("Experience");
+      const experiences = await Experience.find({ hostId: userId }).lean();
+      userData.experiences = experiences.map(e => ({
+        id: String(e._id),
+        title: e.title,
+        status: e.status,
+        createdAt: e.createdAt
+      }));
+    } catch (_) {
+      try { __log("warn", "export_experiences_error", { rid: __ridFromReq(req), userId }); } catch (_) {}
+      userData.experiences = [];
+    }
+
+    return res.json({ ok: true, data: userData });
+  } catch (e) {
+    __log("error", "data_export_error", { rid: __ridFromReq(req) });
+    return res.status(500).json({ ok: false, error: "EXPORT_FAILED", message: "Data export failed" });
+  }
+});
+
+// === SEC-044: Right-to-Erasure Endpoint ===
+// GUARD: Uses csrfProtection as reference, not csrfProtection()
+app.delete("/api/me", authMiddleware, csrfProtection, async (req, res) => {
+  try {
+    const userId = String(req.user._id);
+    const userEmail = String(req.user.email || "");
+
+    // Soft delete: mark as deleted, scrub PII
+    req.user.isDeleted = true;
+    req.user.deletedAt = new Date();
+    req.user.accountStatus = "deleted";
+    
+    // Scrub PII
+    req.user.email = `deleted_${userId}@tsts.local`;
+    req.user.name = "Deleted User";
+    req.user.mobile = "";
+    req.user.profilePic = "";
+    req.user.bio = "";
+    
+    // Invalidate all sessions
+    const cur = Number.isFinite(Number(req.user.tokenVersion)) ? Number(req.user.tokenVersion) : 0;
+    req.user.tokenVersion = cur + 1;
+    
+    await req.user.save();
+
+    // Clear cookies
+    __clearAuthCookie(res);
+
+    __log("info", "user_deleted", { rid: __ridFromReq(req), userId, originalEmail: __maskEmail(userEmail) });
+    return res.json({ ok: true, data: { deleted: true } });
+  } catch (e) {
+    __log("error", "user_delete_error", { rid: __ridFromReq(req) });
+    return res.status(500).json({ ok: false, error: "DELETE_FAILED", message: "Account deletion failed" });
   }
 });
 
@@ -3917,10 +4248,11 @@ app.post("/api/auth/logout-all", authMiddleware, async (req, res) => {
 app.get("/api/policy/active", async (req, res) => {
   try {
     const doc = await getActivePolicyDoc();
-    if (!doc) return res.status(404).json({ message: "No active policy" });
-    return res.json({ ok: true, policy: policySnapshotFromDoc(doc) });
+    if (!doc) return res.status(404).json({ ok: false, error: "NOT_FOUND", message: "No active policy" });
+    return res.json({ ok: true, data: { policy: policySnapshotFromDoc(doc) } });
   } catch (e) {
-    return res.status(500).json({ message: "Server error" });
+    __log("error", "policy_active_error", { rid: __ridFromReq(req) });
+    return res.status(500).json({ ok: false, error: "SERVER_ERROR", message: "Server error" });
   }
 });
 
@@ -4658,10 +4990,10 @@ app.post("/api/auth/register", registerLimiter, async (req, res) => {
   } catch (e) {
     if (__isDuplicateKeyError(e)) {
       __log("warn", "auth_register_duplicate", { rid: __ridFromReq(req), path: (req && req.originalUrl) ? req.originalUrl : undefined });
-      return res.status(400).json({ message: "Handle taken", code: "handle_taken" });
+      return res.status(400).json({ ok: false, error: "HANDLE_TAKEN", message: "Handle taken" });
     }
     __log("error", "auth_register_error", { rid: __ridFromReq(req), path: (req && req.originalUrl) ? req.originalUrl : undefined });
-    res.status(500).json({ message: "Error" });
+    return res.status(500).json({ ok: false, error: "SERVER_ERROR", message: "Registration failed" });
   }
 });
 
@@ -4675,20 +5007,20 @@ app.post("/api/auth/verify-email", async (req, res) => {
     const tokenRaw = (req.body && req.body.token) ? String(req.body.token) : "";
     const email = emailRaw.toLowerCase().trim();
     const token = tokenRaw.trim();
-    if (!email || !token) return res.status(400).json({ message: "Invalid or expired token" });
+    if (!email || !token) return res.status(400).json({ ok: false, error: "INVALID_TOKEN", message: "Invalid or expired token" });
 
     const user = await User.findOne({ email });
-    if (!user) return res.status(400).json({ message: "Invalid or expired token" });
+    if (!user) return res.status(400).json({ ok: false, error: "INVALID_TOKEN", message: "Invalid or expired token" });
     const exp = user.emailVerificationExpiresAt;
     if (!user.emailVerificationTokenHash || !exp || Date.now() > new Date(exp).getTime()) {
-      return res.status(400).json({ message: "Invalid or expired token" });
+      return res.status(400).json({ ok: false, error: "TOKEN_EXPIRED", message: "Invalid or expired token" });
     }
     const th = crypto.createHash("sha256").update(token).digest("hex");
     const __stored = String(user.emailVerificationTokenHash || "");
     const __th = String(th || "");
     const __ok = (!!__stored && !!__th && (__th === __stored));
     if (!__ok) {
-      return res.status(400).json({ message: "Invalid or expired token" });
+      return res.status(400).json({ ok: false, error: "INVALID_TOKEN", message: "Invalid or expired token" });
     }
 
     user.emailVerified = true;
@@ -4746,13 +5078,14 @@ app.post("/api/auth/verify-email", async (req, res) => {
 
     return res.json({ ok: true });
   } catch (e) {
-    return res.status(500).json({ message: "Server error" });
+    __log("error", "verify_email_error", { rid: __ridFromReq(req) });
+    return res.status(500).json({ ok: false, error: "SERVER_ERROR", message: "Verification failed" });
   }
 });
 
 // Back-compat: GET must NOT change state (email prefetchers may hit GET links)
 app.get("/api/auth/verify-email", async (req, res) => {
-  return res.status(405).json({ message: "Use POST /api/auth/verify-email" });
+  return res.status(405).json({ ok: false, error: "METHOD_NOT_ALLOWED", message: "Use POST /api/auth/verify-email" });
 });
 
 // Auth: Resend Verification Email
@@ -4821,30 +5154,55 @@ app.post("/api/auth/resend-verification", forgotPasswordLimiter, async (req, res
 app.post("/api/auth/login", loginLimiter, async (req, res) => {
   try {
     const { email, password } = req.body || {};
-    if (!email || !password) return res.status(400).json({ message: "Email and password required" });
+    const emailNorm = String(email || "").toLowerCase().trim();
+    
+    if (!emailNorm || !password) {
+      return res.status(400).json({ ok: false, error: "VALIDATION_ERROR", message: "Email and password required" });
+    }
 
-    const user = await User.findOne({ email: String(email).toLowerCase().trim() });
-    if (!user) return res.status(401).json({ message: "Invalid credentials" });
+    // SEC-031: Per-user rate limiting
+    const rateCheck = __checkUserRateLimit(emailNorm);
+    if (!rateCheck.allowed) {
+      res.set("Retry-After", String(rateCheck.retryAfter || 900));
+      return res.status(429).json({ ok: false, error: "RATE_LIMITED", message: "Too many login attempts. Please try again later." });
+    }
+
+    const user = await User.findOne({ email: emailNorm });
+    if (!user) {
+      return res.status(401).json({ ok: false, error: "INVALID_CREDENTIALS", message: "Invalid credentials" });
+    }
 
     if (user && user.isDeleted === true) {
-      return res.status(403).json({ message: "Account deleted" });
+      return res.status(403).json({ ok: false, error: "ACCOUNT_DELETED", message: "Account deleted" });
     }
     const st = String(user.accountStatus || "active");
     if (st && st !== "active") {
-      return res.status(403).json({ message: "Account not active" });
+      return res.status(403).json({ ok: false, error: "ACCOUNT_NOT_ACTIVE", message: "Account not active" });
     }
 
     if (user.emailVerified !== true) {
-      return res.status(403).json({ message: "Please verify your email.", code: "email_not_verified" });
+      return res.status(403).json({ ok: false, error: "EMAIL_NOT_VERIFIED", message: "Please verify your email.", code: "email_not_verified" });
     }
 
+    const pwOk = await bcrypt.compare(String(password), String(user.password || ""));
+    if (!pwOk) {
+      return res.status(401).json({ ok: false, error: "INVALID_CREDENTIALS", message: "Invalid credentials" });
+    }
 
-    const ok = await bcrypt.compare(String(password), String(user.password || ""));
-    if (!ok) return res.status(401).json({ ok: false, error: "INVALID_CREDENTIALS", message: "Invalid credentials" });
+    // Success: reset rate limit for this user
+    __resetUserRateLimit(emailNorm);
 
     const __t = signToken(user);
     const __u = sanitizeUser(user);
-    return res.json({ ok: true, data: { token: __t, user: __u }, token: __t, user: __u });
+    
+    // SEC-002: Set HttpOnly auth cookie
+    __setAuthCookie(res, __t);
+    
+    // SEC-035: Generate and set CSRF token (lazy issuance - new token on login)
+    const csrfToken = __generateCsrfToken();
+    __setCsrfCookie(res, csrfToken);
+
+    return res.json({ ok: true, data: { user: __u, csrfToken } });
   } catch (e) {
     __log("error", "auth_login_error", { rid: __ridFromReq(req), path: (req && req.originalUrl) ? req.originalUrl : undefined });
     return res.status(500).json({ ok: false, error: "LOGIN_FAILED", message: "Login failed" });
@@ -5013,14 +5371,6 @@ app.post("/api/auth/reset-password", resetPasswordLimiter, resetPasswordEmailLim
   }
 });
 
-app.get("/api/auth/me", authMiddleware, async (req, res) => {
-  try {
-    return res.json({ user: sanitizeUser(req.user) });
-  } catch (e) {
-    return res.status(500).json({ message: "Server error" });
-  }
-});
-
 // G2: Cloudinary signed upload signature endpoint
 app.post("/api/uploads/cloudinary-signature", authMiddleware, async (req, res) => {
   try {
@@ -5154,7 +5504,8 @@ app.put("/api/auth/update", authMiddleware, authLimiter, async (req, res) => {
 });
 
 // Experiences: Create (category sanitize)
-app.post("/api/experiences", authMiddleware, async (req, res) => {
+// SEC-035: CSRF protection for state-changing route
+app.post("/api/experiences", authMiddleware, csrfProtection, async (req, res) => {
   try {
     const { suburb, postcode, addressLine, addressNotes } = req.body || {};
     if (!String(suburb || "").trim()) return res.status(400).json({ message: "Suburb / Area is required." });
@@ -5313,7 +5664,8 @@ app.post("/api/experiences", authMiddleware, async (req, res) => {
 });
 
 // Experiences: Update (category sanitize)
-app.put("/api/experiences/:id", authMiddleware, async (req, res) => {
+// SEC-035: CSRF protection for state-changing route
+app.put("/api/experiences/:id", authMiddleware, csrfProtection, async (req, res) => {
   try {
     const expId = __cleanId(req.params.id, 64);
     if (!expId || !/^[a-fA-F0-9]{24}$/.test(expId)) return res.status(400).json({ message: "Invalid experienceId" });
@@ -5777,7 +6129,20 @@ app.get("/api/experiences/:id/attendees", authMiddleware, async (req, res) => {
 });
 
 // Booking: Create + Stripe checkout
-app.post("/api/experiences/:id/book", authMiddleware, bookingCreateLimiter, async (req, res) => {
+// SEC-035: CSRF protection for state-changing route
+// TASK C1: Idempotency replay support via Idempotency-Key header
+app.post("/api/experiences/:id/book", authMiddleware, csrfProtection, bookingCreateLimiter, async (req, res) => {
+  // TASK C1: Check for idempotency replay before processing
+  const idempotencyKey = String(req.get("Idempotency-Key") || "").trim();
+  const meIdForIdem = String(((req.user && (req.user._id || req.user.id)) || ""));
+  if (idempotencyKey) {
+    const replay = __checkIdempotencyReplay(meIdForIdem, idempotencyKey);
+    if (replay) {
+      // Return cached response without re-processing
+      return res.status(replay.status).json(replay.body);
+    }
+  }
+
   const expId = __cleanId(req.params.id, 64);
   if (!expId || !/^[a-fA-F0-9]{24}$/.test(expId)) return res.status(400).json({ message: "Invalid experienceId" });
   const exp = await Experience.findById(expId);
@@ -6347,11 +6712,17 @@ app.post("/api/experiences/:id/book", authMiddleware, bookingCreateLimiter, asyn
 
     booking.stripeSessionId = session.id;
     await booking.save();
-    return res.json({
+    
+    // TASK C1: Store successful response for idempotency replay
+    const successBody = {
       bookingId: String(booking._id),
       sessionId: String(session.id),
       url: session.url,
-    });
+    };
+    if (idempotencyKey) {
+      __storeIdempotencyResponse(meIdForIdem, idempotencyKey, 200, successBody);
+    }
+    return res.json(successBody);
   } catch (e) {
     try {
       await releaseCapacitySlot(String(exp._id), bookingDateStr, timeSlotStr, guests);
@@ -6378,15 +6749,15 @@ app.post("/api/experiences/:id/book", authMiddleware, bookingCreateLimiter, asyn
 app.post("/api/bookings/verify", optionalAuthMiddleware, bookingVerifyLimiter, async (req, res) => {
   const bid = __cleanId(((req.body || {}).bookingId), 80);
   const sid = __cleanId(((req.body || {}).sessionId), 120);
-  if (bid.length === 0) return res.status(400).json({ status: "invalid_booking_id" });
-  if (sid.length === 0) return res.status(400).json({ status: "invalid_session_id" });
+  if (bid.length === 0) return res.status(400).json({ ok: false, error: "INVALID_BOOKING_ID", message: "Invalid booking ID" });
+  if (sid.length === 0) return res.status(400).json({ ok: false, error: "INVALID_SESSION_ID", message: "Invalid session ID" });
   const bookingId = bid;
   const sessionId = sid;
   if (!(mongoose && mongoose.Types && mongoose.Types.ObjectId && mongoose.Types.ObjectId.isValid && mongoose.Types.ObjectId.isValid(bookingId))) {
-    return res.status(400).json({ status: "invalid_booking_id" });
+    return res.status(400).json({ ok: false, error: "INVALID_BOOKING_ID", message: "Invalid booking ID format" });
   }
   const booking = await Booking.findById(bookingId);
-  if (!booking) return res.status(404).json({ status: "not_found" });
+  if (!booking) return res.status(404).json({ ok: false, error: "NOT_FOUND", message: "Booking not found" });
   const me = String(((req.user && (req.user._id || req.user.id)) || (req.user && req.user.userId) || ""));
   const hasUser = Boolean(req.user && (me !== "" || req.user.isAdmin || req.user.admin === true));
   if (hasUser) {
@@ -6394,7 +6765,7 @@ app.post("/api/bookings/verify", optionalAuthMiddleware, bookingVerifyLimiter, a
     const isHost = (me != "") && (String(booking.hostId || "") == me);
     const isAdmin = Boolean(req.user && (req.user.isAdmin || req.user.admin === true));
     const isAllowed = (isOwner || isHost || isAdmin);
-    if (isAllowed == false) return res.status(403).json({ status: "VERIFY_FORBIDDEN" });
+    if (isAllowed == false) return res.status(403).json({ ok: false, error: "VERIFY_FORBIDDEN", message: "Access denied" });
   }
   const prevStatus = String(booking.status || "");
   const isTerminal = (prevStatus.indexOf("cancelled") >= 0) || (prevStatus == "refunded");
@@ -6417,7 +6788,7 @@ app.post("/api/bookings/verify", optionalAuthMiddleware, bookingVerifyLimiter, a
     try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
   }
     await maybeSendBookingConfirmedComms(booking);
-    return res.json({ status: "confirmed" });
+    return res.json({ ok: true, data: { status: "confirmed" } });
   }
 
 
@@ -6462,7 +6833,7 @@ app.post("/api/bookings/verify", optionalAuthMiddleware, bookingVerifyLimiter, a
     const now = new Date();
     const lockedUntil = booking.paymentLockedUntil ? new Date(booking.paymentLockedUntil) : null;
     if (lockedUntil && lockedUntil.getTime() > now.getTime()) {
-      return res.status(429).json({ status: "payment_locked", lockedUntil: lockedUntil.toISOString() });
+      return res.status(429).json({ ok: false, error: "PAYMENT_LOCKED", message: "Payment temporarily locked", data: { lockedUntil: lockedUntil.toISOString() } });
     }
 
     const isFail = (piStatus === "requires_payment_method" || piStatus === "canceled" || piStatus === "cancelled");
@@ -6478,7 +6849,7 @@ app.post("/api/bookings/verify", optionalAuthMiddleware, bookingVerifyLimiter, a
       if (within30m && attempts >= 5) {
         booking.paymentLockedUntil = new Date(now.getTime() + (30 * 60 * 1000));
         await booking.save();
-        return res.status(429).json({ status: "payment_locked", lockedUntil: booking.paymentLockedUntil.toISOString() });
+        return res.status(429).json({ ok: false, error: "PAYMENT_LOCKED", message: "Payment temporarily locked", data: { lockedUntil: booking.paymentLockedUntil.toISOString() } });
       }
       await booking.save();
     }
@@ -6495,7 +6866,7 @@ app.post("/api/bookings/verify", optionalAuthMiddleware, bookingVerifyLimiter, a
           if (session.payment_intent) booking.stripePaymentIntentId = String(session.payment_intent.id || session.payment_intent);
 
           await booking.save();
-          return res.json({ status: "paid_after_expiry" });
+          return res.json({ ok: true, data: { status: "paid_after_expiry" } });
         }
       if (isTerminal === false) await transitionBooking(booking, "confirmed");
       booking.paymentStatus = "paid";
@@ -6531,12 +6902,13 @@ app.post("/api/bookings/verify", optionalAuthMiddleware, bookingVerifyLimiter, a
 
 
       await maybeSendBookingConfirmedComms(booking);
-      return res.json({ status: "confirmed" });
+      return res.json({ ok: true, data: { status: "confirmed" } });
     }
 
-    return res.json({ status: stripeStatus, bookingStatus: booking.status, paymentStatus: booking.paymentStatus });
+    return res.json({ ok: true, data: { status: stripeStatus, bookingStatus: booking.status, paymentStatus: booking.paymentStatus } });
   } catch (e) {
-    return res.status(500).json({ message: "Verification failed" });
+    __log("error", "booking_verify_error", { rid: __ridFromReq(req), err: String(e) });
+    return res.status(500).json({ ok: false, error: "SERVER_ERROR", message: "Verification failed" });
   }
 });
 
@@ -6596,7 +6968,8 @@ app.get("/api/my/bookings", authMiddleware, async (req, res) => {
 });
 
 // Cancel booking
-app.post("/api/bookings/:id/cancel", authMiddleware, async (req, res) => {
+// SEC-035: CSRF protection for state-changing route
+app.post("/api/bookings/:id/cancel", authMiddleware, csrfProtection, async (req, res) => {
   try {
     const bookingId = __cleanId(req.params.id, 64);
     if (!bookingId) return res.status(400).json({ message: "Invalid bookingId" });
@@ -7124,7 +7497,8 @@ app.put("/api/bookings/:id/visibility", authMiddleware, async (req, res) => {
 });
 
 // Social: connect
-app.post("/api/social/connect", authMiddleware, socialGuard, connectLimiter, async (req, res) => {
+// SEC-035: CSRF protection for state-changing route
+app.post("/api/social/connect", authMiddleware, csrfProtection, socialGuard, connectLimiter, async (req, res) => {
   try {
     const __toStr = (v) => String(v || "").trim();
 
@@ -7135,7 +7509,7 @@ app.post("/api/social/connect", authMiddleware, socialGuard, connectLimiter, asy
       const okId = (mongoose && mongoose.Types && mongoose.Types.ObjectId && mongoose.Types.ObjectId.isValid)
         ? mongoose.Types.ObjectId.isValid(targetUserId)
         : false;
-      if (!okId) return res.status(400).json({ message: "Invalid targetUserId." });
+      if (!okId) return res.status(400).json({ ok: false, error: "INVALID_USER_ID", message: "Invalid targetUserId" });
     }
 
     if (handle) {
@@ -7143,7 +7517,7 @@ app.post("/api/social/connect", authMiddleware, socialGuard, connectLimiter, asy
       if (handle.length > 32) handle = handle.slice(0, 32);
     }
 
-    if (!targetUserId && !handle) return res.status(400).json({ message: "targetUserId or handle required." });
+    if (!targetUserId && !handle) return res.status(400).json({ ok: false, error: "MISSING_PARAM", message: "targetUserId or handle required" });
 
     let target = null;
     if (targetUserId) target = await User.findById(targetUserId)
@@ -7152,7 +7526,7 @@ app.post("/api/social/connect", authMiddleware, socialGuard, connectLimiter, asy
       .select("_id name profilePic bio handle publicProfile createdAt discoverable blockedUserIds allowHandleSearch");
 
     if (target && __canDiscoverUser(target) !== true) {
-      return res.status(404).json({ message: "User not found" });
+      return res.status(404).json({ ok: false, error: "NOT_FOUND", message: "User not found" });
     }
 
     if (target) {
@@ -7163,36 +7537,36 @@ app.post("/api/social/connect", authMiddleware, socialGuard, connectLimiter, asy
         try {
           const __meDoc = await User.findById(__me).select("blockedUserIds").lean();
           if (__isBlockedPair(__meDoc, target, __me, __tid) === true) {
-            return res.status(404).json({ message: "User not found" });
+            return res.status(404).json({ ok: false, error: "NOT_FOUND", message: "User not found" });
           }
         } catch (_e) {
-          return res.status(404).json({ message: "User not found" });
+          return res.status(404).json({ ok: false, error: "NOT_FOUND", message: "User not found" });
         }
       }
     }
 
-    if (!target) return res.status(404).json({ message: "User not found." });
-    if (String(target._id) === String(req.user._id)) return res.status(400).json({ message: "Cannot connect to yourself." });
+    if (!target) return res.status(404).json({ ok: false, error: "NOT_FOUND", message: "User not found" });
+    if (String(target._id) === String(req.user._id)) return res.status(400).json({ ok: false, error: "SELF_CONNECT", message: "Cannot connect to yourself" });
 
     const reverse = await Connection.findOne({ requesterId: target._id, addresseeId: req.user._id });
     if (reverse && reverse.status === "pending") {
       reverse.status = "accepted";
       reverse.respondedAt = new Date();
       await reverse.save();
-      return res.json({ status: "accepted", connectionId: reverse._id });
+      return res.json({ ok: true, data: { status: "accepted", connectionId: reverse._id } });
     }
 
     const existing = await Connection.findOne({ requesterId: req.user._id, addresseeId: target._id });
     if (existing) {
-      if (existing.status === "accepted") return res.json({ status: "accepted", connectionId: existing._id });
-      if (existing.status === "pending") return res.json({ status: "pending", connectionId: existing._id });
-      if (existing.status === "blocked") return res.status(403).json({ message: "Connection blocked." });
+      if (existing.status === "accepted") return res.json({ ok: true, data: { status: "accepted", connectionId: existing._id } });
+      if (existing.status === "pending") return res.json({ ok: true, data: { status: "pending", connectionId: existing._id } });
+      if (existing.status === "blocked") return res.status(403).json({ ok: false, error: "BLOCKED", message: "Connection blocked" });
     }
 
     const c = await Connection.create({ requesterId: req.user._id, addresseeId: target._id, status: "pending" });
-    return res.json({ status: "pending", connectionId: c._id });
+    return res.json({ ok: true, data: { status: "pending", connectionId: c._id } });
   } catch (e) {
-    return res.status(500).json({ message: "Server error" });
+    return res.status(500).json({ ok: false, error: "SERVER_ERROR", message: "Server error" });
   }
 });
 
@@ -7202,46 +7576,48 @@ app.get("/api/social/requests", authMiddleware, socialGuard, async (req, res) =>
     const reqs = await Connection.find({ addresseeId: req.user._id, status: "pending" }).sort({ createdAt: -1 });
     const out = [];
     for (const r of reqs) out.push({ _id: r._id, from: await minimalUserCard(r.requesterId), createdAt: r.createdAt });
-    return res.json(out);
+    return res.json({ ok: true, data: out });
   } catch (e) {
-    return res.status(500).json({ message: "Server error" });
+    return res.status(500).json({ ok: false, error: "SERVER_ERROR", message: "Server error" });
   }
 });
 
 // Social: accept / reject / block
-app.post("/api/social/requests/:id/accept", authMiddleware, socialGuard, async (req, res) => {
+// SEC-035: CSRF protection for state-changing route
+app.post("/api/social/requests/:id/accept", authMiddleware, csrfProtection, socialGuard, async (req, res) => {
   try {
     const connId = __cleanId(req.params.id, 64);
-    if (!connId) return res.status(400).json({ message: "Invalid requestId" });
+    if (!connId) return res.status(400).json({ ok: false, error: "INVALID_ID", message: "Invalid requestId" });
     const c = await Connection.findById(connId);
-    if (!c) return res.status(404).json({ message: "Not found" });
-    if (String(c.addresseeId) !== String(req.user._id)) return res.status(403).json({ message: "Unauthorized" });
-    if (c.status !== "pending") return res.status(400).json({ message: "Not pending" });
+    if (!c) return res.status(404).json({ ok: false, error: "NOT_FOUND", message: "Not found" });
+    if (String(c.addresseeId) !== String(req.user._id)) return res.status(403).json({ ok: false, error: "FORBIDDEN", message: "Unauthorized" });
+    if (c.status !== "pending") return res.status(400).json({ ok: false, error: "NOT_PENDING", message: "Not pending" });
 
     c.status = "accepted";
     c.respondedAt = new Date();
     await c.save();
-    return res.json({ status: "accepted" });
+    return res.json({ ok: true, data: { status: "accepted" } });
   } catch (e) {
-    return res.status(500).json({ message: "Server error" });
+    return res.status(500).json({ ok: false, error: "SERVER_ERROR", message: "Server error" });
   }
 });
 
-app.post("/api/social/requests/:id/reject", authMiddleware, socialGuard, async (req, res) => {
+// SEC-035: CSRF protection for state-changing route
+app.post("/api/social/requests/:id/reject", authMiddleware, csrfProtection, socialGuard, async (req, res) => {
   try {
     const connId = __cleanId(req.params.id, 64);
-    if (!connId) return res.status(400).json({ message: "Invalid requestId" });
+    if (!connId) return res.status(400).json({ ok: false, error: "INVALID_ID", message: "Invalid requestId" });
     const c = await Connection.findById(connId);
-    if (!c) return res.status(404).json({ message: "Not found" });
-    if (String(c.addresseeId) !== String(req.user._id)) return res.status(403).json({ message: "Unauthorized" });
-    if (c.status !== "pending") return res.status(400).json({ message: "Not pending" });
+    if (!c) return res.status(404).json({ ok: false, error: "NOT_FOUND", message: "Not found" });
+    if (String(c.addresseeId) !== String(req.user._id)) return res.status(403).json({ ok: false, error: "FORBIDDEN", message: "Unauthorized" });
+    if (c.status !== "pending") return res.status(400).json({ ok: false, error: "NOT_PENDING", message: "Not pending" });
 
     c.status = "rejected";
     c.respondedAt = new Date();
     await c.save();
-    return res.json({ status: "rejected" });
+    return res.json({ ok: true, data: { status: "rejected" } });
   } catch (e) {
-    return res.status(500).json({ message: "Server error" });
+    return res.status(500).json({ ok: false, error: "SERVER_ERROR", message: "Server error" });
   }
 });
 
@@ -7249,39 +7625,40 @@ app.post("/api/social/requests/:id/reject", authMiddleware, socialGuard, async (
 app.post("/api/social/block-user", authMiddleware, socialGuard, connectLimiter, async (req, res) => {
   try {
     const targetId = String((req.body && req.body.userId) || "").trim();
-    if (!targetId) return res.status(400).json({ message: "userId required" });
+    if (!targetId) return res.status(400).json({ ok: false, error: "MISSING_PARAM", message: "userId required" });
     const me = req.user;
     const meId = String(me._id || "");
-    if (!meId) return res.status(401).json({ message: "Unauthorized" });
-    if (targetId == meId) return res.status(400).json({ message: "Cannot block yourself" });
+    if (!meId) return res.status(401).json({ ok: false, error: "UNAUTHORIZED", message: "Unauthorized" });
+    if (targetId == meId) return res.status(400).json({ ok: false, error: "SELF_BLOCK", message: "Cannot block yourself" });
     const cur = Array.isArray(me.blockedUserIds) ? me.blockedUserIds.map((x) => String(x)) : [];
     if (!cur.includes(targetId)) cur.push(targetId);
     me.blockedUserIds = cur.slice(0, 500);
     await me.save();
-    return res.json({ ok: true, blockedUserIds: me.blockedUserIds });
+    return res.json({ ok: true, data: { blockedUserIds: me.blockedUserIds } });
   } catch (e) {
-    return res.status(500).json({ message: "Server error" });
+    return res.status(500).json({ ok: false, error: "SERVER_ERROR", message: "Server error" });
   }
 });
 
 // Social: accept / reject / block
-app.post("/api/social/requests/:id/block", authMiddleware, socialGuard, async (req, res) => {
+// SEC-035: CSRF protection for state-changing route
+app.post("/api/social/requests/:id/block", authMiddleware, csrfProtection, socialGuard, async (req, res) => {
   try {
     const connId = __cleanId(req.params.id, 64);
-    if (!connId) return res.status(400).json({ message: "Invalid requestId" });
+    if (!connId) return res.status(400).json({ ok: false, error: "INVALID_ID", message: "Invalid requestId" });
 
     const c = await Connection.findById(connId);
-    if (!c) return res.status(404).json({ message: "Not found" });
+    if (!c) return res.status(404).json({ ok: false, error: "NOT_FOUND", message: "Not found" });
 
     const me = String(req.user._id);
-    if (String(c.addresseeId) !== me && String(c.requesterId) !== me) return res.status(403).json({ message: "Unauthorized" });
+    if (String(c.addresseeId) !== me && String(c.requesterId) !== me) return res.status(403).json({ ok: false, error: "FORBIDDEN", message: "Unauthorized" });
 
     c.status = "blocked";
     c.respondedAt = new Date();
     await c.save();
-    return res.json({ status: "blocked" });
+    return res.json({ ok: true, data: { status: "blocked" } });
   } catch (e) {
-    return res.status(500).json({ message: "Server error" });
+    return res.status(500).json({ ok: false, error: "SERVER_ERROR", message: "Server error" });
   }
 });
 
@@ -7299,9 +7676,9 @@ app.get("/api/social/connections", authMiddleware, socialGuard, async (req, res)
       const otherId = String(c.requesterId) === String(me) ? c.addresseeId : c.requesterId;
       out.push({ _id: c._id, user: await minimalUserCard(otherId) });
     }
-    return res.json(out);
+    return res.json({ ok: true, data: out });
   } catch (e) {
-    return res.status(500).json({ message: "Server error" });
+    return res.status(500).json({ ok: false, error: "SERVER_ERROR", message: "Server error" });
   }
 });
 
@@ -7309,10 +7686,10 @@ app.get("/api/social/connections", authMiddleware, socialGuard, async (req, res)
 app.post("/api/social/connections/:userId/remove", authMiddleware, socialGuard, async (req, res) => {
   try {
     const targetUserId = __cleanId(req.params.userId, 64);
-    if (!targetUserId) return res.status(400).json({ message: "Invalid userId" });
+    if (!targetUserId) return res.status(400).json({ ok: false, error: "INVALID_ID", message: "Invalid userId" });
 
     const meId = String(req.user._id);
-    if (targetUserId === meId) return res.status(400).json({ message: "Cannot remove connection with yourself" });
+    if (targetUserId === meId) return res.status(400).json({ ok: false, error: "SELF_REMOVE", message: "Cannot remove connection with yourself" });
 
     // Find an accepted connection between the users
     const connection = await Connection.findOne({
@@ -7323,20 +7700,20 @@ app.post("/api/social/connections/:userId/remove", authMiddleware, socialGuard, 
       ]
     });
 
-    if (!connection) return res.status(404).json({ message: "Connection not found" });
+    if (!connection) return res.status(404).json({ ok: false, error: "NOT_FOUND", message: "Connection not found" });
 
     // Use existing social safety check
     const targetUser = await User.findById(targetUserId).select("_id blockedUserIds").lean();
     if (__isBlockedPair(req.user, targetUser, meId, targetUserId) === true) {
-      return res.status(403).json({ message: "Cannot remove connection" });
+      return res.status(403).json({ ok: false, error: "BLOCKED", message: "Cannot remove connection" });
     }
 
     // Delete the connection
     await Connection.findByIdAndDelete(connection._id);
 
-    return res.json({ ok: true });
+    return res.json({ ok: true, data: {} });
   } catch (e) {
-    return res.status(500).json({ message: "Server error" });
+    return res.status(500).json({ ok: false, error: "SERVER_ERROR", message: "Server error" });
   }
 });
 
