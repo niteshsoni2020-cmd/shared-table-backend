@@ -4932,8 +4932,8 @@ app.post("/api/auth/register", registerLimiter, async (req, res) => {
           return scheme + "://" + host;
         } catch (_) { return ""; }
       })();
-      const verifyUrlBackend = (__apiBase || "") + "/api/auth/verify-email?email=" + encodeURIComponent(String(user.email || "")) + "#token=" + encodeURIComponent(String(vtoken || ""));
-      const verifyUrlFrontend = __frontendBaseUrl() + "/verify-email.html?email=" + encodeURIComponent(String(user.email || "")) + "#token=" + encodeURIComponent(String(vtoken || ""));
+      const verifyUrlBackend = (__apiBase || "") + "/api/auth/verify-email";
+      const verifyUrlFrontend = __frontendBaseUrl() + "/verify-email.html#token=" + encodeURIComponent(String(vtoken || "")) + "&email=" + encodeURIComponent(String(user.email || ""));
       __verifyUrl = String(verifyUrlFrontend || "");
 
       const __need = ["Name", "VERIFY_EMAIL_URL"];
@@ -5003,19 +5003,18 @@ app.post("/api/auth/register", registerLimiter, async (req, res) => {
 // Auth: Verify Email (STATE CHANGE MUST BE POST)
 app.post("/api/auth/verify-email", async (req, res) => {
   try {
-    const emailRaw = (req.body && req.body.email) ? String(req.body.email) : "";
     const tokenRaw = (req.body && req.body.token) ? String(req.body.token) : "";
-    const email = emailRaw.toLowerCase().trim();
     const token = tokenRaw.trim();
-    if (!email || !token) return res.status(400).json({ ok: false, error: "INVALID_TOKEN", message: "Invalid or expired token" });
+    if (!token) return res.status(400).json({ ok: false, error: "BAD_REQUEST", message: "Missing token" });
 
-    const user = await User.findOne({ email });
+    const th = crypto.createHash("sha256").update(token).digest("hex");
+    const user = await User.findOne({ emailVerificationTokenHash: String(th || "") });
     if (!user) return res.status(400).json({ ok: false, error: "INVALID_TOKEN", message: "Invalid or expired token" });
+
     const exp = user.emailVerificationExpiresAt;
     if (!user.emailVerificationTokenHash || !exp || Date.now() > new Date(exp).getTime()) {
       return res.status(400).json({ ok: false, error: "TOKEN_EXPIRED", message: "Invalid or expired token" });
     }
-    const th = crypto.createHash("sha256").update(token).digest("hex");
     const __stored = String(user.emailVerificationTokenHash || "");
     const __th = String(th || "");
     const __ok = (!!__stored && !!__th && (__th === __stored));
@@ -5130,7 +5129,7 @@ app.post("/api/auth/resend-verification", forgotPasswordLimiter, async (req, res
 
     // Send verification email (non-blocking)
     try {
-      const verifyUrlFrontend = __frontendBaseUrl() + "/verify-email.html?email=" + encodeURIComponent(String(user.email || "")) + "#token=" + encodeURIComponent(String(vtoken || ""));
+      const verifyUrlFrontend = __frontendBaseUrl() + "/verify-email.html#token=" + encodeURIComponent(String(vtoken || "")) + "&email=" + encodeURIComponent(String(user.email || ""));
 
       const __p = __sendEventEmailTracked({
         eventName: "EMAIL_VERIFICATION",
@@ -5235,7 +5234,7 @@ app.post("/api/auth/forgot-password", forgotPasswordLimiter, forgotPasswordEmail
       const hasResend = String(process.env.RESEND_API_KEY || "").trim().length > 0;
       const canEmail = hasSmtp || hasResend;
       const frontendBase = String(process.env.FRONTEND_BASE_URL || "http://localhost:3000").replace(/\/$/, "");
-      const resetUrl = `${frontendBase}/reset-password.html?email=${encodeURIComponent(email)}#token=${encodeURIComponent(token)}`;
+      const resetUrl = `${frontendBase}/reset-password.html#token=${encodeURIComponent(token)}`;
       if (canEmail) {
         // Do not block the HTTP response on email delivery (email can hang on misconfig)
         try {
