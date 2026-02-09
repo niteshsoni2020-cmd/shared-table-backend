@@ -6,7 +6,9 @@
   "scripts": {
     "start": "node server.js",
     "test": "node --check server.js && node tests/smoke.test.js",
-    "migrate": "node src/migrate.js"
+    "migrate": "node src/migrate.js",
+    "admin:rotate": "node src/admin/rotate_admin_credentials.js",
+    "preflight:cutover": "./scripts/preflight_env_cutover.sh"
   },
   "keywords": [],
   "author": "",

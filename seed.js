@@ -11,6 +11,8 @@ const bcrypt = require('bcryptjs');
 const __IS_PROD = String(process.env.NODE_ENV || "").toLowerCase() === "production";
 const __ALLOW_SEED_PROD = String(process.env.ALLOW_SEED_PROD || "").trim();
 const __SEED_ADMIN_PASSWORD = String(process.env.SEED_ADMIN_PASSWORD || "").trim();
+const __SEED_ADMIN_EMAIL = String(process.env.SEED_ADMIN_EMAIL || "").trim().toLowerCase();
+const __SEED_ADMIN_NAME = String(process.env.SEED_ADMIN_NAME || "").trim();
 
 if (__IS_PROD && __ALLOW_SEED_PROD !== "YES_I_KNOW_WHAT_I_AM_DOING") {
   console.error("SEED_BLOCKED_IN_PROD");
@@ -19,6 +21,14 @@ if (__IS_PROD && __ALLOW_SEED_PROD !== "YES_I_KNOW_WHAT_I_AM_DOING") {
 
 if (!__SEED_ADMIN_PASSWORD) {
   console.error("SEED_ADMIN_PASSWORD_MISSING");
+  process.exit(1);
+}
+if (!__SEED_ADMIN_EMAIL) {
+  console.error("SEED_ADMIN_EMAIL_MISSING");
+  process.exit(1);
+}
+if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(__SEED_ADMIN_EMAIL)) {
+  console.error("SEED_ADMIN_EMAIL_INVALID");
   process.exit(1);
 }
 
@@ -119,8 +129,8 @@ const seed = async () => {
 
     // Admin account (not shown as a host card)
     const admin = await User.create({
-      name: 'Super Admin',
-      email: 'admin@sharedtable.com',
+      name: __SEED_ADMIN_NAME || 'Super Admin',
+      email: __SEED_ADMIN_EMAIL,
       password: adminPass,
       role: 'Admin',
       isAdmin: true,

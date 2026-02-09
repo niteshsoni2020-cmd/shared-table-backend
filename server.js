@@ -688,16 +688,31 @@ function __tstsCodeFromStatus(statusCode) {
   return "ERROR";
 }
 
+function __tstsBoundText(value, maxLen) {
+  const lim = Number.isFinite(Number(maxLen)) ? Number(maxLen) : 4096;
+  const raw = String((value == null) ? "" : value);
+  if (raw.length <= lim) return raw;
+  return raw.slice(0, lim);
+}
+
 function __tstsNormalizeErrorPayload(payload, rid, statusCode) {
   const sc = Number(statusCode || 0);
   const r = rid || undefined;
-  if (payload == null) return { ok: false, code: __tstsCodeFromStatus(sc), message: "Error", rid: r };
-  if (typeof payload === "string") return { ok: false, code: __tstsCodeFromStatus(sc), message: String(payload), rid: r };
-  if (typeof payload !== "object") return { ok: false, code: __tstsCodeFromStatus(sc), message: "Error", rid: r };
+  const codeFromStatus = __tstsCodeFromStatus(sc);
+  if (payload == null) return { ok: false, error: codeFromStatus, code: codeFromStatus, message: "Error", rid: r };
+  if (typeof payload === "string") {
+    const msg = __tstsBoundText(payload, 4096) || "Error";
+    return { ok: false, error: codeFromStatus, code: codeFromStatus, message: msg, rid: r };
+  }
+  if (typeof payload !== "object") return { ok: false, error: codeFromStatus, code: codeFromStatus, message: "Error", rid: r };
   const out = Object.assign({}, payload);
   out.ok = false;
-  if (!out.code) out.code = __tstsCodeFromStatus(sc);
-  if (!out.message) out.message = (out.error && typeof out.error === "string") ? out.error : "Error";
+  if (!out.code) out.code = codeFromStatus;
+  out.code = __tstsBoundText(out.code, 64) || codeFromStatus;
+  if (!out.error || typeof out.error !== "string") out.error = out.code;
+  out.error = __tstsBoundText(out.error, 128) || out.code;
+  if (!out.message) out.message = out.error || "Error";
+  out.message = __tstsBoundText(out.message, 4096) || "Error";
   if (!out.rid) out.rid = r;
   return out;
 }
@@ -758,11 +773,36 @@ function __tstsRidNow() {
   }
   return "";
 }
+
+function __tstsSetBaselineSecurityHeaders(res) {
+  try {
+    if (!res.getHeader("Content-Security-Policy")) {
+      res.set("Content-Security-Policy", "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'self'");
+    }
+    if (!res.getHeader("Strict-Transport-Security")) {
+      res.set("Strict-Transport-Security", "max-age=31536000; includeSubDomains; preload");
+    }
+    if (!res.getHeader("X-Content-Type-Options")) {
+      res.set("X-Content-Type-Options", "nosniff");
+    }
+    if (!res.getHeader("X-Frame-Options")) {
+      res.set("X-Frame-Options", "SAMEORIGIN");
+    }
+    if (!res.getHeader("Referrer-Policy")) {
+      res.set("Referrer-Policy", "strict-origin-when-cross-origin");
+    }
+    if (!res.getHeader("Cross-Origin-Opener-Policy")) {
+      res.set("Cross-Origin-Opener-Policy", "same-origin");
+    }
+  } catch (_) {}
+}
+
 app.get("/health", (req, res) => {
   const rid = String((req && (req.requestId || req.rid)) ? (req.requestId || req.rid) : __tstsRidNow());
   try { if (rid) res.set("X-Request-Id", rid); } catch (_) {
     try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
   }
+  __tstsSetBaselineSecurityHeaders(res);
   return res.status(200).json({ ok: true, dbReady: __tstsDbReadyNow(), rid: rid });
 });
 app.get("/ready", (req, res) => {
@@ -771,6 +811,7 @@ app.get("/ready", (req, res) => {
   try { if (rid) res.set("X-Request-Id", rid); } catch (_) {
     try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
   }
+  __tstsSetBaselineSecurityHeaders(res);
   return dbReady ? res.status(200).json({ ok: true, dbReady: true, rid: rid }) : res.status(503).json({ ok: false, dbReady: false, rid: rid });
 });
 
@@ -793,7 +834,13 @@ app.use((req, res, next) => {
           const statusCode = (typeof res.statusCode === "number") ? res.statusCode : 200;
           const isString = (typeof payload === "string");
           if (isString && statusCode >= 400) {
-            return res.json({ message: String(payload || "Error") });
+            const contentType = String(res.getHeader("Content-Type") || "").toLowerCase();
+            const isJsonAlready = (contentType.indexOf("application/json") >= 0);
+            if (!isJsonAlready) {
+              const normalized = __tstsNormalizeErrorPayload(payload, rid, statusCode);
+              try { if (!res.getHeader("Content-Type")) res.set("Content-Type", "application/json; charset=utf-8"); } catch (_) {}
+              return __origSend(JSON.stringify(normalized));
+            }
           }
         } catch (_) {
     try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
@@ -894,7 +941,31 @@ function __validateEnvOrExit() {
     try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
   }
 
-    if (isProd) req("FRONTEND_BASE_URL");
+    if (isProd) {
+      req("FRONTEND_BASE_URL");
+      req("CORS_ORIGINS");
+    }
+
+    if (isProd) {
+      try {
+        const fb = String(process.env.FRONTEND_BASE_URL || "").trim();
+        const origin = (() => {
+          try {
+            const u = new URL(fb);
+            return u.protocol + "//" + u.host;
+          } catch (_) {
+            return "";
+          }
+        })();
+        const cors = String(process.env.CORS_ORIGINS || "")
+          .split(",")
+          .map((v) => v.trim())
+          .filter(Boolean);
+        if (origin && !cors.includes(origin)) missing.push("CORS_ORIGINS_MUST_INCLUDE_FRONTEND_BASE_URL_ORIGIN");
+      } catch (_) {
+        missing.push("CORS_ORIGINS_PARSE_ERROR");
+      }
+    }
 
     if (missing.length > 0) {
       const uniq = Array.from(new Set(missing));
@@ -1275,19 +1346,12 @@ async function __maybeStrikeAndMute(req, reason) {
 // Set CORS_ORIGINS as comma-separated list
 // Example: "https://thesharedtablestory.com,https://www.thesharedtablestory.com,http://localhost:3000"
 const DEFAULT_CORS_ORIGINS = (String(process.env.NODE_ENV || "").toLowerCase() === "production")
-  ? [
-      "https://shared-table-frontend.onrender.com",
-      "https://thesharedtablestory.com",
-      "https://www.thesharedtablestory.com",
-    ]
+  ? []
   : [
       "http://localhost:3000",
       "http://127.0.0.1:3000",
       "http://localhost:5173",
       "http://127.0.0.1:5173",
-      "https://shared-table-frontend.onrender.com",
-      "https://thesharedtablestory.com",
-      "https://www.thesharedtablestory.com",
     ];
 
 const ENV_CORS_ORIGINS = String(process.env.CORS_ORIGINS || "")
@@ -2313,56 +2377,6 @@ app.get("/sha", (req, res) => {
   return res.status(200).json({ ok: true, sha: String(sha), rid: rid });
 });
 
-// L11_JSON_404_HANDLER_V1
-// Ensure missing routes return JSON when caller expects JSON (or for /api/*).
-// This allows the res.json shim to inject rid + stable code (NOT_FOUND).
-app.use((req, res, next) => {
-  try {
-    const p = String((req && (req.path || req.originalUrl)) || "");
-    const accept = String((req && req.headers && req.headers["accept"]) || "");
-    const wantsJson = (accept.toLowerCase().indexOf("application/json") >= 0);
-    const isApi = (p.indexOf("/api") == 0);
-    if (wantsJson || isApi) {
-      return res.status(404).json({ ok: false, error: "NOT_FOUND", code: "NOT_FOUND", message: "Not found" });
-    }
-  } catch (_) {
-    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
-  }
-  return res.status(404).send("Not found");
-});
-
-// HTTP_ERROR_MIDDLEWARE_TSTS
-app.use((err, req, res, next) => {
-  try {
-    const sent = Boolean(res && (res.headersSent === true));
-    if (sent) {
-      return next(err);
-    }
-
-    const rid = __ridFromReq(req);
-    const isProd = String(process.env.NODE_ENV || "").toLowerCase() === "production";
-    const msg = (err && err.message) ? String(err.message) : "server_error";
-    const name = (err && err.name) ? String(err.name) : undefined;
-    const stack = (isProd === true) ? undefined : ((err && err.stack) ? String(err.stack) : undefined);
-
-    __log("error", "http_error", {
-      rid: rid,
-      path: (req && req.originalUrl) ? String(req.originalUrl) : undefined,
-      method: (req && req.method) ? String(req.method) : undefined,
-      status: 500,
-      errorName: name,
-      errorMessage: msg,
-      errorStack: stack
-    });
-
-    return res.status(500).json({ ok: false, error: "server_error", code: "SERVER_ERROR", message: "Server error", rid: rid });
-  } catch (_) {
-    return res.status(500).json({ ok: false, error: "server_error", code: "SERVER_ERROR", message: "Server error" });
-  }
-});
-
-
-
 // Stripe webhook idempotency: dedupe by Stripe event.id
 let __stripeWebhookIndexPromise = null;
 async function __ensureStripeWebhookIndex() {
@@ -2677,18 +2691,6 @@ const experienceSchema = new mongoose.Schema(
   schemaOpts
 );
 
-// Indexes: keep /api/experiences fast under load
-try {
-  experienceSchema.index({ isPaused: 1, isDeleted: 1, createdAt: -1 });
-  experienceSchema.index({ hostId: 1, isPaused: 1, isDeleted: 1, createdAt: -1 });
-  experienceSchema.index({ tags: 1, isPaused: 1, isDeleted: 1, createdAt: -1 });
-  experienceSchema.index({ isPaused: 1, isDeleted: 1, price: 1 });
-  experienceSchema.index({ isPaused: 1, isDeleted: 1, averageRating: -1 });
-  experienceSchema.index({ city: 1, isPaused: 1, isDeleted: 1, createdAt: -1 });
-} catch (_) {
-  try { __log("warn", "experience_index_declare_failed", { rid: __tstsRidNow() }); } catch (_) {}
-}
-
 const bookingSchema = new mongoose.Schema(
   {
     experienceId: String,
@@ -2745,6 +2747,18 @@ const bookingSchema = new mongoose.Schema(
     hostConfirmedAt: { type: Date, default: null },
     guestCancelledAt: { type: Date, default: null },
     hostCancelledAt: { type: Date, default: null },
+
+    // Completion -> complaint window -> payout lifecycle
+    eventEndAt: { type: Date, default: null },
+    completedAt: { type: Date, default: null },
+    complaintWindowEndsAt: { type: Date, default: null },
+    complaintReportId: { type: String, default: "" },
+    complaintFiledAt: { type: Date, default: null },
+    payoutEligibleAt: { type: Date, default: null },
+    payoutStatus: { type: String, default: "none" }, // none|on_hold|blocked_complaint|blocked_cancelled|released
+    payoutBlockedReason: { type: String, default: "" },
+    payoutReleasedAt: { type: Date, default: null },
+    feedbackRequestSentAt: { type: Date, default: null },
 
 
     // Social visibility (opt-in by guest)
@@ -2893,6 +2907,93 @@ function __computePartialRefundCents(totalCents, percent) {
   const pct = Math.max(0, Math.min(100, p));
   const out = Math.floor((t * pct) / 100);
   return Math.max(0, Math.min(t, out));
+}
+
+function __dashboardUrl() {
+  try {
+    const raw = String(process.env.FRONTEND_BASE_URL || "http://localhost:3000").trim().replace(/\/$/, "");
+    const base = raw.length > 0 ? raw : "http://localhost:3000";
+    return base + "/my-bookings.html";
+  } catch (_) {
+    return "http://localhost:3000/my-bookings.html";
+  }
+}
+
+function __wordCount(v) {
+  const s = String(v || "").trim();
+  if (!s) return 0;
+  return s.split(/\s+/).filter(Boolean).length;
+}
+
+function __isValidEmailLite(v) {
+  const s = String(v || "").trim();
+  if (!s) return false;
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
+}
+
+function __normalizeEvidenceUrls(v) {
+  const arr = Array.isArray(v) ? v : (v ? [v] : []);
+  const out = [];
+  for (const raw of arr) {
+    const s = String(raw || "").trim();
+    if (!s) continue;
+    if (s.length > 1200) continue;
+    if (!/^https?:\/\//i.test(s)) continue;
+    out.push(s);
+  }
+  return out.slice(0, 3);
+}
+
+function __parseSlotTokenToHM(slotToken) {
+  const m = String(slotToken || "").match(/^(\d{1,2}):([0-5]\d)$/);
+  if (!m) return null;
+  const hh = Number.parseInt(String(m[1]), 10);
+  const mm = Number.parseInt(String(m[2]), 10);
+  if (!Number.isFinite(hh) || !Number.isFinite(mm)) return null;
+  if (hh < 0 || hh > 23 || mm < 0 || mm > 59) return null;
+  return { hh, mm };
+}
+
+function __parseBookingEventEndAt(booking) {
+  try {
+    const dateStr = String((booking && booking.bookingDate) || "").trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return null;
+
+    const slot = String((booking && booking.timeSlot) || "").trim();
+    const tokens = slot.match(/\b\d{1,2}:[0-5]\d\b/g) || [];
+    const startHM = tokens.length > 0 ? __parseSlotTokenToHM(tokens[0]) : null;
+    let endHM = tokens.length > 1 ? __parseSlotTokenToHM(tokens[1]) : null;
+
+    if (!endHM && startHM) {
+      const total = (startHM.hh * 60) + startHM.mm + 120; // default 2h duration
+      endHM = { hh: Math.floor((total % (24 * 60)) / 60), mm: total % 60 };
+    }
+    if (!endHM) endHM = { hh: 21, mm: 0 };
+
+    const endAt = new Date(dateStr + "T00:00:00");
+    if (Number.isNaN(endAt.getTime())) return null;
+    endAt.setHours(endHM.hh, endHM.mm, 0, 0);
+
+    // Handle overnight slots such as "22:00-01:00"
+    if (startHM) {
+      const startAt = new Date(dateStr + "T00:00:00");
+      startAt.setHours(startHM.hh, startHM.mm, 0, 0);
+      if (endAt.getTime() <= startAt.getTime()) {
+        endAt.setDate(endAt.getDate() + 1);
+      }
+    }
+
+    return endAt;
+  } catch (_) {
+    return null;
+  }
+}
+
+function __plusHours(dateLike, hours) {
+  const d = new Date(dateLike);
+  if (Number.isNaN(d.getTime())) return null;
+  d.setTime(d.getTime() + (Number(hours) * 60 * 60 * 1000));
+  return d;
 }
 
 // --- Policy (AU cancellation/refund rules) ---
@@ -3132,6 +3233,8 @@ experienceSchema.index({ isPaused: 1, isDeleted: 1, createdAt: -1 });
 experienceSchema.index({ city: 1, isPaused: 1, isDeleted: 1, createdAt: -1 });
 experienceSchema.index({ tags: 1, isPaused: 1, isDeleted: 1, createdAt: -1 });
 experienceSchema.index({ hostId: 1, isPaused: 1, isDeleted: 1, createdAt: -1 });
+experienceSchema.index({ isPaused: 1, isDeleted: 1, price: 1 });
+experienceSchema.index({ isPaused: 1, isDeleted: 1, averageRating: -1 });
 experienceSchema.index({ startDate: 1, endDate: 1, availableDays: 1, isPaused: 1, isDeleted: 1 });
 experienceSchema.index({ title: "text", description: "text" }, { name: "experience_text", weights: { title: 10, description: 3 } });
 
@@ -4122,7 +4225,7 @@ app.get("/api/auth/me", authMiddleware, async (req, res) => {
 // --- AUTH SESSION CONTROL (REVOCATION) ---
 // SEC-002: Logout clears cookies
 // GUARD: Uses csrfProtection as reference, not csrfProtection()
-app.post("/api/auth/logout", optionalAuthMiddleware, csrfProtection, async (req, res) => {
+app.post("/api/auth/logout", authMiddleware, csrfProtection, async (req, res) => {
   try {
     // Increment tokenVersion if user is authenticated
     if (req.user) {
@@ -4713,15 +4816,28 @@ async function __hostCancelBookingAtomic(booking, reasonTag, meta) {
     try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
   }
 
+  let transitioned = null;
   try {
     if (meta && typeof meta === "object") {
-      return await transitionBooking(booking, "cancelled_by_host", meta);
+      transitioned = await transitionBooking(booking, "cancelled_by_host", meta);
+    } else {
+      transitioned = await transitionBooking(booking, "cancelled_by_host");
     }
   } catch (_) {
     try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
   }
 
-  return await transitionBooking(booking, "cancelled_by_host");
+  try {
+    if (transitioned) {
+      transitioned.payoutStatus = "blocked_cancelled";
+      transitioned.payoutBlockedReason = "booking_cancelled_by_host";
+      await transitioned.save();
+    }
+  } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
+
+  return transitioned || booking;
 }
 
 
@@ -6951,7 +7067,28 @@ app.get("/api/host/bookings/:experienceId", authMiddleware, async (req, res) => 
 // Guest bookings
 async function getMyBookings(req, res) {
   const bookings = await Booking.find({ guestId: req.user._id }).select("-capacityReleasedAt").populate("experience").sort({ bookingDate: -1 });
-  res.json(bookings);
+  const nowMs = Date.now();
+  const out = (bookings || []).map((b) => {
+    const o = (b && typeof b.toObject === "function") ? b.toObject({ virtuals: true }) : (b || {});
+    const completedAt = o && o.completedAt ? new Date(o.completedAt) : null;
+    const complaintEnds = o && o.complaintWindowEndsAt ? new Date(o.complaintWindowEndsAt) : null;
+    const hasComplaint = !!String((o && o.complaintReportId) || "").trim();
+    const isCompleted = String((o && o.status) || "").toLowerCase() === "completed";
+    const completedAtMs = (completedAt && !Number.isNaN(completedAt.getTime())) ? completedAt.getTime() : null;
+    const complaintEndsMs = (complaintEnds && !Number.isNaN(complaintEnds.getTime())) ? complaintEnds.getTime() : null;
+    const windowOpen = !!(
+      isCompleted &&
+      completedAtMs !== null &&
+      complaintEndsMs !== null &&
+      nowMs >= completedAtMs &&
+      nowMs <= complaintEndsMs
+    );
+
+    o.complaintWindowOpen = windowOpen;
+    o.canFileComplaint = windowOpen && !hasComplaint;
+    return o;
+  });
+  res.json(out);
 }
 
 app.get("/api/bookings/my-bookings", authMiddleware, async (req, res) => getMyBookings(req, res));
@@ -6964,6 +7101,143 @@ app.get("/api/my/bookings", authMiddleware, async (req, res) => {
     try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
   }
   return getMyBookings(req, res);
+});
+
+// Guest complaint intake (post-completion, 24h window)
+// SEC-035: CSRF protection for state-changing route
+app.post("/api/bookings/:id/complaint", authMiddleware, csrfProtection, reportLimiter, async (req, res) => {
+  try {
+    const bookingId = __cleanId(req.params.id, 64);
+    if (!bookingId) return res.status(400).json({ ok: false, error: "INVALID_BOOKING_ID", message: "Invalid bookingId" });
+
+    const booking = await Booking.findById(bookingId);
+    if (!booking) return res.status(404).json({ ok: false, error: "BOOKING_NOT_FOUND", message: "Booking not found" });
+    if (String(booking.guestId || "") !== String(req.user._id || "")) {
+      return res.status(403).json({ ok: false, error: "FORBIDDEN", message: "Unauthorized" });
+    }
+
+    const status = String(booking.status || "").toLowerCase();
+    if (status !== "completed") {
+      return res.status(409).json({ ok: false, error: "BOOKING_NOT_COMPLETED", message: "Complaint is available only after completion." });
+    }
+
+    const terminalBlocked = new Set(["cancelled", "cancelled_by_host", "refunded", "expired"]);
+    if (terminalBlocked.has(status)) {
+      return res.status(409).json({ ok: false, error: "BOOKING_NOT_ELIGIBLE", message: "Complaint is unavailable for this booking state." });
+    }
+
+    const now = new Date();
+    const completedAt = booking.completedAt ? new Date(booking.completedAt) : __parseBookingEventEndAt(booking);
+    if (!completedAt || Number.isNaN(completedAt.getTime())) {
+      return res.status(409).json({ ok: false, error: "BOOKING_COMPLETION_UNKNOWN", message: "Completion timestamp unavailable." });
+    }
+
+    const complaintWindowEndsAt = booking.complaintWindowEndsAt ? new Date(booking.complaintWindowEndsAt) : __plusHours(completedAt, 24);
+    if (!complaintWindowEndsAt || Number.isNaN(complaintWindowEndsAt.getTime())) {
+      return res.status(409).json({ ok: false, error: "COMPLAINT_WINDOW_INVALID", message: "Complaint window unavailable." });
+    }
+    if (now.getTime() > complaintWindowEndsAt.getTime()) {
+      return res.status(410).json({ ok: false, error: "COMPLAINT_WINDOW_CLOSED", message: "Complaint window has closed." });
+    }
+
+    if (String(booking.complaintReportId || "").trim().length > 0) {
+      return res.json({
+        ok: true,
+        data: {
+          bookingId: String(booking._id),
+          complaintId: String(booking.complaintReportId),
+          status: "open",
+          complaintWindowEndsAt: complaintWindowEndsAt.toISOString()
+        }
+      });
+    }
+
+    const body = (req && req.body && typeof req.body === "object") ? req.body : {};
+    const category = String(body.category || "").trim().toLowerCase();
+    const message = String(body.message || "").trim();
+    const contactEmail = String(body.contactEmail || "").trim().toLowerCase();
+    const contactPhone = String(body.contactPhone || "").trim();
+    const evidenceUrls = __normalizeEvidenceUrls(body.evidenceUrls);
+
+    const allowedCategories = new Set(["safety_issue", "host_behavior", "experience_quality", "billing_issue", "accessibility_issue", "other"]);
+    if (!allowedCategories.has(category)) {
+      return res.status(400).json({ ok: false, error: "INVALID_CATEGORY", message: "Invalid complaint category." });
+    }
+    const wc = __wordCount(message);
+    if (wc < 1 || wc > 200) {
+      return res.status(400).json({ ok: false, error: "INVALID_COMPLAINT_TEXT", message: "Complaint description must be 1-200 words." });
+    }
+    if (!contactEmail && !contactPhone) {
+      return res.status(400).json({ ok: false, error: "CONTACT_REQUIRED", message: "Provide an email or phone for follow-up." });
+    }
+    if (contactEmail && !__isValidEmailLite(contactEmail)) {
+      return res.status(400).json({ ok: false, error: "INVALID_CONTACT_EMAIL", message: "Invalid contact email." });
+    }
+
+    const reporterId = String(req.user._id || "");
+    const reporterEmail = String(req.user.email || "");
+    const reporterMasked = (typeof __maskEmail === "function") ? __maskEmail(reporterEmail) : "";
+    const reporterHash = (typeof __hashEmail === "function") ? __hashEmail(reporterEmail) : "";
+
+    const report = await Report.create({
+      reporterId,
+      reporterMasked,
+      reporterHash,
+      targetType: "booking",
+      targetId: String(booking._id),
+      category: category,
+      message: message.slice(0, 2000),
+      status: "open",
+      adminMeta: {
+        source: "booking_complaint",
+        evidenceUrls: evidenceUrls,
+        contactEmail: contactEmail || "",
+        contactPhone: contactPhone || "",
+        wordCount: wc,
+        bookingDate: String(booking.bookingDate || ""),
+        timeSlot: String(booking.timeSlot || ""),
+        experienceId: String(booking.experienceId || ""),
+        hostId: String(booking.hostId || "")
+      }
+    });
+
+    booking.complaintReportId = String(report._id);
+    booking.complaintFiledAt = now;
+    booking.payoutStatus = "blocked_complaint";
+    booking.payoutBlockedReason = "guest_complaint_open";
+    booking.completedAt = booking.completedAt || completedAt;
+    booking.complaintWindowEndsAt = booking.complaintWindowEndsAt || complaintWindowEndsAt;
+    booking.payoutEligibleAt = booking.payoutEligibleAt || __plusHours(completedAt, 72);
+    await booking.save();
+
+    try {
+      const to = String(booking.guestEmail || "").trim();
+      const nm = String(booking.guestName || "there").trim();
+      if (to) {
+        __fireAndForgetEmail({
+          to: to,
+          eventName: "SYSTEM_MESSAGE",
+          category: "NOTIFICATIONS",
+          vars: { Name: nm || "there", DASHBOARD_URL: __dashboardUrl() }
+        });
+      }
+    } catch (_) {
+      try { __log("warn", "booking_complaint_ack_mail_failed", { rid: __ridFromReq(req), bookingId: String(booking._id) }); } catch (_) {}
+    }
+
+    return res.status(201).json({
+      ok: true,
+      data: {
+        bookingId: String(booking._id),
+        complaintId: String(report._id),
+        status: "open",
+        complaintWindowEndsAt: complaintWindowEndsAt.toISOString()
+      }
+    });
+  } catch (err) {
+    try { __log("error", "booking_complaint_create_failed", { rid: __ridFromReq(req), error: String((err && err.message) ? err.message : err) }); } catch (_) {}
+    return res.status(500).json({ ok: false, error: "SERVER_ERROR", message: "Could not submit complaint." });
+  }
 });
 
 // Cancel booking
@@ -7015,6 +7289,8 @@ app.post("/api/bookings/:id/cancel", authMiddleware, csrfProtection, async (req,
     await transitionBooking(booking, "cancelled");
     booking.cancellationReason = "User requested cancellation";
     booking.cancellation = { by: "guest", at: new Date(), reasonCode: "guest_cancel", note: "" };
+    booking.payoutStatus = "blocked_cancelled";
+    booking.payoutBlockedReason = "booking_cancelled";
 
 
     const totalCents =
@@ -7190,15 +7466,6 @@ app.get("/api/reviews", async (req, res) => {
 });
 
 app.post("/api/reviews", authMiddleware, reviewLimiter, async (req, res) => {
-  // L7-7: review only after completion
-  if (bookingId) {
-    const BookingModel = mongoose.model("Booking");
-    const b = await BookingModel.findById(bookingId).select("status").lean();
-    if (!b || String(b.status).toLowerCase() != "completed") {
-      return res.status(400).json({ message: "Review allowed only after completion." });
-    }
-  }
-
   const body = req.body || {};
   if (__isPlainObject(body) === false) return res.status(400).json({ message: "Invalid payload" });
   if (Object.prototype.hasOwnProperty.call(body, "__proto__") || Object.prototype.hasOwnProperty.call(body, "constructor") || Object.prototype.hasOwnProperty.call(body, "prototype")) {
@@ -7207,6 +7474,15 @@ app.post("/api/reviews", authMiddleware, reviewLimiter, async (req, res) => {
 
   const { experienceId, bookingId, rating, comment, type, targetId } = body;
   const reviewType = type || "guest_to_host";
+
+  // L7-7: review only after completion
+  if (bookingId) {
+    const BookingModel = mongoose.model("Booking");
+    const b = await BookingModel.findById(bookingId).select("status").lean();
+    if (!b || String(b.status).toLowerCase() != "completed") {
+      return res.status(400).json({ message: "Review allowed only after completion." });
+    }
+  }
 
   if (await Review.findOne({ bookingId, authorId: req.user._id })) return res.status(400).json({ message: "Duplicate" });
 
@@ -8368,6 +8644,164 @@ app.get("/api/users/:userId/profile", optionalAuthMiddleware, async (req, res) =
 
 // UNPAID_BOOKING_EXPIRY_CLEANUP_V1
 
+// ===== BOOKING COMPLETION + PAYOUT HOLD (72h) =====
+async function runBookingCompletionLifecycleOnce_V1() {
+  const now = new Date();
+  const batch = await Booking.find({
+    status: "confirmed",
+    paymentStatus: "paid"
+  }).sort({ bookingDate: 1 }).limit(80);
+
+  for (const booking of (batch || [])) {
+    try {
+      const endAt = booking.eventEndAt ? new Date(booking.eventEndAt) : __parseBookingEventEndAt(booking);
+      if (!endAt || Number.isNaN(endAt.getTime())) continue;
+      if (now.getTime() < endAt.getTime()) continue;
+
+      const curStatus = String(booking.status || "").toLowerCase();
+      if (curStatus !== "confirmed") continue;
+
+      booking.eventEndAt = booking.eventEndAt || endAt;
+      await transitionBooking(booking, "completed", { suppressComms: true });
+
+      booking.completedAt = booking.completedAt || endAt;
+      booking.complaintWindowEndsAt = booking.complaintWindowEndsAt || __plusHours(endAt, 24);
+      booking.payoutEligibleAt = booking.payoutEligibleAt || __plusHours(endAt, 72);
+
+      if (!String(booking.payoutStatus || "").trim() || String(booking.payoutStatus || "").trim() === "none") {
+        booking.payoutStatus = "on_hold";
+      }
+      booking.payoutBlockedReason = "";
+
+      if (!booking.feedbackRequestSentAt) {
+        const to = String(booking.guestEmail || "").trim();
+        const name = String(booking.guestName || "there").trim();
+        if (to) {
+          __fireAndForgetEmail({
+            to: to,
+            eventName: "REVIEW_REQUEST_GUEST",
+            category: "NOTIFICATIONS",
+            vars: {
+              Name: name || "there",
+              BOOKING_ID: String(booking._id || ""),
+              EXPERIENCE_ID: String(booking.experienceId || ""),
+              DASHBOARD_URL: __dashboardUrl()
+            }
+          });
+          booking.feedbackRequestSentAt = now;
+        }
+      }
+
+      await booking.save();
+    } catch (e) {
+      try {
+        __log("warn", "booking_completion_lifecycle_failed", {
+          rid: __tstsRidNow(),
+          bookingId: String((booking && booking._id) || ""),
+          error: String((e && e.message) ? e.message : e)
+        });
+      } catch (_) {}
+    }
+  }
+}
+
+async function runPayoutReleaseGateOnce_V1() {
+  const now = new Date();
+  const batch = await Booking.find({
+    status: "completed",
+    paymentStatus: "paid",
+    payoutReleasedAt: null,
+    payoutEligibleAt: { $lte: now }
+  }).sort({ payoutEligibleAt: 1 }).limit(80);
+
+  for (const booking of (batch || [])) {
+    try {
+      const badState = new Set(["cancelled", "cancelled_by_host", "refunded", "expired"]);
+      const curStatus = String(booking.status || "").toLowerCase();
+      if (badState.has(curStatus) || String(booking.paymentStatus || "").toLowerCase() !== "paid") {
+        booking.payoutStatus = "blocked_cancelled";
+        booking.payoutBlockedReason = "booking_not_payable";
+        await booking.save();
+        continue;
+      }
+
+      const openComplaint = await Report.findOne({
+        targetType: "booking",
+        targetId: String(booking._id),
+        status: { $in: ["open", "triaged", "actioned"] }
+      }).select("_id status").lean();
+
+      if (openComplaint) {
+        booking.payoutStatus = "blocked_complaint";
+        booking.payoutBlockedReason = "guest_complaint_open";
+        await booking.save();
+        continue;
+      }
+
+      booking.payoutStatus = "released";
+      booking.payoutBlockedReason = "";
+      booking.payoutReleasedAt = now;
+
+      if (!booking.comms || typeof booking.comms !== "object") booking.comms = {};
+      if (!booking.comms.hostPayoutProcessedSentAt) {
+        const hostId = String(booking.hostId || "").trim();
+        let hostEmail = "";
+        let hostName = "Host";
+        if (hostId) {
+          const host = await User.findById(hostId).select("name email").lean();
+          hostEmail = String((host && host.email) || "").trim();
+          hostName = String((host && host.name) || hostName).trim();
+        }
+        if (hostEmail) {
+          __fireAndForgetEmail({
+            to: hostEmail,
+            eventName: "HOST_PAYOUT_PROCESSED",
+            category: "PAYMENTS",
+            vars: {
+              HOST_NAME: hostName || "Host",
+              DASHBOARD_URL: __dashboardUrl()
+            }
+          });
+          booking.comms.hostPayoutProcessedSentAt = now;
+        }
+      }
+
+      await booking.save();
+    } catch (e) {
+      try {
+        __log("warn", "payout_release_gate_failed", {
+          rid: __tstsRidNow(),
+          bookingId: String((booking && booking._id) || ""),
+          error: String((e && e.message) ? e.message : e)
+        });
+      } catch (_) {}
+    }
+  }
+}
+
+function startBookingCompletionAndPayoutLoop_V1() {
+  if (!__shouldRunJobs()) {
+    __log("info", "jobs_skipped_disabled", { job: "booking_completion_and_payout_v1", reason: "RUN_JOBS disabled" });
+    return;
+  }
+  if (global.__tsts_completion_payout_started_v1 === true) return;
+  global.__tsts_completion_payout_started_v1 = true;
+
+  let inflight = false;
+  const run = () => {
+    if (inflight) return;
+    inflight = true;
+    Promise.resolve()
+      .then(() => runBookingCompletionLifecycleOnce_V1())
+      .then(() => runPayoutReleaseGateOnce_V1())
+      .catch(() => {})
+      .finally(() => { inflight = false; });
+  };
+
+  setTimeout(run, 45 * 1000);
+  setInterval(run, 10 * 60 * 1000);
+}
+
 // ===== PAYMENT RECONCILIATION (Stripe -> DB) =====
 // Periodically reconciles recent pending payments so bookings do not get stuck.
 async function runPaymentReconciliationOnce_V1() {
@@ -8808,7 +9242,12 @@ app.post("/api/internal/jobs/run", internalJobsGuardMiddleware, async (req, res)
     try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
   }
 
-  const queued = ["unpaid_booking_expiry_cleanup_v1", "payment_reconciliation_v1"];
+  const queued = [
+    "unpaid_booking_expiry_cleanup_v1",
+    "payment_reconciliation_v1",
+    "booking_completion_lifecycle_v1",
+    "payout_release_gate_v1"
+  ];
   try { res.status(202).json({ ok: true, accepted: true, queued: queued, rid: rid }); } catch (_) {
     try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
   }
@@ -8823,6 +9262,12 @@ app.post("/api/internal/jobs/run", internalJobsGuardMiddleware, async (req, res)
 
       try { await runPaymentReconciliationOnce_V1(); ran.push("payment_reconciliation_v1"); }
       catch (e) { errors.push({ job: "payment_reconciliation_v1", error: String(e) }); }
+
+      try { await runBookingCompletionLifecycleOnce_V1(); ran.push("booking_completion_lifecycle_v1"); }
+      catch (e) { errors.push({ job: "booking_completion_lifecycle_v1", error: String(e) }); }
+
+      try { await runPayoutReleaseGateOnce_V1(); ran.push("payout_release_gate_v1"); }
+      catch (e) { errors.push({ job: "payout_release_gate_v1", error: String(e) }); }
 
       const ok = (errors.length === 0);
       try {
@@ -8862,6 +9307,9 @@ async function __startServerAfterDb() {
     try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
   }
     try { startPaymentReconciliationLoop_V1(); } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
+    try { startBookingCompletionAndPayoutLoop_V1(); } catch (_) {
     try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
   }
 
@@ -9098,6 +9546,54 @@ app.get(
   }
 );
 
+// L11_JSON_404_HANDLER_V1 (terminal position)
+// Ensure missing routes return JSON when caller expects JSON (or for /api/*).
+// This must be registered after all routes.
+app.use((req, res, next) => {
+  try {
+    const p = String((req && (req.path || req.originalUrl)) || "");
+    const accept = String((req && req.headers && req.headers["accept"]) || "");
+    const wantsJson = (accept.toLowerCase().indexOf("application/json") >= 0);
+    const isApi = (p.indexOf("/api") == 0);
+    if (wantsJson || isApi) {
+      return res.status(404).json({ ok: false, error: "NOT_FOUND", code: "NOT_FOUND", message: "Not found" });
+    }
+  } catch (_) {
+    try { __log("warn", "empty_catch", { rid: __tstsRidNow() }); } catch (_) {}
+  }
+  return res.status(404).send("Not found");
+});
+
+// HTTP_ERROR_MIDDLEWARE_TSTS (terminal position)
+app.use((err, req, res, next) => {
+  try {
+    const sent = Boolean(res && (res.headersSent === true));
+    if (sent) {
+      return next(err);
+    }
+
+    const rid = __ridFromReq(req);
+    const isProd = String(process.env.NODE_ENV || "").toLowerCase() === "production";
+    const msg = (err && err.message) ? String(err.message) : "server_error";
+    const name = (err && err.name) ? String(err.name) : undefined;
+    const stack = (isProd === true) ? undefined : ((err && err.stack) ? String(err.stack) : undefined);
+
+    __log("error", "http_error", {
+      rid: rid,
+      path: (req && req.originalUrl) ? String(req.originalUrl) : undefined,
+      method: (req && req.method) ? String(req.method) : undefined,
+      status: 500,
+      errorName: name,
+      errorMessage: msg,
+      errorStack: stack
+    });
+
+    return res.status(500).json({ ok: false, error: "SERVER_ERROR", code: "SERVER_ERROR", message: "Server error", rid: rid });
+  } catch (_) {
+    return res.status(500).json({ ok: false, error: "SERVER_ERROR", code: "SERVER_ERROR", message: "Server error" });
+  }
+});
+
 
   if (__httpServerStarted) return;
   __httpServerStarted = true;
@@ -9228,5 +9724,3 @@ async function transitionBooking(booking, nextStatus, meta = {}) {
 
   return booking;
 }
-
-
