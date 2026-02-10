@@ -6022,7 +6022,16 @@ app.get("/api/experiences", async (req, res) => {
 
     const qTok = __safeTok(q, 80);
 
-    if (category && CATEGORY_PILLARS.includes(category)) query.tags = { $in: [category] };
+    const categoriesRaw = Array.isArray(category) ? category : [category];
+    const categories = Array.from(
+      new Set(
+        categoriesRaw
+          .flatMap((v) => String(v || "").split(","))
+          .map((v) => v.trim())
+          .filter((v) => CATEGORY_PILLARS.includes(v))
+      )
+    );
+    if (categories.length > 0) query.tags = { $in: categories };
 
     const hostTok = __cleanId(hostId, 64);
     if (hostTok) {
